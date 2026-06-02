@@ -1,0 +1,6 @@
+{
+    "clangd.arguments": [
+        "--compile-commands-dir=c:/Projetos/TCC/.cache/clangd",
+        "--query-driver=C:/Users/marco/.platformio/packages/toolchain-*/bin/*,C:/Users/marco/.platformio/packages/tool-*/bin/*"
+    ]
+}
