@@ -78,3 +78,34 @@ e a orquestração/rotulagem dos 3 cenários nomeados pelo guia.
   esse change ainda estiver com limiares não calibrados, o Cenário C não
   vai mostrar "self-healing" de forma convincente; a ordem de dependência
   do `project.md` já reflete isso (`scenario-automation` por último).
+
+## Referências externas (auditoria do projeto IC, 2026-09-02)
+
+O artigo do projeto de IC que originou o TCC (`Artigo/conference_101719.tex`
+em `github.com/Seijin18/IC`) descreve um protocolo de medição relevante
+para a orquestração deste change, sem contradizer as decisões já tomadas:
+
+- **Captura contínua com múltiplos ciclos liga/desliga do jammer dentro da
+  mesma sessão**, em vez de uma captura por condição: o experimento de
+  jamming do IC ligou/desligou o jammer 3 vezes dentro de uma única
+  gravação de 60 s, permitindo comparar diretamente jammer-on vs.
+  jammer-off sem variação de ambiente entre gravações separadas. Vale
+  considerar o mesmo padrão dentro do Cenário C (`dynamic-seed-blacklist`
+  em ação): ao invés de um único ciclo ataque→mitigação, orquestrar 2-3
+  ciclos de ataque dentro da mesma janela de captura do Cenário C reforça
+  estatisticamente a evidência de "self-healing" (task 4.2 deste change) e
+  segue o mesmo protocolo já usado para validar `dynamic-seed-blacklist`
+  (task 4.4 lá). Não é uma mudança de escopo, é um refinamento de como a
+  task 3.1 (orquestração) implementa a janela do Cenário C — decisão final
+  fica para a implementação.
+- **Protocolo de baseline antes de cada condição**: o IC roda 60 s de
+  baseline sem nenhum dispositivo/ataque ativo antes de cada captura por
+  dispositivo, para caracterizar o piso de ruído daquela sessão. Sugestão
+  para a task 3.1: gravar um trecho curto de baseline (jammer off, hopping
+  normal) no início de cada execução completa dos 3 cenários, não só
+  confiar no Cenário A como baseline (o Cenário A já tem jammer ativo desde
+  o início, não serve como piso de ruído do ambiente).
+
+Nenhuma dessas referências exige mudança nas `Decisions` já registradas
+acima; são sugestões de refinamento para a task 3.1 (orquestração) a
+considerar na implementação, não pré-requisitos.

@@ -72,3 +72,50 @@ interrupção de hardware ou barramento serial" como opção.
   (não escala para um deployment real), mas é a opção mais barata e
   determinística para o escopo do TCC, e é a que o guia sugere
   explicitamente.
+
+## Referências externas (auditoria do projeto IC, 2026-09-02)
+
+O projeto de IC que serviu de base para o TCC (`github.com/Seijin18/IC`,
+pasta `RFmodule/`) foi atualizado após o início do TCC e publicou um artigo
+(`Artigo/conference_101719.tex`) com dados empíricos de detecção de jamming
+usando o mesmo hardware (ESP32 + NRF24L01). Achados relevantes para a
+calibração deste change (tasks 3.1-3.3), sem exigir mudança de design:
+
+- **Métrica "accumulated channel energy"**: soma das ocupações (%) de todos
+  os canais de uma sub-banda em uma varredura, em unidades arbitrárias
+  (u.a.) — equivalente em espírito a somar em vez de tirar média de
+  `channelData[c]` sobre `HOPPING_CHANNELS`. O artigo reporta, para a banda
+  Bluetooth (79 canais), energia acumulada média de ~40 u.a. com jammer
+  desligado vs. ~605 u.a. com jammer ligado (jammer sweep contínuo,
+  ~15× de separação) — ordem de grandeza útil como ponto de partida ao
+  calibrar `LIMIAR_ALVO`/`LIMIAR_CONCENTRACAO`, embora os valores exatos não
+  sejam diretamente portáveis (banda diferente: 16 canais do hopping vs. 79
+  do Bluetooth; jammer sweep vs. `targeted-jammer` mirando só os 16 canais).
+- **Latência de detecção referência**: com ~2 varreduras/s (analisador do
+  IC, 126 canais, 30 amostras/canal), o artigo reporta detecção visual do
+  início/fim do jamming com latência < 500 ms. O `analisador` do TCC varre
+  mais rápido em `FAST_BT_SCAN` (79 canais, 10 amostras/canal) — útil como
+  referência ao escolher `ATTACK_STREAK_N` em função do ciclo real medido
+  em bancada, não como valor a copiar.
+- **Distinção qualitativa validada empiricamente**: o artigo confirma
+  visualmente (heatmap) que dispositivos legítimos (fone, mouse, microondas)
+  produzem "bandas" estáveis/coerentes no tempo, enquanto o jammer produz
+  pontos de saturação dispersos sem banda estável — mesma premissa por trás
+  da condição `alvo_avg - fora_avg >= LIMIAR_CONCENTRACAO` já decidida aqui;
+  não muda a decisão, apenas corrobora com dado real de outro hardware
+  idêntico.
+- **Resolução de amostragem**: IC usa `SCAN_SAMPLES=30` por canal (resolução
+  de ocupação ~3.3%) contra `SCAN_SAMPLES=10` do `analisador` do TCC
+  (resolução ~10%, trade-off deliberado por velocidade de ciclo). Não é uma
+  lacuna a corrigir agora, mas vale registrar como parâmetro a revisitar se
+  a calibração dos limiares (tasks 3.1-3.3) mostrar que a resolução de 10%
+  está mascarando a distinção `alvo_avg`/`fora_avg` na prática.
+- **Limitação compartilhada**: o RPD do NRF24L01 é um indicador binário de
+  limiar (~-64 dBm), não uma leitura calibrada em dBm — limitação que o
+  artigo do IC documenta explicitamente e que também vale para o
+  `analisador` do TCC; relevante para a seção de limitações da monografia,
+  não para o código.
+
+Nenhuma dessas referências altera as decisões já tomadas neste `design.md`;
+servem como material de apoio para a calibração empírica (tasks 3.1-3.3) e,
+opcionalmente, como citação na monografia do TCC.

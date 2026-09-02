@@ -97,3 +97,36 @@ por lacuna, para poder arquivar cada um ao fechar a fase correspondente:
 Ordem recomendada de execução: `plr-metric` e `targeted-jammer` em paralelo
 → `spectrum-attack-classification` → `dynamic-seed-blacklist` →
 `scenario-automation`.
+
+## Auditoria do projeto de IC de referência (2026-09-02)
+
+O TCC partiu do projeto de IC `github.com/Seijin18/IC` (pasta `RFmodule/`,
+firmware `espReceiver.ino` + `tools/spectrum/main.py` deste repo derivam
+dele — ver comentário em `analisador/src/main.cpp:5`). Esse projeto de IC
+continuou evoluindo depois que o TCC divergiu e hoje inclui um artigo
+publicado (`Artigo/conference_101719.tex`) com dados empíricos de detecção
+de jamming no mesmo hardware, além de uma refatoração de precisão de
+timing. Auditoria feita clonando o repo e comparando com o estado atual
+deste projeto; achados:
+
+- **Refatoração de timing (ESP32 `millis()` → Python `time.perf_counter()`
+  no recebimento serial)**: já presente neste projeto de forma equivalente
+  (`analisador/src/main.cpp` não envia timestamp;
+  `tools/spectrum/main.py:198` já usa `time.perf_counter()`) — nenhuma ação
+  necessária, os dois projetos convergiram nessa solução independentemente.
+- **Metodologia de calibração de detecção de jamming** (métrica de energia
+  acumulada por sub-banda, latência de detecção alcançada, protocolo de
+  captura contínua com múltiplos ciclos liga/desliga) — documentada como
+  referência nos `design.md` de
+  [`spectrum-attack-classification`](changes/spectrum-attack-classification/design.md)
+  e [`scenario-automation`](changes/scenario-automation/design.md), a
+  considerar na calibração empírica (tasks 3.x) e na orquestração (task
+  3.1) desses changes quando forem implementados — não altera nenhuma
+  decisão de design já tomada.
+- **Sem novidade nos demais changes**: `plr-metric`, `targeted-jammer` e
+  `dynamic-seed-blacklist` cobrem a Fase 1/2/4, que não têm equivalente no
+  projeto de IC (ele só faz varredura de espectro passiva/GUI, não
+  implementa o par mestre/escravo com FHSS nem jamming targeted) — nada a
+  incorporar deles nesses três changes.
+- Nenhum código foi alterado por esta auditoria, só os `design.md` acima e
+  esta seção.
