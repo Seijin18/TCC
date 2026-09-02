@@ -1,26 +1,26 @@
 ## 1. Contadores de janela no escravo
 
-- [ ] 1.1 Adicionar estado global (`g_window_expected`, `g_window_received`,
+- [x] 1.1 Adicionar estado global (`g_window_expected`, `g_window_received`,
       `g_session_expected`, `g_session_received`, `g_window_size = 50`) em
       `escravo/src/main.cpp`, resetado quando uma nova sessão de hopping
       começa (seed nova aceita).
-- [ ] 1.2 No loop de hopping do escravo, ao avançar de hop
+- [x] 1.2 No loop de hopping do escravo, ao avançar de hop
       (`HOP_INTERVAL_MS` decorrido), incrementar `g_window_expected` e
       `g_session_expected` incondicionalmente.
-- [ ] 1.3 Ao receber um `FragmentPacket` válido dentro do hop atual,
+- [x] 1.3 Ao receber um `FragmentPacket` válido dentro do hop atual,
       incrementar `g_window_received` e `g_session_received` (uma vez por
       hop, não por retransmissão).
 
 ## 2. Cálculo e log de PLR
 
-- [ ] 2.1 Ao fechar uma janela (`g_window_expected >= g_window_size`),
+- [x] 2.1 Ao fechar uma janela (`g_window_expected >= g_window_size`),
       calcular `plr_window` e `plr_session`, emitir linha de log serial no
       formato definido no spec (ex.:
       `PLR;t_ms=<millis>;window=<pct>;session=<pct>;recv=<n>;exp=<n>`), e
       resetar os contadores de janela (mantendo os de sessão).
-- [ ] 2.2 Garantir que nenhuma linha de PLR seja emitida antes do handshake
+- [x] 2.2 Garantir que nenhuma linha de PLR seja emitida antes do handshake
       de seed completar (guard na função de log).
-- [ ] 2.3 Tratar divisão por zero / janela vazia sem travar o loop.
+- [x] 2.3 Tratar divisão por zero / janela vazia sem travar o loop.
 
 ## 3. Validação manual
 

@@ -102,6 +102,36 @@ const uint32_t HOP_INTERVAL_MS = 220;
 uint16_t g_seed = 0;
 bool g_seed_initialized = false;
 
+// ---- Métricas de PLR (Packet Loss Rate) ----
+const uint32_t g_window_size = 50; // hops por janela (~11s a 220ms/hop)
+uint32_t g_window_expected = 0;
+uint32_t g_window_received = 0;
+uint32_t g_session_expected = 0;
+uint32_t g_session_received = 0;
+bool g_hop_received_flag = false; // já contabilizou recepção do hop atual?
+
+void reset_plr_counters()
+{
+    g_window_expected = 0;
+    g_window_received = 0;
+    g_session_expected = 0;
+    g_session_received = 0;
+    g_hop_received_flag = false;
+}
+
+void log_plr_window()
+{
+    float plr_window = (g_window_expected > 0)
+                            ? 100.0f * (1.0f - ((float)g_window_received / (float)g_window_expected))
+                            : 0.0f;
+    float plr_session = (g_session_expected > 0)
+                             ? 100.0f * (1.0f - ((float)g_session_received / (float)g_session_expected))
+                             : 0.0f;
+
+    Serial.printf("PLR;t_ms=%lu;window=%.1f;session=%.1f;recv=%u;exp=%u\n",
+                  millis(), plr_window, plr_session, g_window_received, g_window_expected);
+}
+
 void reset_message_state(uint16_t msg_id, uint8_t total_fragments)
 {
     memset(assembled_message, 0, sizeof(assembled_message));
@@ -247,7 +277,8 @@ void loop()
                 radio.read(&seed_pkt, sizeof(seed_pkt));
                 g_seed = seed_pkt.seed;
                 g_seed_initialized = true;
-                
+                reset_plr_counters();
+
                 Serial.printf("[ESCRAVO] Seed recebida: %u\n", g_seed);
                 
                 // Enviar confirmação de seed
@@ -279,6 +310,25 @@ void loop()
     if (millis() - last_hop_time >= HOP_INTERVAL_MS)
     {
         last_hop_time = millis();
+
+        // Fecha a contagem do hop que está terminando: sempre esperado,
+        // recebido só se algum FragmentPacket válido chegou durante ele.
+        g_window_expected++;
+        g_session_expected++;
+        if (g_hop_received_flag)
+        {
+            g_window_received++;
+            g_session_received++;
+        }
+        g_hop_received_flag = false;
+
+        if (g_window_expected >= g_window_size)
+        {
+            log_plr_window();
+            g_window_expected = 0;
+            g_window_received = 0;
+        }
+
         current_channel = get_next_channel(g_seed, hop_counter);
         radio.setChannel(current_channel);
         hop_counter++;
@@ -298,6 +348,8 @@ void loop()
 
                 if (pkt.type == MSG_FRAGMENT && pkt.total_fragments > 0 && pkt.total_fragments <= MAX_FRAGMENTS)
                 {
+                    g_hop_received_flag = true;
+
                     if (current_msg_id != pkt.msg_id)
                     {
                         reset_message_state(pkt.msg_id, pkt.total_fragments);
