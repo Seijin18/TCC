@@ -66,4 +66,19 @@ O projeto foi organizado em 5 fases evolutivas para garantir marcos de entrega b
 - Levantamento de relatórios: Gráficos de Latência e Throughput documentados para a banca de avaliação da monografia.
 
 ---
-> *Consulte o diretório atual e o `Guia_Desenvolvimento_TCC_AntiJamming.md` para visualizar as tarefas ("To-Do") técnicas e check-lists diários.*
+
+## 🗂️ Rastreamento de progresso (OpenSpec)
+
+O `Guia_Desenvolvimento_TCC_AntiJamming.md` é o roadmap de alto nível (as 5
+fases) e não é atualizado dia a dia — seus checkboxes ficam como referência
+fixa do escopo original, não como status atual. O progresso real de
+implementação é rastreado em `openspec/`, onde cada lacuna das 5 fases virou
+um *change* (`openspec/changes/<slug>/`) com proposta, design, spec formal
+(requisitos + cenários) e uma lista de tarefas (`tasks.md`) marcada conforme
+o código é implementado e validado em bancada. Veja
+`openspec/project.md` para o estado atual e a ordem de dependência entre os
+changes.
+
+---
+> *Consulte o `Guia_Desenvolvimento_TCC_AntiJamming.md` para o escopo original
+> das 5 fases, e `openspec/changes/*/tasks.md` para o progresso técnico real.*

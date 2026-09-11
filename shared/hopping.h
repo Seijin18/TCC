@@ -1,7 +1,14 @@
 #ifndef HOPPING_H
 #define HOPPING_H
 
+// Nos firmwares (ESP32/Arduino) usa os typedefs de Arduino.h; no ambiente de
+// testes nativo (env:native_test, sem framework Arduino) cai para <cstdint>.
+// Nenhum outro recurso de Arduino.h é usado neste header.
+#ifdef ARDUINO
 #include <Arduino.h>
+#else
+#include <cstdint>
+#endif
 
 // -------------------------------------------------------------
 // FASE 1: Algoritmo de Hopping Inicial

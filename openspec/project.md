@@ -44,6 +44,14 @@ de implementação identificada dentro dessas fases.
   `jammer`, `analisador`, `validacao`, `test_jammer`) — ao adicionar código
   novo a um nó, confirmar que o environment correspondente aponta pra pasta
   certa antes de assumir que compila.
+- `env:native_test` builda no host (gcc, `platform = native`, sem
+  ESP32/Arduino/RF24) e roda testes unitários de lógica pura em `test/`
+  (framework Unity, bundled no PlatformIO). Cobre hoje `shared/hopping.h`
+  (`get_next_channel`/`get_hop_channel`). Rodar com `pio test -e
+  native_test`. Ao extrair nova lógica pura de um `main.cpp` (ex.: cálculo
+  de PLR, classificação de ataque) para um header compartilhado, adicionar
+  o teste correspondente aqui em vez de depender só da validação manual em
+  bancada.
 - Mensagens de commit e fluxo de trabalho seguem as instruções globais do
   usuário (commits locais automáticos ao fechar uma unidade coerente de
   trabalho; nunca `push`).
