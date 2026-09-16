@@ -38,7 +38,7 @@
 // mestre_set_alert_source() (ver two-board-topology). Ver docs/pinout.md.
 #define PIN_ALERT_IN 4
 
-static RF24 radio(PIN_CE, PIN_CSN);
+static RF24 mestre_radio(PIN_CE, PIN_CSN);
 
 static const byte masterAddress[6] = "MSTR1"; // Endereço deste dispositivo (mestre)
 static const byte slaveAddress[6] = "SLV01";  // Endereço do escravo
@@ -167,35 +167,35 @@ static bool send_seed_to_slave()
 {
     SeedPacket seed_pkt = {g_seed};
 
-    radio.setChannel(PAIRING_CHANNEL);
-    radio.stopListening();
-    bool sent = radio.write(&seed_pkt, sizeof(seed_pkt));
+    mestre_radio.setChannel(PAIRING_CHANNEL);
+    mestre_radio.stopListening();
+    bool sent = mestre_radio.write(&seed_pkt, sizeof(seed_pkt));
     if (!sent)
     {
         Serial.println("[MESTRE] Transmissão de seed falhou.");
-        radio.startListening();
+        mestre_radio.startListening();
         return false;
     }
 
     Serial.printf("[MESTRE] Seed %u transmitida. Aguardando confirmação...\n", g_seed);
 
-    radio.startListening();
+    mestre_radio.startListening();
     unsigned long start_wait = millis();
     while (millis() - start_wait < SEED_ACK_WAIT_MS)
     {
-        if (!radio.available())
+        if (!mestre_radio.available())
             continue;
 
-        uint8_t size = radio.getDynamicPayloadSize();
+        uint8_t size = mestre_radio.getDynamicPayloadSize();
         if (size != sizeof(SeedAckPacket))
         {
             uint8_t dump[32];
-            radio.read(dump, size);
+            mestre_radio.read(dump, size);
             continue;
         }
 
         SeedAckPacket ack;
-        radio.read(&ack, sizeof(ack));
+        mestre_radio.read(&ack, sizeof(ack));
         if (ack.type == MSG_SEED_ACK && ack.seed == g_seed)
         {
             Serial.printf("[MESTRE] Confirmação de seed recebida do escravo.\n");
@@ -211,33 +211,33 @@ static bool try_establish_link()
 {
     LinkPacket probe = {MSG_LINK_PROBE};
 
-    radio.setChannel(PAIRING_CHANNEL);
-    radio.stopListening();
-    bool sent = radio.write(&probe, sizeof(probe));
+    mestre_radio.setChannel(PAIRING_CHANNEL);
+    mestre_radio.stopListening();
+    bool sent = mestre_radio.write(&probe, sizeof(probe));
     if (!sent)
     {
         Serial.println("[MESTRE] Pareamento: sem resposta do escravo no canal fixo.");
-        radio.startListening();
+        mestre_radio.startListening();
         return false;
     }
 
-    radio.startListening();
+    mestre_radio.startListening();
     unsigned long start_wait = millis();
     while (millis() - start_wait < LINK_ACK_WAIT_MS)
     {
-        if (!radio.available())
+        if (!mestre_radio.available())
             continue;
 
-        uint8_t size = radio.getDynamicPayloadSize();
+        uint8_t size = mestre_radio.getDynamicPayloadSize();
         if (size != sizeof(LinkPacket))
         {
             uint8_t dump[32];
-            radio.read(dump, size);
+            mestre_radio.read(dump, size);
             continue;
         }
 
         LinkPacket ack;
-        radio.read(&ack, sizeof(ack));
+        mestre_radio.read(&ack, sizeof(ack));
         if (ack.type == MSG_LINK_ACK)
         {
             return true;
@@ -278,19 +278,19 @@ static bool wait_fragment_ack(uint8_t expected_fragment, bool &all_complete)
     unsigned long start_wait = millis();
     while (millis() - start_wait < ACK_TIMEOUT_MS)
     {
-        if (!radio.available())
+        if (!mestre_radio.available())
             continue;
 
-        uint8_t sz = radio.getDynamicPayloadSize();
+        uint8_t sz = mestre_radio.getDynamicPayloadSize();
         if (sz != sizeof(FragmentAck))
         {
             uint8_t dump[32];
-            radio.read(dump, sz);
+            mestre_radio.read(dump, sz);
             continue;
         }
 
         FragmentAck ack;
-        radio.read(&ack, sizeof(ack));
+        mestre_radio.read(&ack, sizeof(ack));
         if (ack.type == MSG_FRAGMENT_ACK && ack.msg_id == g_msg_id && ack.fragment_index == expected_fragment)
         {
             all_complete = (ack.complete != 0);
@@ -324,34 +324,34 @@ static void mestre_setup()
     SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CSN);
 
     // Inicializa o rádio
-    if (!radio.begin())
+    if (!mestre_radio.begin())
     {
         Serial.println(F("[ERRO MESTRE] Falha fatal! O Módulo NRF24 não respondeu no SPI. Verifique a fiação."));
     }
 
     // Configurações base do rádio
-    radio.setPALevel(RF24_PA_LOW);
-    radio.setDataRate(RF24_1MBPS);
-    radio.setChannel(PAIRING_CHANNEL);
+    mestre_radio.setPALevel(RF24_PA_LOW);
+    mestre_radio.setDataRate(RF24_1MBPS);
+    mestre_radio.setChannel(PAIRING_CHANNEL);
 
     // Habilita Dynamic Payloads e envio de payload no ACK
-    radio.enableDynamicPayloads();
-    radio.enableAckPayload();
+    mestre_radio.enableDynamicPayloads();
+    mestre_radio.enableAckPayload();
 
-    radio.setCRCLength(RF24_CRC_16);
-    radio.openWritingPipe(slaveAddress);
-    radio.openReadingPipe(1, masterAddress); // permite receber respostas do escravo
+    mestre_radio.setCRCLength(RF24_CRC_16);
+    mestre_radio.openWritingPipe(slaveAddress);
+    mestre_radio.openReadingPipe(1, masterAddress); // permite receber respostas do escravo
 
     // Limpa a memória de pacotes não enviados que ficaram presos antes do mestre reiniciar
-    radio.flush_tx();
+    mestre_radio.flush_tx();
 
     // O rádio envia e o hardware automaticamente espera o ACK
-    radio.setAutoAck(true);
+    mestre_radio.setAutoAck(true);
 
-    radio.stopListening(); // Modo de Transmissão (inicialmente)
+    mestre_radio.stopListening(); // Modo de Transmissão (inicialmente)
 
     Serial.println("\n--- STATUS DO RÁDIO MESTRE (REGISTRADORES) ---");
-    radio.printDetails();
+    mestre_radio.printDetails();
     Serial.println("----------------------------------------------\n");
 
     g_total_fragments = compute_total_fragments();
@@ -433,18 +433,18 @@ static void mestre_loop()
 
         uint8_t channel = get_next_channel(g_seed, g_hop_counter);
         g_current_channel = channel;
-        radio.setChannel(channel);
+        mestre_radio.setChannel(channel);
 
         FragmentPacket pkt;
         fill_fragment(pkt, g_current_fragment);
 
         // Envia fragmento no canal atual
-        radio.stopListening();
-        bool sent = radio.write(&pkt, sizeof(pkt));
+        mestre_radio.stopListening();
+        bool sent = mestre_radio.write(&pkt, sizeof(pkt));
         if (!sent)
         {
             Serial.printf("[MESTRE] Falha de envio no hop=%lu canal=%u frag=%u\n", g_hop_counter, g_current_channel, g_current_fragment);
-            radio.startListening();
+            mestre_radio.startListening();
             g_hop_counter++;
             return;
         }
@@ -457,7 +457,7 @@ static void mestre_loop()
                       pkt.payload_len);
 
         // Espera ACK do fragmento no mesmo hop/canal
-        radio.startListening();
+        mestre_radio.startListening();
         bool completed = false;
         bool ack_ok = wait_fragment_ack(g_current_fragment, completed);
         if (ack_ok)

@@ -33,7 +33,7 @@
 #define PIN_MISO 19
 #define PIN_MOSI 23
 
-static RF24 radio(PIN_CE, PIN_CSN);
+static RF24 escravo_radio(PIN_CE, PIN_CSN);
 
 static const byte masterAddress[6] = "MSTR1"; // Endereço do mestre
 static const byte myAddress[6] = "SLV01";     // Endereço deste escravo
@@ -174,43 +174,43 @@ static void escravo_setup()
     SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CSN);
 
     // Inicializa o rádio
-    if (!radio.begin())
+    if (!escravo_radio.begin())
     {
         Serial.println(F("[ERRO ESCRAVO] Falha fatal! O Módulo NRF24 não respondeu no SPI. Verifique a fiação."));
     }
 
     // Configurações base para bater com o transmissor
-    radio.setPALevel(RF24_PA_LOW);
-    radio.setDataRate(RF24_1MBPS);
-    radio.setChannel(PAIRING_CHANNEL);
+    escravo_radio.setPALevel(RF24_PA_LOW);
+    escravo_radio.setDataRate(RF24_1MBPS);
+    escravo_radio.setChannel(PAIRING_CHANNEL);
 
     // Obrigatório para AckPayload funcionar, precisamos de tamanhos dinâmicos habilitados
-    radio.enableDynamicPayloads();
-    radio.enableAckPayload();
+    escravo_radio.enableDynamicPayloads();
+    escravo_radio.enableAckPayload();
 
-    radio.setCRCLength(RF24_CRC_16);
+    escravo_radio.setCRCLength(RF24_CRC_16);
 
     // Abre APENAS o pipe 1. Fecha o Pipe 0, que é usado primariamente por transmissores.
     // Isso evita captar lixo do ar que pinga no pipe padrão da biblioteca (gerando Pipe 0 ou 7).
-    radio.closeReadingPipe(0);
+    escravo_radio.closeReadingPipe(0);
 
     // Limpa qualquer lixo que tenha ficado preso na memória da antena de testes anteriores
-    radio.flush_rx();
+    escravo_radio.flush_rx();
 
     // Auto ACK para ele responder o transmissor (Habilitado por default, mas é bom reforçar)
-    radio.setAutoAck(true);
+    escravo_radio.setAutoAck(true);
 
     // Abre pipe de leitura para receber do mestre e configura pipe de escrita para responder
-    radio.openReadingPipe(1, myAddress); // Inicia modo de escuta
-    radio.openWritingPipe(masterAddress);
-    radio.startListening();
+    escravo_radio.openReadingPipe(1, myAddress); // Inicia modo de escuta
+    escravo_radio.openWritingPipe(masterAddress);
+    escravo_radio.startListening();
 
     // Limpa a memória pra garantir inicialização fria limpa
-    radio.flush_rx();
-    radio.flush_tx();
+    escravo_radio.flush_rx();
+    escravo_radio.flush_tx();
 
     Serial.println("\n--- STATUS DO RÁDIO ESCRAVO (REGISTRADORES) ---");
-    radio.printDetails();
+    escravo_radio.printDetails();
     Serial.println("-----------------------------------------------\n");
 
     Serial.printf("[ESCRAVO] Aguardando pareamento no canal fixo %u...\n", PAIRING_CHANNEL);
@@ -228,22 +228,22 @@ static void escravo_loop()
 
     if (!link_established)
     {
-        radio.setChannel(PAIRING_CHANNEL);
+        escravo_radio.setChannel(PAIRING_CHANNEL);
 
         uint8_t pipe;
-        if (radio.available(&pipe))
+        if (escravo_radio.available(&pipe))
         {
-            uint8_t size = radio.getDynamicPayloadSize();
+            uint8_t size = escravo_radio.getDynamicPayloadSize();
             if (size == sizeof(LinkPacket))
             {
                 LinkPacket p;
-                radio.read(&p, sizeof(p));
+                escravo_radio.read(&p, sizeof(p));
                 if (p.type == MSG_LINK_PROBE)
                 {
                     LinkPacket ack = {MSG_LINK_ACK};
-                    radio.stopListening();
-                    bool wrote = radio.write(&ack, sizeof(ack));
-                    radio.startListening();
+                    escravo_radio.stopListening();
+                    bool wrote = escravo_radio.write(&ack, sizeof(ack));
+                    escravo_radio.startListening();
 
                     if (wrote)
                     {
@@ -258,7 +258,7 @@ static void escravo_loop()
             else
             {
                 uint8_t dump[32];
-                radio.read(dump, size);
+                escravo_radio.read(dump, size);
             }
         }
 
@@ -268,16 +268,16 @@ static void escravo_loop()
     // Se o link foi estabelecido mas a seed ainda não foi recebida
     if (!g_seed_initialized)
     {
-        radio.setChannel(PAIRING_CHANNEL);
+        escravo_radio.setChannel(PAIRING_CHANNEL);
 
         uint8_t pipe;
-        if (radio.available(&pipe))
+        if (escravo_radio.available(&pipe))
         {
-            uint8_t size = radio.getDynamicPayloadSize();
+            uint8_t size = escravo_radio.getDynamicPayloadSize();
             if (size == sizeof(SeedPacket))
             {
                 SeedPacket seed_pkt;
-                radio.read(&seed_pkt, sizeof(seed_pkt));
+                escravo_radio.read(&seed_pkt, sizeof(seed_pkt));
                 g_seed = seed_pkt.seed;
                 g_seed_initialized = true;
                 reset_plr_counters();
@@ -286,9 +286,9 @@ static void escravo_loop()
 
                 // Enviar confirmação de seed
                 SeedAckPacket seed_ack = {MSG_SEED_ACK, g_seed};
-                radio.stopListening();
-                bool wrote = radio.write(&seed_ack, sizeof(seed_ack));
-                radio.startListening();
+                escravo_radio.stopListening();
+                bool wrote = escravo_radio.write(&seed_ack, sizeof(seed_ack));
+                escravo_radio.startListening();
 
                 if (wrote)
                 {
@@ -300,7 +300,7 @@ static void escravo_loop()
             else
             {
                 uint8_t dump[32];
-                radio.read(dump, size);
+                escravo_radio.read(dump, size);
             }
         }
 
@@ -333,21 +333,21 @@ static void escravo_loop()
         }
 
         current_channel = get_next_channel(g_seed, hop_counter);
-        radio.setChannel(current_channel);
+        escravo_radio.setChannel(current_channel);
         hop_counter++;
     }
 
     // Se recebeu um dado no canal atual
     uint8_t current_pipe;
-    if (radio.available(&current_pipe))
+    if (escravo_radio.available(&current_pipe))
     {
         if (current_pipe == 1)
         {
-            uint8_t dt_size = radio.getDynamicPayloadSize();
+            uint8_t dt_size = escravo_radio.getDynamicPayloadSize();
             if (dt_size == sizeof(FragmentPacket))
             {
                 FragmentPacket pkt;
-                radio.read(&pkt, sizeof(pkt));
+                escravo_radio.read(&pkt, sizeof(pkt));
 
                 if (pkt.type == MSG_FRAGMENT && pkt.total_fragments > 0 && pkt.total_fragments <= MAX_FRAGMENTS)
                 {
@@ -393,13 +393,13 @@ static void escravo_loop()
                     ack.fragment_index = pkt.fragment_index;
                     ack.complete = complete ? 1 : 0;
 
-                    radio.stopListening();
-                    bool wrote = radio.write(&ack, sizeof(ack));
+                    escravo_radio.stopListening();
+                    bool wrote = escravo_radio.write(&ack, sizeof(ack));
                     if (wrote)
                         Serial.printf("[ESCRAVO] ACK frag=%u enviado (complete=%u)\n", ack.fragment_index + 1, ack.complete);
                     else
                         Serial.println("[ESCRAVO] Falha ao enviar ACK do fragmento");
-                    radio.startListening();
+                    escravo_radio.startListening();
 
                     if (complete)
                     {
@@ -420,7 +420,7 @@ static void escravo_loop()
             {
                 // descarta payloads inesperados
                 uint8_t dump[32];
-                radio.read(dump, dt_size);
+                escravo_radio.read(dump, dt_size);
                 Serial.printf("[ESCRAVO] Payload inesperado recebido (%d bytes), descartado.\n", dt_size);
             }
         }
@@ -428,7 +428,7 @@ static void escravo_loop()
         {
             // Descarta completamente pacotes que caírem nos pipes errados
             uint32_t dump_buffer;
-            radio.read(&dump_buffer, sizeof(dump_buffer));
+            escravo_radio.read(&dump_buffer, sizeof(dump_buffer));
         }
     }
 }

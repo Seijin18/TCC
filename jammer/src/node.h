@@ -37,8 +37,8 @@
 static SPIClass vspi(VSPI);
 static SPIClass hspi(HSPI);
 
-static RF24 radio(PIN_CE_VSPI, PIN_CSN_VSPI);
-static RF24 radio2(PIN_CE_HSPI, PIN_CSN_HSPI);
+static RF24 jammer_radio(PIN_CE_VSPI, PIN_CSN_VSPI);
+static RF24 jammer_radio2(PIN_CE_HSPI, PIN_CSN_HSPI);
 
 static bool has_radio2 = false;
 
@@ -155,22 +155,22 @@ static void jammer_setup()
     vspi.begin(PIN_SCK_VSPI, PIN_MISO_VSPI, PIN_MOSI_VSPI, PIN_CSN_VSPI);
     hspi.begin(PIN_SCK_HSPI, PIN_MISO_HSPI, PIN_MOSI_HSPI, PIN_CSN_HSPI);
 
-    radio.begin(&vspi, PIN_CE_VSPI, PIN_CSN_VSPI);
-    radio2.begin(&hspi, PIN_CE_HSPI, PIN_CSN_HSPI);
-    has_radio2 = radio2.isChipConnected();
+    jammer_radio.begin(&vspi, PIN_CE_VSPI, PIN_CSN_VSPI);
+    jammer_radio2.begin(&hspi, PIN_CE_HSPI, PIN_CSN_HSPI);
+    has_radio2 = jammer_radio2.isChipConnected();
 
-    if (!radio.isChipConnected())
+    if (!jammer_radio.isChipConnected())
     {
         Serial.println("[ERRO] Radio 1 (VSPI) nao detectado. Verifique fiação e 3.3V.");
     }
 
-    configureJammerRadio(radio);
-    startCarrierOn(radio, BT_CH_MIN);
+    configureJammerRadio(jammer_radio);
+    startCarrierOn(jammer_radio, BT_CH_MIN);
 
     if (has_radio2)
     {
-        configureJammerRadio(radio2);
-        startCarrierOn(radio2, BT_CH_MAX);
+        configureJammerRadio(jammer_radio2);
+        startCarrierOn(jammer_radio2, BT_CH_MAX);
         Serial.println("[OK] 2 radios: faixa dividida (2–41 e 41–80 MHz)");
     }
     else
@@ -189,8 +189,8 @@ static void loopSweep()
     if (has_radio2)
     {
         // Radio 1: metade inferior | Radio 2: metade superior (cobertura paralela)
-        hopCarrier(radio, ch_fwd);
-        hopCarrier(radio2, ch_rev);
+        hopCarrier(jammer_radio, ch_fwd);
+        hopCarrier(jammer_radio2, ch_rev);
 
         ch_fwd++;
         if (ch_fwd > BT_CH_MID)
@@ -203,7 +203,7 @@ static void loopSweep()
     }
     else
     {
-        hopCarrier(radio, ch_fwd);
+        hopCarrier(jammer_radio, ch_fwd);
 
         ch_fwd++;
         if (ch_fwd > BT_CH_MAX)
@@ -221,14 +221,14 @@ static void loopTargeted()
 
     const uint8_t fwd_limit = has_radio2 ? (TABLE_SIZE / 2) : TABLE_SIZE;
 
-    hopCarrier(radio, HOPPING_CHANNELS[idx_fwd]);
+    hopCarrier(jammer_radio, HOPPING_CHANNELS[idx_fwd]);
     idx_fwd++;
     if (idx_fwd >= fwd_limit)
         idx_fwd = 0;
 
     if (has_radio2)
     {
-        hopCarrier(radio2, HOPPING_CHANNELS[idx_rev]);
+        hopCarrier(jammer_radio2, HOPPING_CHANNELS[idx_rev]);
         if (idx_rev <= fwd_limit)
             idx_rev = TABLE_SIZE - 1;
         else

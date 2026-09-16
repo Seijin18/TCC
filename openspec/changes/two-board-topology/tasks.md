@@ -27,9 +27,9 @@
 
 ## 3. Placa A (mestre + analisador)
 
-- [ ] 3.1 Criar `placa_a/src/shared_state.h` com `volatile bool
+- [x] 3.1 Criar `placa_a/src/shared_state.h` com `volatile bool
       g_alert_shared` e funções de acesso simples (`set`/`get`).
-- [ ] 3.2 Criar `placa_a/src/main.cpp`: incluir
+- [x] 3.2 Criar `placa_a/src/main.cpp`: incluir
       `../../mestre/src/node.h` e `../../analisador/src/node.h`; no
       `setup()`, chamar `mestre_setup()`, registrar
       `mestre_set_alert_source`/`analisador_set_alert_sink` apontando para
@@ -38,24 +38,24 @@
       stack ~8192 bytes, prioridade `tskIDLE_PRIORITY + 1`) rodando
       `analisador_setup()` uma vez seguido de `for(;;) { analisador_loop();
       vTaskDelay(1); }`.
-- [ ] 3.3 `loop()` de `placa_a/src/main.cpp` chama `mestre_loop()`
+- [x] 3.3 `loop()` de `placa_a/src/main.cpp` chama `mestre_loop()`
       (nó primário no `loop()` padrão do Arduino).
-- [ ] 3.4 Adicionar `[env:placa_a]` a `platformio.ini`
+- [x] 3.4 Adicionar `[env:placa_a]` a `platformio.ini`
       (`build_src_filter = -<*> +<placa_a/src/>`, `extends =
       esp32_common`).
 
 ## 4. Placa B (escravo + jammer)
 
-- [ ] 4.1 Criar `placa_b/src/main.cpp`: incluir
+- [x] 4.1 Criar `placa_b/src/main.cpp`: incluir
       `../../escravo/src/node.h` e `../../jammer/src/node.h`; no
       `setup()`, chamar `escravo_setup()` e criar a task do jammer via
       `xTaskCreatePinnedToCore` (mesmo padrão de stack/prioridade da
       seção 3), rodando `jammer_setup()` seguido de `for(;;) {
       jammer_loop(); vTaskDelay(1); }`.
-- [ ] 4.2 `loop()` de `placa_b/src/main.cpp` chama `escravo_loop()`
+- [x] 4.2 `loop()` de `placa_b/src/main.cpp` chama `escravo_loop()`
       (nó primário no `loop()` padrão do Arduino).
-- [ ] 4.3 Adicionar `[env:placa_b]` a `platformio.ini`.
-- [ ] 4.4 `pio run -e placa_a -e placa_b` compila sem erros.
+- [x] 4.3 Adicionar `[env:placa_b]` a `platformio.ini`.
+- [x] 4.4 `pio run -e placa_a -e placa_b` compila sem erros.
 
 ## 5. Documentação
 

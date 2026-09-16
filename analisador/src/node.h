@@ -64,7 +64,7 @@ static const int NUM_CHANNELS = 126;
 static const int SCAN_SAMPLES = 10;
 static const int PLL_DWELL_US = 130;
 
-static RF24 radio(PIN_CE, PIN_CSN);
+static RF24 analisador_radio(PIN_CE, PIN_CSN);
 static int channelData[NUM_CHANNELS];
 
 static uint8_t g_attack_streak = 0;
@@ -99,17 +99,17 @@ static void configureReceiver(RF24 &r)
 
 static int measureChannel(uint8_t ch)
 {
-    radio.setChannel(ch);
+    analisador_radio.setChannel(ch);
     delayMicroseconds(PLL_DWELL_US);
 
     int hits = 0;
     for (int s = 0; s < SCAN_SAMPLES; s++)
     {
-        radio.startListening();
+        analisador_radio.startListening();
         delayMicroseconds(PLL_DWELL_US);
-        if (radio.testCarrier())
+        if (analisador_radio.testCarrier())
             hits++;
-        radio.stopListening();
+        analisador_radio.stopListening();
     }
 
     return (hits * 100) / SCAN_SAMPLES;
@@ -219,7 +219,7 @@ static void analisador_setup()
     bool radioOK = false;
     for (int attempt = 1; attempt <= 5; attempt++)
     {
-        if (radio.begin())
+        if (analisador_radio.begin())
         {
             radioOK = true;
             break;
@@ -228,7 +228,7 @@ static void analisador_setup()
         delay(500);
     }
 
-    if (!radioOK || !radio.isChipConnected())
+    if (!radioOK || !analisador_radio.isChipConnected())
     {
         while (true)
         {
@@ -237,7 +237,7 @@ static void analisador_setup()
         }
     }
 
-    configureReceiver(radio);
+    configureReceiver(analisador_radio);
 
 #if FAST_BT_SCAN
     Serial.printf("Modo: FAST_BT_SCAN (ch %d–%d, 2402–2480 MHz)\n", BT_CH_MIN, BT_CH_MAX);
