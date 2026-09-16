@@ -61,19 +61,24 @@ interrupção de hardware ou barramento serial" como opção.
   (definir em `tasks.md` observando os pinos já ocupados pelo NRF24 em
   cada `main.cpp`), com GND comum entre as duas placas (requisito de
   hardware, não só de software).
-- **Desvio documentado para hardware limitado (2 placas em vez de 4)**: o
-  arranjo acima assume mestre e analisador em placas separadas. Em
-  `docs/pinout.md` há um arranjo alternativo (para quem só tem 2 ESP32 e 4
-  módulos NRF24) que coloca mestre e analisador na mesma placa, cada um com
-  seu módulo em um barramento SPI diferente (VSPI/HSPI). Nesse arranjo o
-  alerta deixa de precisar do GPIO físico entre placas — vira leitura direta
-  de uma variável/flag compartilhada entre duas tasks FreeRTOS na mesma
-  placa (uma por núcleo). Isso resolve a limitação de hardware, mas
-  reintroduz outras (ver "Implicações" em `docs/pinout.md`): risco de
-  saturação do receptor do analisador pela proximidade extrema com a antena
-  do próprio mestre, e risco de o escalonamento entre as duas tasks atrasar
-  o timing do mestre e distorcer a medição de PLR — nenhum dos dois riscos
-  existe no arranjo de referência com placas fisicamente separadas.
+- **Desvio para hardware limitado (2 placas em vez de 4)**: o arranjo acima
+  (GPIO 4↔GPIO 4 entre duas placas) é o que `PIN_ALERT`/`PIN_ALERT_IN`
+  implementam por padrão em `analisador/src/node.h`/`mestre/src/node.h`, e
+  continua sendo o comportamento dos environments standalone
+  (`env:analisador`/`env:mestre`). Para quem só tem 2 ESP32 (bancada real
+  deste TCC), `docs/pinout.md` documenta mestre e analisador na mesma placa
+  (Placa A, VSPI/HSPI), e o change `two-board-topology`
+  (`openspec/changes/two-board-topology/`) implementa esse arranjo: o
+  alerta deixa de usar o GPIO físico e vira uma flag compartilhada
+  (`placa_a/src/shared_state.h`) entre a task do mestre (`loop()` padrão,
+  core 1) e a task do analisador (core 0) — via os callbacks opcionais
+  `mestre_set_alert_source`/`analisador_set_alert_sink`, registrados só no
+  `env:placa_a`. Isso resolve a limitação de hardware, mas reintroduz outras
+  (ver "Implicações" em `docs/pinout.md`): risco de saturação do receptor do
+  analisador pela proximidade extrema com a antena do próprio mestre, e
+  risco de o escalonamento entre as duas tasks atrasar o timing do mestre e
+  distorcer a medição de PLR — nenhum dos dois riscos existe no arranjo de
+  referência com placas fisicamente separadas.
 
 ## Risks / Trade-offs
 

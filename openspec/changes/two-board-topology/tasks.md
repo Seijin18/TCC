@@ -59,13 +59,13 @@
 
 ## 5. Documentação
 
-- [ ] 5.1 Atualizar `docs/pinout.md` (seção "Cenário alternativo: 2
+- [x] 5.1 Atualizar `docs/pinout.md` (seção "Cenário alternativo: 2
       placas") para apontar para `env:placa_a`/`env:placa_b` como a
       implementação real, removendo a nota de "ainda não implementado".
-- [ ] 5.2 Atualizar `openspec/changes/spectrum-attack-classification/design.md`
+- [x] 5.2 Atualizar `openspec/changes/spectrum-attack-classification/design.md`
       (nota de desvio) para referenciar este change como a implementação
       do cenário de 2 placas, em vez de só descrevê-lo como hipotético.
-- [ ] 5.3 Atualizar `README.md` (seção de hardware) mencionando a opção de
+- [x] 5.3 Atualizar `README.md` (seção de hardware) mencionando a opção de
       2 placas com link para `docs/pinout.md`.
 
 ## 6. Validação manual em bancada

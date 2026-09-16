@@ -78,10 +78,14 @@ O agrupamento não é arbitrário — segue a relação funcional entre os nós:
   mais exigente para o link (atacante próximo da vítima), não um
   compromisso de realismo.
 
-Cada nó combinado precisa rodar em sua própria task FreeRTOS (uma por
-núcleo), já que cada `main.cpp` atual assume que é o único ocupante do
-`loop()` — isto ainda não está implementado, é o firmware combinado a ser
-escrito para usar este pinout.
+Cada nó combinado roda em sua própria task FreeRTOS (uma por núcleo), já
+que cada `main.cpp` original assume que é o único ocupante do `loop()`.
+Implementado em `openspec/changes/two-board-topology/`: `placa_a/src/main.cpp`
+(mestre no `loop()` padrão/core 1, analisador como task no core 0) e
+`placa_b/src/main.cpp` (escravo no `loop()` padrão/core 1, jammer como task
+no core 0), reaproveitando a lógica de cada nó original via
+`<node>/src/node.h` sem duplicá-la (ver `[env:placa_a]`/`[env:placa_b]` em
+`platformio.ini`).
 
 ### Placa A — mestre + analisador
 

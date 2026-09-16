@@ -29,6 +29,8 @@ Para montar o cenário completo do projeto, você necessitará de:
 - Protoboards, Jumpers e cabos USB de dados.
 - **1x** fio de sinal (GPIO) + **1x** fio de GND comum entre as placas do analisador e do mestre, para o alerta de ataque detectado (`spectrum-attack-classification`): GPIO 4 do analisador (saída) → GPIO 4 do mestre (entrada). Detalhes em [`docs/pinout.md`](docs/pinout.md).
 
+> **Só tem 2 placas ESP32?** Há um arranjo alternativo (mestre+analisador numa placa, escravo+jammer noutra, cada par rodando como duas tasks FreeRTOS) implementado em `env:placa_a`/`env:placa_b` — dispensa o fio de alerta acima, mas introduz outros riscos (acoplamento de RF, contenção de CPU). Ver [`docs/pinout.md`](docs/pinout.md) e `openspec/changes/two-board-topology/`.
+
 ### 💻 Requisitos de Software
 - **Ambiente de Desenvolvimento:** [VS Code](https://code.visualstudio.com/) com a extensão [PlatformIO](https://platformio.org/) (Recomendado) ou a clássica Arduino IDE.
 - **Linguagem:** C/C++ padrão Arduino.
