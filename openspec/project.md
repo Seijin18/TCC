@@ -106,6 +106,22 @@ Ordem recomendada de execução: `plr-metric` e `targeted-jammer` em paralelo
 → `spectrum-attack-classification` → `dynamic-seed-blacklist` →
 `scenario-automation`.
 
+## Bancada real: 2 placas, não 4 (2026-09-16)
+
+A bancada disponível tem **2 placas ESP32**, não as 4 do cenário de
+referência descrito acima. `docs/pinout.md` já documentava esse arranjo
+alternativo (Placa A: mestre + analisador; Placa B: escravo + jammer) como
+hipotético; o change `two-board-topology`
+(`openspec/changes/two-board-topology/`) implementa o firmware combinado
+necessário (duas tasks FreeRTOS pinadas a núcleos por placa, alerta de
+`spectrum-attack-classification` via flag compartilhada em vez de GPIO
+físico na Placa A). É aditivo — não substitui nem quebra os environments
+standalone de 4 placas — e roda em paralelo aos changes de fase acima,
+consumindo a lógica de cada um deles (`node.h` extraído de
+`mestre`/`analisador`/`escravo`/`jammer`) sem duplicá-la. Deve ser mantido
+em dia conforme cada change de fase evolui, já que ele depende do código
+mais recente de todos os 4 nós.
+
 ## Auditoria do projeto de IC de referência (2026-09-02)
 
 O TCC partiu do projeto de IC `github.com/Seijin18/IC` (pasta `RFmodule/`,
