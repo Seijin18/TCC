@@ -1,28 +1,28 @@
 ## 1. Extrair cada nó para `node.h` (sem mudar comportamento)
 
-- [ ] 1.1 `mestre/src/main.cpp` → mover corpo de `setup()`/`loop()` para
+- [x] 1.1 `mestre/src/main.cpp` → mover corpo de `setup()`/`loop()` para
       `mestre/src/node.h` como `mestre_setup()`/`mestre_loop()`; `main.cpp`
       vira `#include "node.h"` + `setup(){ mestre_setup(); }` +
       `loop(){ mestre_loop(); }`.
-- [ ] 1.2 Mesma extração para `analisador/src/main.cpp` →
+- [x] 1.2 Mesma extração para `analisador/src/main.cpp` →
       `analisador/src/node.h` (`analisador_setup`/`analisador_loop`).
-- [ ] 1.3 Mesma extração para `escravo/src/main.cpp` →
+- [x] 1.3 Mesma extração para `escravo/src/main.cpp` →
       `escravo/src/node.h` (`escravo_setup`/`escravo_loop`).
-- [ ] 1.4 Mesma extração para `jammer/src/main.cpp` →
+- [x] 1.4 Mesma extração para `jammer/src/main.cpp` →
       `jammer/src/node.h` (`jammer_setup`/`jammer_loop`).
-- [ ] 1.5 `pio run -e mestre -e analisador -e escravo -e jammer -e
+- [x] 1.5 `pio run -e mestre -e analisador -e escravo -e jammer -e
       validacao` e `pio test -e native_test` continuam passando sem
       diferença de comportamento (regressão da extração).
 
 ## 2. Callbacks de alerta (mestre ↔ analisador)
 
-- [ ] 2.1 Em `analisador/src/node.h`, adicionar
+- [x] 2.1 Em `analisador/src/node.h`, adicionar
       `analisador_set_alert_sink(void (*sink)(bool))`; se não configurado,
       manter o `digitalWrite(PIN_ALERT, ...)` atual como default.
-- [ ] 2.2 Em `mestre/src/node.h`, adicionar
+- [x] 2.2 Em `mestre/src/node.h`, adicionar
       `mestre_set_alert_source(bool (*source)())`; se não configurado,
       manter o `digitalRead(PIN_ALERT_IN)` atual como default.
-- [ ] 2.3 Confirmar que `env:mestre`/`env:analisador` standalone (sem
+- [x] 2.3 Confirmar que `env:mestre`/`env:analisador` standalone (sem
       registrar callback) continuam usando GPIO exatamente como antes.
 
 ## 3. Placa A (mestre + analisador)
