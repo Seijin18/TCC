@@ -11,6 +11,7 @@
 #include <SPI.h>
 #include <RF24.h>
 #include <cstring>
+#include "../../shared/hopping.h"
 
 #define PIN_CE_JAM 22
 #define PIN_CSN_JAM 21
@@ -50,6 +51,14 @@ static bool scanActive = false;
 static bool jammerEnabled = false;
 static bool jammerCarrierRunning = false;
 
+enum JamMode
+{
+    JAM_MODE_SWEEP,
+    JAM_MODE_TARGETED
+};
+
+static JamMode g_mode = JAM_MODE_SWEEP;
+
 static char cmdBuf[CMD_BUF_SIZE];
 static uint8_t cmdLen = 0;
 
@@ -74,6 +83,11 @@ static void configureAnalisador(RF24 &r)
 static uint8_t randomBtChannel()
 {
     return (uint8_t)random(BT_CH_MIN, BT_CH_MAX + 1);
+}
+
+static uint8_t randomTargetedChannel()
+{
+    return HOPPING_CHANNELS[random(0, TABLE_SIZE)];
 }
 
 static void jammerStopCarrier()
@@ -178,7 +192,7 @@ static void stepJammer()
     if (!jammerEnabled || !jammerCarrierRunning)
         return;
 
-    jamCh = randomBtChannel();
+    jamCh = (g_mode == JAM_MODE_TARGETED) ? randomTargetedChannel() : randomBtChannel();
     jammer.setChannel(jamCh);
     delayMicroseconds(JAMMER_HOP_DWELL_US);
 }
@@ -188,7 +202,7 @@ static void jammerStart()
     jammerEnabled = false;
     jammerStopCarrier();
 
-    uint8_t ch = randomBtChannel();
+    uint8_t ch = (g_mode == JAM_MODE_TARGETED) ? randomTargetedChannel() : randomBtChannel();
     if (!jammerStartCarrier(ch))
     {
         jammerEnabled = false;
@@ -236,11 +250,24 @@ static void handleCommand(char *line)
         jammerStart();
     else if (cmdMatches(line, "jammer off") || cmdMatches(line, "j off"))
         jammerStop();
+    else if (cmdMatches(line, "mode sweep"))
+    {
+        g_mode = JAM_MODE_SWEEP;
+        Serial.println("[MODE] sweep");
+    }
+    else if (cmdMatches(line, "mode targeted"))
+    {
+        g_mode = JAM_MODE_TARGETED;
+        Serial.println("[MODE] targeted");
+    }
     else if (cmdMatches(line, "status"))
-        Serial.printf("[STATUS] jammer=%s carrier=%s ch=%u\n",
+        Serial.printf("[STATUS] jammer=%s carrier=%s ch=%u mode=%s\n",
                       jammerEnabled ? "ON" : "OFF",
                       jammerCarrierRunning ? "RUN" : "STOP",
-                      jamCh);
+                      jamCh,
+                      g_mode == JAM_MODE_TARGETED ? "targeted" : "sweep");
+    else
+        Serial.printf("[ERRO] comando desconhecido: %s\n", line);
 }
 
 static void processSerial()

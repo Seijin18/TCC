@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <RF24.h>
+#include <cstring>
+#include "../../shared/hopping.h"
 
 #define PIN_CE_VSPI 22
 #define PIN_CSN_VSPI 21
@@ -37,6 +39,18 @@ RF24 radio2(PIN_CE_HSPI, PIN_CSN_HSPI);
 
 bool has_radio2 = false;
 
+enum JamMode
+{
+    JAM_MODE_SWEEP,
+    JAM_MODE_TARGETED
+};
+
+static JamMode g_mode = JAM_MODE_SWEEP;
+
+#define CMD_BUF_SIZE 32
+static char cmdBuf[CMD_BUF_SIZE];
+static uint8_t cmdLen = 0;
+
 static void configureJammerRadio(RF24 &r)
 {
     r.setAutoAck(false);
@@ -56,6 +70,69 @@ static void hopCarrier(RF24 &r, uint8_t channel)
 {
     r.setChannel(channel);
     delayMicroseconds(PLL_DWELL_US);
+}
+
+static bool cmdMatches(const char *buf, const char *cmd)
+{
+    return strcasecmp(buf, cmd) == 0;
+}
+
+static void handleCommand(char *line)
+{
+    while (*line == ' ' || *line == '\t')
+        line++;
+
+    for (char *p = line; *p; p++)
+    {
+        if (*p >= 'A' && *p <= 'Z')
+            *p = (char)(*p - 'A' + 'a');
+    }
+
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t'))
+        line[--len] = '\0';
+
+    if (len == 0)
+        return;
+
+    if (cmdMatches(line, "mode sweep"))
+    {
+        g_mode = JAM_MODE_SWEEP;
+        Serial.println("[MODE] sweep");
+    }
+    else if (cmdMatches(line, "mode targeted"))
+    {
+        g_mode = JAM_MODE_TARGETED;
+        Serial.println("[MODE] targeted");
+    }
+    else
+    {
+        Serial.printf("[ERRO] comando desconhecido: %s\n", line);
+    }
+}
+
+static void processSerial()
+{
+    while (Serial.available())
+    {
+        char c = (char)Serial.read();
+
+        if (c == '\n' || c == '\r')
+        {
+            if (cmdLen > 0)
+            {
+                cmdBuf[cmdLen] = '\0';
+                handleCommand(cmdBuf);
+                cmdLen = 0;
+            }
+            continue;
+        }
+
+        if (cmdLen < CMD_BUF_SIZE - 1)
+            cmdBuf[cmdLen++] = c;
+        else
+            cmdLen = 0;
+    }
 }
 
 void setup()
@@ -101,11 +178,10 @@ void setup()
     Serial.println("[JAMMER] Emissao CW ativa. '.' = heartbeat a cada 1 s\n");
 }
 
-void loop()
+static void loopSweep()
 {
     static uint8_t ch_fwd = BT_CH_MIN;
     static uint8_t ch_rev = BT_CH_MAX;
-    static unsigned long last_print = 0;
 
     if (has_radio2)
     {
@@ -130,6 +206,43 @@ void loop()
         if (ch_fwd > BT_CH_MAX)
             ch_fwd = BT_CH_MIN;
     }
+}
+
+static void loopTargeted()
+{
+    // Round-robin restrito a HOPPING_CHANNELS (shared/hopping.h). Com 2
+    // rádios, divide os 16 canais ao meio (mesma estratégia do sweep,
+    // aplicada à lista menor) em vez de reaproveitar BT_CH_MID.
+    static uint8_t idx_fwd = 0;
+    static uint8_t idx_rev = TABLE_SIZE - 1;
+
+    const uint8_t fwd_limit = has_radio2 ? (TABLE_SIZE / 2) : TABLE_SIZE;
+
+    hopCarrier(radio, HOPPING_CHANNELS[idx_fwd]);
+    idx_fwd++;
+    if (idx_fwd >= fwd_limit)
+        idx_fwd = 0;
+
+    if (has_radio2)
+    {
+        hopCarrier(radio2, HOPPING_CHANNELS[idx_rev]);
+        if (idx_rev <= fwd_limit)
+            idx_rev = TABLE_SIZE - 1;
+        else
+            idx_rev--;
+    }
+}
+
+void loop()
+{
+    static unsigned long last_print = 0;
+
+    processSerial();
+
+    if (g_mode == JAM_MODE_TARGETED)
+        loopTargeted();
+    else
+        loopSweep();
 
     if (millis() - last_print >= 1000)
     {

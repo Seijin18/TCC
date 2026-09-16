@@ -1,26 +1,26 @@
 ## 1. `jammer/src/main.cpp` — modo targeted
 
-- [ ] 1.1 Incluir `shared/hopping.h` e adicionar enum/flag de modo
+- [x] 1.1 Incluir `shared/hopping.h` e adicionar enum/flag de modo
       (`JAM_MODE_SWEEP` / `JAM_MODE_TARGETED`), default sweep.
-- [ ] 1.2 Adicionar parser de serial não bloqueante no `loop()` para o
+- [x] 1.2 Adicionar parser de serial não bloqueante no `loop()` para o
       comando `mode sweep|targeted`, com eco de confirmação e mensagem de
       erro para comando desconhecido.
-- [ ] 1.3 Implementar avanço de canal restrito a `HOPPING_CHANNELS` quando
+- [x] 1.3 Implementar avanço de canal restrito a `HOPPING_CHANNELS` quando
       em modo targeted (round-robin com índice em vez de `ch_fwd`/`ch_rev`
       percorrendo `BT_CH_MIN..BT_CH_MAX`), reaproveitando `hopCarrier`.
-- [ ] 1.4 Dividir os 16 canais entre `radio`/`radio2` quando `has_radio2`
+- [x] 1.4 Dividir os 16 canais entre `radio`/`radio2` quando `has_radio2`
       for verdadeiro, análogo à divisão atual da faixa BT.
 
 ## 2. `validacao/src/main.cpp` — modo targeted no harness
 
-- [ ] 2.1 Incluir `shared/hopping.h` e adicionar
+- [x] 2.1 Incluir `shared/hopping.h` e adicionar
       `randomTargetedChannel()` (sorteia dentro de `HOPPING_CHANNELS`,
       análoga a `randomBtChannel()`).
-- [ ] 2.2 Adicionar comando `mode sweep|targeted` a `handleCommand`,
+- [x] 2.2 Adicionar comando `mode sweep|targeted` a `handleCommand`,
       guardando o modo em uma flag global.
-- [ ] 2.3 Fazer `stepJammer`/`jammerStart` escolherem `randomBtChannel()`
+- [x] 2.3 Fazer `stepJammer`/`jammerStart` escolherem `randomBtChannel()`
       ou `randomTargetedChannel()` conforme o modo ativo.
-- [ ] 2.4 Incluir o modo ativo na saída do comando `status`.
+- [x] 2.4 Incluir o modo ativo na saída do comando `status`.
 
 ## 3. Validação manual
 
