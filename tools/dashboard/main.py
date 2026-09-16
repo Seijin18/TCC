@@ -335,6 +335,8 @@ class SerialReaderThread(threading.Thread):
         self._stop_event = threading.Event()
         self.error: Optional[str] = None
         self.bytes_received = 0
+        self.raw_lines = 0
+        self.last_line = ""
 
     def run(self):
         try:
@@ -353,6 +355,8 @@ class SerialReaderThread(threading.Thread):
                 self.bytes_received += len(raw)
                 line = raw.decode("utf-8", errors="ignore").strip()
                 if line:
+                    self.raw_lines += 1
+                    self.last_line = line
                     self.line_queue.put(line)
             ser.close()
         except serial.SerialException as exc:
@@ -392,6 +396,8 @@ class PortPanel(ttk.LabelFrame):
 
         self.status_lbl = ttk.Label(self, text="Desconectado", foreground=COLOR_IDLE)
         self.status_lbl.pack(anchor="w", pady=(4, 0))
+        self.raw_lbl = ttk.Label(self, text="", foreground=COLOR_IDLE, font=("TkDefaultFont", 8))
+        self.raw_lbl.pack(anchor="w")
 
         self.refresh_ports()
         if default_port and default_port in self.port_cb["values"]:
@@ -412,6 +418,7 @@ class PortPanel(ttk.LabelFrame):
             self.reader = None
             self.toggle_btn.config(text="Conectar")
             self.status_lbl.config(text="Desconectado", foreground=COLOR_IDLE)
+            self.raw_lbl.config(text="")
             return
 
         port = self.port_cb.get()
@@ -422,6 +429,26 @@ class PortPanel(ttk.LabelFrame):
         self.reader.start()
         self.toggle_btn.config(text="Desconectar")
         self.status_lbl.config(text=f"Conectado em {port}", foreground=COLOR_OK)
+        self.raw_lbl.config(text="Aguardando dados...", foreground=COLOR_IDLE)
+
+    def tick(self):
+        """Mostra contagem de linhas cruas e a última recebida, mesmo que
+        não tenha sido reconhecida por nenhum classificador — sem isso,
+        'nada aparece no painel' e 'nenhum byte chega na porta' ficam
+        indistinguíveis pra quem está depurando."""
+        if not self.reader or not self.reader.is_alive():
+            return
+        preview = self.reader.last_line[:48]
+        if self.reader.raw_lines == 0:
+            self.raw_lbl.config(
+                text=f"0 linhas recebidas ({self.reader.bytes_received} bytes brutos) — verifique porta/baud/firmware",
+                foreground=COLOR_WARN if self.reader.bytes_received == 0 else COLOR_BAD,
+            )
+        else:
+            self.raw_lbl.config(
+                text=f"{self.reader.raw_lines} linhas — última: {preview!r}",
+                foreground=COLOR_IDLE,
+            )
 
     def _on_error(self, message: str):
         self.status_lbl.config(text=message, foreground=COLOR_BAD)
@@ -437,7 +464,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("TCC — Painel de Monitoramento do Sistema")
-        self.geometry("1360x860")
+        self.geometry("1360x1040")
+        self.minsize(1180, 860)
 
         self.state_obj = SystemState()
         self.log_lines: deque = deque(maxlen=500)
@@ -469,12 +497,21 @@ class App(tk.Tk):
         )
         self.alert_lbl.pack(fill=tk.X, padx=8, pady=(0, 6))
 
-        body = ttk.Frame(self)
-        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        # PanedWindow em vez de pack empilhado: numa tela pequena, o corpo
+        # (espectro+status) nunca fica menor que seu minsize e o log nunca
+        # desaparece por completo (pack simples zera widgets sem espaço
+        # sobrando) — o usuário arrasta o divisor pra ver mais de um ou outro.
+        main_pane = tk.PanedWindow(self, orient=tk.VERTICAL, sashwidth=6, sashrelief=tk.RAISED)
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        body = ttk.Frame(main_pane)
         body.columnconfigure(0, weight=3)
         body.columnconfigure(1, weight=2)
-        body.rowconfigure(0, weight=3)
-        body.rowconfigure(1, weight=2)
+        # minsize evita que o painel de enlace (~246px de conteúdo) seja
+        # espremido abaixo de suas linhas quando a janela fica pequena — o
+        # espectro pode encolher sem perder informação, texto de status não.
+        body.rowconfigure(0, weight=3, minsize=260)
+        body.rowconfigure(1, weight=2, minsize=300)
 
         # Espectro (canto superior esquerdo, ocupa 2 linhas)
         spectrum_frame = ttk.LabelFrame(body, text="Espectro RF (analisador)", padding=6)
@@ -501,15 +538,17 @@ class App(tk.Tk):
         self._build_plr_panel(plr_frame)
 
         # Log
-        log_frame = ttk.LabelFrame(self, text="Log combinado", padding=6)
-        log_frame.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 8))
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, state="disabled", wrap="none")
+        log_frame = ttk.LabelFrame(main_pane, text="Log combinado", padding=6)
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=7, state="disabled", wrap="none")
         self.log_text.pack(fill=tk.BOTH, expand=True)
         for tag, color in (
             ("MESTRE", "#1565c0"), ("ESCRAVO", "#2e7d32"),
             ("ANALISADOR", "#6a1b9a"), ("JAMMER", "#c62828"), ("OUTRO", "#757575"),
         ):
             self.log_text.tag_config(tag, foreground=color)
+
+        main_pane.add(body, minsize=520, stretch="always")
+        main_pane.add(log_frame, minsize=90, stretch="never")
 
     def _build_spectrum(self, parent):
         self.spec_fig = Figure(figsize=(6, 6), tight_layout=True)
@@ -596,6 +635,8 @@ class App(tk.Tk):
 
     # -- render ------------------------------------------------------------
     def _refresh_ui(self):
+        self.panel_a.tick()
+        self.panel_b.tick()
         now = time.time()
         with self.state_obj.lock:
             m = self.state_obj.mestre
