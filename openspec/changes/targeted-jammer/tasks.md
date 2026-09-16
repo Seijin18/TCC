@@ -24,7 +24,7 @@
 
 ## 3. Validação manual
 
-- [ ] 3.1 Compilar os environments `jammer` e `validacao`
+- [x] 3.1 Compilar os environments `jammer` e `validacao`
       (`platformio.ini`) e confirmar build limpo com o include de
       `shared/hopping.h`.
 - [ ] 3.2 Com o `analisador` (ou `tools/spectrum/main.py`) rodando em
