@@ -29,6 +29,10 @@
 #define PIN_MISO 19
 #define PIN_MOSI 23
 
+// Pino de alerta vindo do analisador (spectrum-attack-classification):
+// HIGH enquanto "ataque ativo", LOW caso contrario. Ver docs/pinout.md.
+#define PIN_ALERT_IN 4
+
 RF24 radio(PIN_CE, PIN_CSN);
 
 const byte masterAddress[6] = "MSTR1"; // Endereço deste dispositivo (mestre)
@@ -286,6 +290,7 @@ void setup()
     delay(1000); // Aguarda o monitor serial abrir
     Serial.println("\n[TESTE] Iniciando o Blink básico...");
     pinMode(LED_BUILTIN, OUTPUT);
+    pinMode(PIN_ALERT_IN, INPUT_PULLDOWN);
 
     Serial.println("\n[MESTRE] Iniciando transmissor (FIXO)...");
 
@@ -350,6 +355,18 @@ void loop()
     {
         last_blink = millis();
         digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+    }
+
+    // ---- ALERTA DO ANALISADOR (spectrum-attack-classification) ----
+    static bool g_alert_active = false;
+    bool alert_now = digitalRead(PIN_ALERT_IN) == HIGH;
+    if (alert_now != g_alert_active)
+    {
+        g_alert_active = alert_now;
+        if (alert_now)
+            Serial.println("[MESTRE] ALERTA: ataque detectado (analisador).");
+        else
+            Serial.println("[MESTRE] ALERTA: ataque encerrado.");
     }
 
     // Se já finalizamos a comunicação, não fazemos mais nada

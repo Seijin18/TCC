@@ -35,6 +35,23 @@ Usado por `jammer/` (dual-rádio, sweep em duas frequências simultâneas) e por
 | MISO  | 19             | 2              |
 | MOSI  | 23             | 17             |
 
+## Alerta analisador → mestre (spectrum-attack-classification)
+
+Fio de sinal (GPIO) + GND comum entre a placa do analisador e a do mestre,
+usado pelo analisador para sinalizar "ataque direcionado ativo" (nível
+HIGH mantido enquanto o ataque persistir, LOW caso contrário — ver
+`openspec/changes/spectrum-attack-classification/design.md`). Não conflita
+com os pinos SPI de nenhum dos dois nós (ambos usam só VSPI).
+
+| Sinal        | Analisador (saída) | Mestre (entrada) |
+|--------------|---------------------|-------------------|
+| ALERT        | GPIO 4              | GPIO 4            |
+| GND (comum)  | GND                 | GND               |
+
+No cenário de 2 placas (mestre + analisador na mesma placa, ver seção
+abaixo), este fio deixa de ser necessário — vira leitura direta de uma
+flag compartilhada entre as duas tasks, conforme nota no `design.md`.
+
 ## Cenário alternativo: 2 placas, 4 módulos (sem hardware para o cenário completo)
 
 O cenário completo descrito no README pressupõe 4 placas ESP32, uma por nó

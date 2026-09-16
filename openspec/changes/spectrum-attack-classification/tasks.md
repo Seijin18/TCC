@@ -1,26 +1,26 @@
 ## 1. Classificação no analisador
 
-- [ ] 1.1 Incluir `shared/hopping.h` em `analisador/src/main.cpp` para
+- [x] 1.1 Incluir `shared/hopping.h` em `analisador/src/main.cpp` para
       acessar `HOPPING_CHANNELS`/`TABLE_SIZE`.
-- [ ] 1.2 Após `scanSpectrum()`, calcular `alvo_avg` (média em
+- [x] 1.2 Após `scanSpectrum()`, calcular `alvo_avg` (média em
       `HOPPING_CHANNELS`) e `fora_avg` (média nos demais canais varridos
       no modo ativo, respeitando `FAST_BT_SCAN`).
-- [ ] 1.3 Definir constantes `LIMIAR_ALVO`, `LIMIAR_CONCENTRACAO`,
+- [x] 1.3 Definir constantes `LIMIAR_ALVO`, `LIMIAR_CONCENTRACAO`,
       `ATTACK_STREAK_N` no topo do arquivo (valores iniciais a calibrar na
       seção 3).
-- [ ] 1.4 Implementar contador `g_attack_streak` e estado
+- [x] 1.4 Implementar contador `g_attack_streak` e estado
       `g_attack_active`, atualizados a cada ciclo conforme o spec.
 
 ## 2. Sinalização e recepção
 
-- [ ] 2.1 Escolher e documentar (no `README.md`, seção de hardware) um
+- [x] 2.1 Escolher e documentar (no `README.md`, seção de hardware) um
       GPIO livre no analisador para o pino de alerta e o pino
       correspondente no mestre, mais o fio de GND comum entre as duas
       placas.
-- [ ] 2.2 No analisador, configurar o pino de alerta como saída e
+- [x] 2.2 No analisador, configurar o pino de alerta como saída e
       atualizar seu nível (HIGH/LOW) nas transições de `g_attack_active`
       conforme o spec.
-- [ ] 2.3 No mestre, configurar o pino correspondente como entrada e, no
+- [x] 2.3 No mestre, configurar o pino correspondente como entrada e, no
       loop principal, detectar transições LOW→HIGH e HIGH→LOW, logando
       via serial.
 
