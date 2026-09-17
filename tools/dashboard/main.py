@@ -748,11 +748,16 @@ class App(tk.Tk):
         return "aguardando pareamento"
 
     def _render_log(self):
+        # Só acompanha o fim automaticamente se o usuário já estava lá —
+        # senão, rolar pra cima pra ler o histórico era inútil, porque o
+        # próximo tick (a cada 300ms) chutava a visão de volta pro fundo.
+        was_at_bottom = self.log_text.yview()[1] >= 0.999
         self.log_text.config(state="normal")
         self.log_text.delete("1.0", tk.END)
         for tag, line in list(self.log_lines)[-200:]:
             self.log_text.insert(tk.END, line + "\n", tag)
-        self.log_text.see(tk.END)
+        if was_at_bottom:
+            self.log_text.see(tk.END)
         self.log_text.config(state="disabled")
 
     def _on_close(self):

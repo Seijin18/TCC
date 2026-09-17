@@ -8,6 +8,7 @@
  */
 
 #include <Arduino.h>
+#include "shared_state.h"
 #include "../../escravo/src/node.h"
 #include "../../jammer/src/node.h"
 
@@ -25,6 +26,9 @@ static void jammerTask(void *pvParameters)
 void setup()
 {
     escravo_setup();
+
+    escravo_set_ready_sink(placaB_ready_set);
+    jammer_set_ready_source(placaB_ready_get);
 
     xTaskCreatePinnedToCore(
         jammerTask,

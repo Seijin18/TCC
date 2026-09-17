@@ -113,6 +113,26 @@ static uint32_t g_session_expected = 0;
 static uint32_t g_session_received = 0;
 static bool g_hop_received_flag = false; // já contabilizou recepção do hop atual?
 
+// Sinal de "handshake concluído" (seed confirmada, hopping prestes a
+// começar) para quem precisar segurar alguma ação até esse ponto — hoje
+// usado pelo jammer em placa_b (start-after-handshake) via
+// escravo_set_ready_sink(), mesmo padrão de callback de
+// mestre_set_alert_source()/analisador_set_alert_sink() do
+// spectrum-attack-classification. Sem fonte registrada (nós standalone),
+// não tem efeito nenhum.
+static void (*g_escravo_ready_sink)(bool) = nullptr;
+
+static void escravo_set_ready_sink(void (*sink)(bool))
+{
+    g_escravo_ready_sink = sink;
+}
+
+static void notify_ready(bool ready)
+{
+    if (g_escravo_ready_sink)
+        g_escravo_ready_sink(ready);
+}
+
 static void reset_plr_counters()
 {
     g_window_expected = 0;
@@ -295,6 +315,7 @@ static void escravo_loop()
                     Serial.println("[ESCRAVO] Confirmação de seed enviada.");
                     hop_start_at = millis() + HOP_START_DELAY_MS;
                     Serial.println("[ESCRAVO] Iniciando hopping em breve...");
+                    notify_ready(true);
                 }
             }
             else

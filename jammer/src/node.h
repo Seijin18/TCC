@@ -50,6 +50,21 @@ enum JamMode
 
 static JamMode g_mode = JAM_MODE_SWEEP;
 
+// Fonte opcional de "handshake concluído" — quando registrada (placa_b,
+// via jammer_set_ready_source()), o jammer configura os rádios mas só
+// inicia a portadora depois que a fonte retornar true, ao invés de
+// emitir desde o boot. Sem fonte registrada (nós standalone, cenário de
+// 4 placas), preserva o comportamento original: emite imediatamente.
+// Mesmo padrão de callback de mestre_set_alert_source()/
+// escravo_set_ready_sink().
+static bool (*g_jammer_ready_source)() = nullptr;
+static bool g_carrier_started = false;
+
+static void jammer_set_ready_source(bool (*source)())
+{
+    g_jammer_ready_source = source;
+}
+
 #define CMD_BUF_SIZE 32
 static char cmdBuf[CMD_BUF_SIZE];
 static uint8_t cmdLen = 0;
@@ -165,12 +180,9 @@ static void jammer_setup()
     }
 
     configureJammerRadio(jammer_radio);
-    startCarrierOn(jammer_radio, BT_CH_MIN);
-
     if (has_radio2)
     {
         configureJammerRadio(jammer_radio2);
-        startCarrierOn(jammer_radio2, BT_CH_MAX);
         Serial.println("[OK] 2 radios: faixa dividida (2–41 e 41–80 MHz)");
     }
     else
@@ -178,7 +190,20 @@ static void jammer_setup()
         Serial.println("[OK] 1 radio: varredura completa 2–80");
     }
 
-    Serial.println("[JAMMER] Emissao CW ativa. '.' = heartbeat a cada 1 s\n");
+    if (g_jammer_ready_source)
+    {
+        Serial.println("[JAMMER] Aguardando handshake mestre/escravo antes de emitir...");
+    }
+    else
+    {
+        // Sem fonte de prontidão (nó standalone): comportamento original,
+        // emite desde o boot.
+        startCarrierOn(jammer_radio, BT_CH_MIN);
+        if (has_radio2)
+            startCarrierOn(jammer_radio2, BT_CH_MAX);
+        g_carrier_started = true;
+        Serial.println("[JAMMER] Emissao CW ativa. '.' = heartbeat a cada 1 s\n");
+    }
 }
 
 static void loopSweep()
@@ -240,7 +265,19 @@ static void jammer_loop()
 {
     static unsigned long last_print = 0;
 
-    processSerial();
+    processSerial(); // mantém comandos de modo (sweep/targeted) sendo aceitos mesmo em espera
+
+    if (!g_carrier_started)
+    {
+        if (!g_jammer_ready_source || !g_jammer_ready_source())
+            return; // ainda esperando o handshake mestre/escravo
+
+        startCarrierOn(jammer_radio, BT_CH_MIN);
+        if (has_radio2)
+            startCarrierOn(jammer_radio2, BT_CH_MAX);
+        g_carrier_started = true;
+        Serial.println("[JAMMER] Handshake detectado. Emissao CW iniciada. '.' = heartbeat a cada 1 s\n");
+    }
 
     if (g_mode == JAM_MODE_TARGETED)
         loopTargeted();
