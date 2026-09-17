@@ -6,83 +6,98 @@ verdade de contexto/dependências) — é a camada de "o que fazer agora, em que
 ordem" derivada dele. Atualizar esta lista conforme tasks forem fechadas ou
 changes forem arquivados.
 
-## Estado validado (código já implementado)
+## Estado em 2026-09-17: todo o código pronto, bloqueado em hardware
 
-- **`plr-metric`** (Fase 1) — seções 1 e 2 **concluídas**; falta só
-  validação manual em bancada (3.1/3.2).
-- **`targeted-jammer`** (Fase 2) — seções 1 e 2 **concluídas** (modo
-  `sweep`/`targeted` no jammer e no harness `validacao`); falta validação
-  visual/PLR em bancada (3.2/3.3).
-- **`spectrum-attack-classification`** (Fase 3) — seções 1 e 2
-  **concluídas** (heurística `alvo_avg`/`fora_avg` e sinalização
-  analisador→mestre); falta calibração em bancada (seção 3).
+Todo o código planejado para os cinco changes de fase mais
+`telemetry-logging`/`adaptive-rendezvous`/`two-board-topology` §7 está
+implementado, com `pio run` (8 environments) e `pio test -e native_test`
+(10/10) limpos, e as duas placas flasheadas com o firmware atual. **Nenhum
+change tem trabalho de código pendente** — tudo que resta em todo change
+listado abaixo é validação manual em bancada.
 
-Todos com código pronto, bloqueados apenas em hardware — **e o hardware, por
-sua vez, está bloqueado** pelos itens abaixo (a bancada de 2 placas não roda
-como está: ver `two-board-topology` seção 7).
+- **`telemetry-logging`** — seções 1–4 fechadas (código); só falta 4.4
+  (confirmar visualmente o dashboard Tkinter, precisa de display) e a
+  seção 5 (validação em sessão real).
+- **`adaptive-rendezvous`** — seções 1–5 fechadas (código); seção 6
+  (validação manual) bloqueada — ver abaixo.
+- **`two-board-topology`** — seções 1–5 e 7 fechadas; seção 6 (validação
+  manual) bloqueada — ver abaixo.
+- **`plr-metric`**, **`targeted-jammer`**, **`spectrum-attack-classification`**
+  — código já fechado antes desta sessão; suas seções de validação/
+  calibração em bancada também bloqueadas pelo mesmo motivo.
+- **`dynamic-seed-blacklist`** — seções 1–3 (código) fechadas nesta sessão,
+  consumindo `shared/protocol.h` de `adaptive-rendezvous` como previsto;
+  seção 4 (validação) bloqueada.
+- **`scenario-automation`** — único change ainda sem código, porque depende
+  de todos os anteriores estarem validados em bancada primeiro.
 
-## Estado 100% pendente
+## Bloqueio atual: comunicação RF não fecha nesta bancada
 
-- **`dynamic-seed-blacklist`** (Fase 4) — design completo, nenhuma linha de
-  código. Depende de `adaptive-rendezvous` entregar `shared/protocol.h`
-  antes de começar a seção 2 (pacotes de controle).
-- **`scenario-automation`** (Fase 5) — depende de todos os anteriores.
-- **`telemetry-logging`** (infra, novo 2026-09-17) — sem dependências,
-  pré-requisito de qualquer validação de bancada auditável.
-- **`adaptive-rendezvous`** (novo 2026-09-17) — sem dependências,
-  pré-requisito de `dynamic-seed-blacklist` (protocol.h) e de qualquer teste
-  de pareamento sob ataque.
+Ao tentar validar o handshake mestre↔escravo pela primeira vez, dois bugs
+reais de firmware foram encontrados e corrigidos (detalhe completo em
+`openspec/changes/adaptive-rendezvous/design.md`, seção "Achado de
+bancada"):
 
-## Bloqueio imediato: bancada de 2 placas não compila corretamente
+1. `RF24::write()` (lib RF24 1.6.2) tem um bug que trava para sempre quando
+   TX_DS/TX_DF nunca setam — disparava toda vez que o mestre sondava um
+   canal onde o escravo não estava naquele instante exato (agora comum,
+   com o escravo varrendo em vez de escutar um canal fixo). Corrigido com
+   `radio_send()` (`writeFast()+txStandBy()`, `shared/protocol.h`),
+   aplicado em **todos** os `write()` do projeto — sem esse fix, qualquer
+   perda de pacote real sob jamming (o próprio objetivo deste TCC)
+   travaria um nó permanentemente no meio de uma sessão.
+2. `PAIR_DWELL_MS` (250ms) menor que `LINK_RETRY_MS` (300ms) podia nunca
+   convergir por pigeonhole, dependendo só da fase relativa fixa entre os
+   dois relógios livres — corrigido subindo o dwell pra 400ms.
 
-`two-board-topology` seções 1–5 estão `[x]`, mas a seção 7 (adicionada
-2026-09-17 ao tentar rodar de verdade) documenta que os `node.h` de
-`analisador`/`jammer` nunca foram atualizados para usar HSPI — como estão,
-colocariam o nó secundário de cada placa combinada no mesmo barramento
-físico do primário (mesmo pino CE/CSN do mestre/escravo). `env:placa_b`
-nunca foi sequer compilado. **Nada do resto pode ser validado em bancada até
-a seção 7 fechar.**
+**Mesmo com os dois fixes, a sonda do mestre não chega ao escravo.**
+Testado exaustivamente: mestre e escravo fixos no mesmo canal 76 o tempo
+todo (sem varredura, sem retry, o cenário mais simples possível) e também
+com o firmware standalone original (anterior a todo trabalho desta sessão,
+canal fixo, sem nenhuma das mudanças de `adaptive-rendezvous`) — mesmo
+resultado nos dois casos, na mesma bancada. O analisador (rádio HSPI,
+Placa A) também não detecta nenhuma atividade em nenhum dos 126 canais
+mesmo com o jammer da Placa B em `PA_MAX` ativo. Isso aponta para fora do
+software: fiação, antena, alcance físico ou módulo com defeito — **nenhum
+change abaixo pode fechar sua validação manual até isso ser resolvido**.
 
-## Ordem de execução recomendada
+### Checklist de inspeção física sugerido (nesta ordem)
+
+1. Antenas dos 4 módulos NRF24 firmes no conector e não invertidas.
+2. Alimentação 3.3V dos módulos — `docs/pinout.md` já alertava que o
+   regulador onboard do ESP32 pode não dar conta de módulos PA+LNA; um
+   brownout durante a transmissão é indistinguível de "não transmitiu"
+   nos registradores (`STATUS`/`FIFO_STATUS` continuam parecendo normais).
+   Testar com fonte 3.3V externa regulada para os módulos, não o pino 3V3
+   do ESP32.
+3. Reduzir a distância entre as duas placas para poucos centímetros como
+   teste de sanidade mínimo (elimina alcance/obstrução como variável).
+4. Se nada disso resolver, testar cada módulo NRF24 isoladamente com um
+   sketch de exemplo mínimo (fora deste projeto, ex. os exemplos da
+   própria lib RF24) para descartar módulo com defeito — pelo menos um
+   dos quatro módulos usados neste teste (mestre/escravo/jammer/
+   analisador) pode ter vindo com defeito de fábrica, comum em módulos
+   NRF24L01+ clone baratos.
+
+## Ordem de execução após o hardware ser resolvido
 
 ```
-telemetry-logging ──────────────┐
-                                 ├─→ two-board-topology §7 (pin fix) ─→ bancada liberada
-adaptive-rendezvous ─(protocol.h)┘         │
-        │                                   ▼
-        │                    plr-metric §3, targeted-jammer §3,
-        │                    spectrum-attack-classification §3
-        ▼                                   │
-dynamic-seed-blacklist ←──────────────────┘
-        │
-        ▼
-scenario-automation
+plr-metric §3 ──┐
+targeted-jammer §3 ──┤
+spectrum-attack-classification §3 ──┤─→ dynamic-seed-blacklist §4 ─→ scenario-automation
+two-board-topology §6 ──┤
+adaptive-rendezvous §6 ──┘
 ```
 
-1. **`telemetry-logging`** — infraestrutura de log persistente
-   (`shared/telemetry.h`, `tools/logger/main.py`, dashboard lendo arquivo).
-   Sem isso, nenhuma validação de bancada abaixo produz evidência
-   reaproveitável entre sessões.
-2. **`adaptive-rendezvous`** — `shared/protocol.h`, pareamento em canal
-   limpo, tráfego contínuo, seed não-bloqueante, resync de `hop_counter`.
-   Pode avançar em paralelo com (1).
-3. **`two-board-topology` §7** — corrigir pinagem SPI do nó secundário em
-   `analisador/src/node.h` e `jammer/src/node.h` (mover para HSPI), guardas
-   de `pinMode` no pino de alerta (GPIO 4 = HSPI SCK) e no LED (GPIO 2 =
-   HSPI MISO). **Bloqueia toda validação de bancada seguinte.**
-4. **Validações de bancada já desbloqueáveis**: `plr-metric` §3,
-   `targeted-jammer` §3, `spectrum-attack-classification` §3,
-   `two-board-topology` §6, `adaptive-rendezvous` §6 — todas dependem só de
-   (2) e (3).
-5. **`dynamic-seed-blacklist`** — implementação de código (seções 1–3) só
-   começa depois que (2) entregar `shared/protocol.h`; validação (seção 4)
-   depois que (4) confirmar PLR e alerta funcionando em bancada.
-6. **`scenario-automation`** — fecha o projeto, depende de todos os
-   anteriores validados.
+Todas as seções de validação à esquerda podem rodar em paralelo assim que
+o handshake básico funcionar — nenhuma depende de código adicional, só de
+bancada operante. `dynamic-seed-blacklist` §4 precisa de PLR (plr-metric)
+e alerta (spectrum-attack-classification) confirmados funcionando primeiro.
+`scenario-automation` fecha o projeto por último.
 
 ## Próxima ação recomendada
 
-Implementar `telemetry-logging` e `adaptive-rendezvous` (paralelos, sem
-dependência entre si), seguido imediatamente por `two-board-topology` §7 —
-essa sequência é o que desbloqueia toda validação manual pendente nos outros
-três changes já com código pronto.
+Resolver o checklist de inspeção física acima. Assim que uma sonda
+qualquer do mestre chegar ao escravo (confirmável por `pair_ok` em
+`logs/events.log`), toda a bateria de testes graduais T1–T7 do plano de
+bancada pode rodar em sequência sem mais trabalho de código esperado.

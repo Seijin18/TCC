@@ -68,6 +68,53 @@ seria preciso um protocolo de time-sync separado. Enviar o contador junto
 com cada fragmento é uma correção contínua de baixo custo (4 bytes) que já
 viaja no pacote existente.
 
+## Achado de bancada: bug real em RF24::write() (RF24 1.6.2)
+
+Ao validar em bancada (2026-09-17), o mestre travava permanentemente na
+primeira sonda de pareamento sempre que o escravo não estava
+imediatamente ouvindo no canal (o cenário normal aqui, já que o escravo
+varre em vez de escutar um canal fixo). Diagnóstico por telemetria
+bisectando cada chamada confirmou: `RF24::write(buf, len, multicast)`
+nesta versão da lib tem
+`do { startFastWrite(...); } while (errHandler(&doRecovery) < 0);`, e
+`errHandler(bool* doRecovery)` testa `if (doRecovery)` (o ponteiro,
+sempre não-nulo) em vez de `if (*doRecovery)` (o valor) — todo timeout de
+95ms interno retorna -1 de novo, e o do-while nunca sai se TX_DS/TX_DF
+nunca setarem. Isso não é exclusivo do pareamento: qualquer `write()` de
+fragmento/controle durante jamming ativo (perda real de pacote,
+exatamente a condição que este TCC precisa testar) correria o mesmo
+risco de travar um nó pra sempre no meio de uma sessão.
+
+**Fix aplicado**: `shared/protocol.h` ganhou `radio_send()`, usando
+`writeFast()+txStandBy(timeout)` (bound explícito, caminho de erro
+diferente) em vez de `write()`, sempre com `multicast=true` — a
+confirmação de qualquer troca do protocolo já vem de um pacote de
+resposta lido separadamente (LinkAck/SeedAck/FragmentAck/ControlAck), a
+sonda em si só precisa terminar sem travar. `radio_send()` também limpa
+a FIFO de TX antes de cada envio (um payload preso ali travaria
+`writeFast()` em `TX_FULL` para sempre). Aplicado em **todo** `write()`
+de mestre e escravo, não só no pareamento.
+
+Um segundo bug de convergência foi encontrado e corrigido junto:
+`PAIR_DWELL_MS` (250ms) era menor que `LINK_RETRY_MS` (300ms) — por
+pigeonhole, a janela de escuta do escravo podia sistematicamente cair
+sempre entre duas sondas consecutivas do mestre e nunca convergir,
+dependendo só da fase relativa (fixa, sem realinhamento) entre os dois
+relógios livres. Corrigido subindo `PAIR_DWELL_MS` para 400ms.
+
+**Bloqueio de bancada em aberto (não é bug de código)**: mesmo depois
+dos dois fixes acima, com mestre e escravo os dois fixos no MESMO canal
+76 continuamente (nem varredura, nem retry envolvidos — o cenário mais
+simples possível), a sonda não chega ao escravo. Testado também com o
+código standalone original (pré-`adaptive-rendezvous`, canal fixo, sem
+nenhuma das mudanças deste change) na mesma bancada: mesmo resultado. O
+analisador (rádio HSPI, placa separada) também não detecta nenhuma
+atividade em nenhum dos 126 canais mesmo com o jammer em `PA_MAX`
+ativo — sugere que a limitação está fora do escopo de software (fiação,
+antena, alcance físico ou módulo com defeito), não em nenhum dos changes
+de firmware. Validação manual (seção 6, abaixo) permanece bloqueada até
+inspeção física da bancada.
+
 ## Risks / Trade-offs
 
 - **Candidatos fixos são conhecidos por qualquer jammer que leia o código
