@@ -107,13 +107,18 @@ dos dois fixes acima, com mestre e escravo os dois fixos no MESMO canal
 76 continuamente (nem varredura, nem retry envolvidos — o cenário mais
 simples possível), a sonda não chega ao escravo. Testado também com o
 código standalone original (pré-`adaptive-rendezvous`, canal fixo, sem
-nenhuma das mudanças deste change) na mesma bancada: mesmo resultado. O
-analisador (rádio HSPI, placa separada) também não detecta nenhuma
-atividade em nenhum dos 126 canais mesmo com o jammer em `PA_MAX`
-ativo — sugere que a limitação está fora do escopo de software (fiação,
-antena, alcance físico ou módulo com defeito), não em nenhum dos changes
-de firmware. Validação manual (seção 6, abaixo) permanece bloqueada até
-inspeção física da bancada.
+nenhuma das mudanças deste change) na mesma bancada: mesmo resultado.
+
+Isolado com `env:validacao` (jammer+analisador no mesmo ESP32, teste
+mais simples possível — ver `openspec/ROADMAP.md` para o procedimento
+completo): a **Placa B** passa (analisador detecta o próprio jammer da
+mesma placa a centímetros de distância, com salto de atividade claro e
+sustentado). A **Placa A** falha — seu analisador (rádio HSPI) lê zero
+em todos os 126 canais em toda condição testada, incluindo ruído
+ambiente de WiFi que a Placa B capta normalmente. O bloqueio está
+concentrado na Placa A, não distribuído pelos 4 módulos — ver checklist
+de inspeção física em `openspec/ROADMAP.md`. Validação manual (seção 6,
+abaixo) permanece bloqueada até isso ser resolvido.
 
 ## Risks / Trade-offs
 

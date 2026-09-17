@@ -61,23 +61,62 @@ mesmo com o jammer da Placa B em `PA_MAX` ativo. Isso aponta para fora do
 software: fiação, antena, alcance físico ou módulo com defeito — **nenhum
 change abaixo pode fechar sua validação manual até isso ser resolvido**.
 
-### Checklist de inspeção física sugerido (nesta ordem)
+### Diagnóstico feito em 2026-09-17: `env:validacao` isola o problema na Placa A
 
-1. Antenas dos 4 módulos NRF24 firmes no conector e não invertidas.
-2. Alimentação 3.3V dos módulos — `docs/pinout.md` já alertava que o
-   regulador onboard do ESP32 pode não dar conta de módulos PA+LNA; um
-   brownout durante a transmissão é indistinguível de "não transmitiu"
-   nos registradores (`STATUS`/`FIFO_STATUS` continuam parecendo normais).
-   Testar com fonte 3.3V externa regulada para os módulos, não o pino 3V3
-   do ESP32.
-3. Reduzir a distância entre as duas placas para poucos centímetros como
-   teste de sanidade mínimo (elimina alcance/obstrução como variável).
-4. Se nada disso resolver, testar cada módulo NRF24 isoladamente com um
-   sketch de exemplo mínimo (fora deste projeto, ex. os exemplos da
-   própria lib RF24) para descartar módulo com defeito — pelo menos um
-   dos quatro módulos usados neste teste (mestre/escravo/jammer/
-   analisador) pode ter vindo com defeito de fábrica, comum em módulos
-   NRF24L01+ clone baratos.
+`validacao/src/main.cpp` (jammer VSPI + analisador HSPI no mesmo ESP32,
+já existente antes desta sessão, usado por `tools/spectrum/`) é o teste de
+antena mais simples possível — não depende de nenhuma lógica de
+pareamento, só de "o jammer de um rádio é visto pelo analisador do
+outro". Rodado em cada placa, comandando via
+`echo "<placa_a|placa_b> jammer on" >> logs/cmd.in` com `tools/logger/main.py`
+de pé:
+
+- **Placa B: passa.** Antes do `jammer on`, o analisador já lia ruído
+  ambiente típico de WiFi/BT (valores esparsos 10–100). Ao ligar o
+  jammer (mesma placa, alcance de poucos centímetros), a atividade sobe
+  visivelmente e de forma sustentada em quase todos os canais — o par
+  VSPI+HSPI desta placa funciona.
+- **Placa A: falha.** O analisador (HSPI) lê **zero em todos os 126
+  canais**, em todo cenário testado: jammer da própria Placa A ligado a
+  centímetros de distância, jammer da Placa B (já confirmado funcional)
+  ligado, e mesmo ruído ambiente de WiFi — que a Placa B claramente
+  capta e a Placa A nunca captou nenhuma vez. Isso não é uma questão de
+  calibração de limiar (`LIMIAR_ALVO` etc.) — é zero absoluto em toda
+  amostra.
+- **Placa A, rádio VSPI (jammer/mestre) — inconclusivo.** Ligar o jammer
+  da Placa A e observar pela Placa B (o receptor comprovadamente
+  funcional) não mostrou nenhum salto correlacionado nas médias de
+  atividade — mas isso pode ser falta de alcance entre as duas placas
+  (não testado a poucos centímetros como o caso da Placa B) tanto quanto
+  um problema real neste módulo.
+
+**Conclusão**: o bloqueio de RF não está espalhado pelos 4 módulos —
+está concentrado na Placa A, com o rádio HSPI (posição do analisador)
+comprovadamente não recebendo nada em nenhuma condição. Como os dois
+módulos de uma mesma placa compartilham fonte de alimentação, um problema
+de alimentação (ver `docs/pinout.md`) na Placa A explicaria os dois
+sintomas ao mesmo tempo (HSPI morto + VSPI sem alcance).
+
+### Checklist de inspeção física sugerido (foco na Placa A)
+
+1. Antena do módulo HSPI (posição do analisador) da Placa A — confirmar
+   que está fisicamente conectada e não invertida; se for módulo com fio
+   solto em vez de PCB antenna, confirmar que o fio não se soltou.
+2. Alimentação 3.3V dos dois módulos da Placa A especificamente —
+   `docs/pinout.md` já alertava que o regulador onboard do ESP32 pode não
+   dar conta de dois módulos PA+LNA simultâneos; testar com fonte 3.3V
+   externa regulada só para os módulos (não o pino 3V3 do ESP32) antes de
+   qualquer outra hipótese.
+3. Reexecutar `env:validacao` na Placa A depois do fix acima — se o
+   analisador voltar a ler ruído ambiente não-zero, o hardware está bom;
+   repetir o teste `jammer on` da Placa A observado pela Placa B para
+   confirmar o alcance do rádio VSPI também.
+4. Se a alimentação não for o problema, trocar o módulo HSPI da Placa A
+   por um dos módulos sobressalentes (se houver) para descartar módulo
+   com defeito de fábrica — comum em NRF24L01+ clone baratos.
+5. Reduzir a distância entre as duas placas para poucos centímetros como
+   teste adicional de alcance do rádio VSPI da Placa A, já que esse
+   resultado ficou inconclusivo.
 
 ## Ordem de execução após o hardware ser resolvido
 
