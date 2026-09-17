@@ -109,16 +109,37 @@ simples possível), a sonda não chega ao escravo. Testado também com o
 código standalone original (pré-`adaptive-rendezvous`, canal fixo, sem
 nenhuma das mudanças deste change) na mesma bancada: mesmo resultado.
 
-Isolado com `env:validacao` (jammer+analisador no mesmo ESP32, teste
-mais simples possível — ver `openspec/ROADMAP.md` para o procedimento
-completo): a **Placa B** passa (analisador detecta o próprio jammer da
-mesma placa a centímetros de distância, com salto de atividade claro e
-sustentado). A **Placa A** falha — seu analisador (rádio HSPI) lê zero
-em todos os 126 canais em toda condição testada, incluindo ruído
-ambiente de WiFi que a Placa B capta normalmente. O bloqueio está
-concentrado na Placa A, não distribuído pelos 4 módulos — ver checklist
-de inspeção física em `openspec/ROADMAP.md`. Validação manual (seção 6,
-abaixo) permanece bloqueada até isso ser resolvido.
+Isolado em duas rodadas de diagnóstico (2026-09-17):
+
+1. `env:validacao` (jammer+analisador no mesmo ESP32) mostrou a Placa B
+   passando (analisador detecta o próprio jammer da mesma placa) e a
+   Placa A falhando (analisador HSPI lê zero em todos os 126 canais,
+   qualquer condição). Isso apontava inicialmente pro HSPI da Placa A.
+2. `Tests/AntennaCross/` (par TX/RX standalone mínimo, sem FHSS/
+   pareamento — ver `openspec/ROADMAP.md` para o procedimento) testou
+   cada rádio de cada placa como transmissor E como receptor,
+   isoladamente, em canais fixos. Resultado, testado nas duas direções e
+   em dois canais diferentes pro VSPI (76 e 100), pra descartar
+   interferência de canal específico:
+
+   | Direção | VSPI | HSPI |
+   |---|---|---|
+   | Placa A → Placa B | **falha** (0–1 de ~30+ enviados) | 100% |
+   | Placa B → Placa A | 100% | 100% |
+
+   Única combinação que falha: **o rádio VSPI da Placa A especificamente
+   como transmissor** — seu próprio receptor funciona (confirmado
+   quando a Placa A vira receptora na segunda direção), e o rádio HSPI
+   da mesma placa transmite normalmente. O teste 1 (mesma placa) tinha
+   sido um falso direcionamento: `testCarrier()`/RPD é um caminho de
+   detecção diferente de recepção normal de pacote, e não teria pego o
+   problema real (que é só no lado de transmissão do VSPI).
+
+O bloqueio está isolado a um componente específico — o estágio de
+transmissão (provavelmente o amplificador de potência) do módulo VSPI
+da Placa A, que é exatamente a posição do mestre no firmware principal.
+Validação manual (seção 6, abaixo) permanece bloqueada até esse módulo
+ser trocado ou reparado.
 
 ## Risks / Trade-offs
 
