@@ -194,7 +194,7 @@ static void classifyAttack()
         {
             g_attack_active = true;
             setAlertPin(true);
-            Serial.printf("[ALERTA] Ataque direcionado detectado. alvo_avg=%d fora_avg=%d\n", alvo_avg, fora_avg);
+            guarded_printf("[ALERTA] Ataque direcionado detectado. alvo_avg=%d fora_avg=%d\n", alvo_avg, fora_avg);
             tlm_printf("analisador", "alert_on", "alvo_avg=%d;fora_avg=%d", alvo_avg, fora_avg);
         }
     }
@@ -205,7 +205,7 @@ static void classifyAttack()
         {
             g_attack_active = false;
             setAlertPin(false);
-            Serial.println("[ALERTA] Ataque encerrado.");
+            guarded_println("[ALERTA] Ataque encerrado.");
             tlm_event("analisador", "alert_off");
         }
     }
@@ -213,13 +213,17 @@ static void classifyAttack()
 
 static void sendCSV()
 {
-    Serial.print(channelData[0]);
-    for (int i = 1; i < NUM_CHANNELS; i++)
-    {
-        Serial.print(',');
-        Serial.print(channelData[i]);
-    }
-    Serial.println();
+    // Monta a linha inteira num buffer local e imprime de uma vez só: um
+    // guarded_print() por número (como antes) libera o lock entre cada
+    // chamada, dando à outra task (mestre, na Placa A combinada) chance de
+    // intercalar sua própria linha no meio do CSV -- reproduzido em
+    // bancada como linhas de espectro corrompidas.
+    char line[NUM_CHANNELS * 4 + 1];
+    int pos = 0;
+    pos += snprintf(line + pos, sizeof(line) - (size_t)pos, "%d", channelData[0]);
+    for (int i = 1; i < NUM_CHANNELS && pos < (int)sizeof(line) - 8; i++)
+        pos += snprintf(line + pos, sizeof(line) - (size_t)pos, ",%d", channelData[i]);
+    guarded_println(line);
 }
 
 static void analisador_setup()
@@ -227,7 +231,7 @@ static void analisador_setup()
     Serial.begin(115200);
     delay(2000);
 
-    Serial.println("\n=== TCC Analisador v1 — Espectro 2.4 GHz ===");
+    guarded_println("\n=== TCC Analisador v1 — Espectro 2.4 GHz ===");
 
     bool combined_mode = (g_analisador_alert_sink != nullptr);
 
@@ -253,7 +257,7 @@ static void analisador_setup()
             radioOK = true;
             break;
         }
-        Serial.printf("radio.begin() falhou, tentativa %d/5...\n", attempt);
+        guarded_printf("radio.begin() falhou, tentativa %d/5...\n", attempt);
         delay(500);
     }
 
@@ -261,7 +265,7 @@ static void analisador_setup()
     {
         while (true)
         {
-            Serial.println("[ERRO] NRF24L01 nao detectado. Verifique fiação e 3.3V.");
+            guarded_println("[ERRO] NRF24L01 nao detectado. Verifique fiação e 3.3V.");
             delay(3000);
         }
     }
@@ -269,11 +273,11 @@ static void analisador_setup()
     configureReceiver(analisador_radio);
 
 #if FAST_BT_SCAN
-    Serial.printf("Modo: FAST_BT_SCAN (ch %d–%d, 2402–2480 MHz)\n", BT_CH_MIN, BT_CH_MAX);
+    guarded_printf("Modo: FAST_BT_SCAN (ch %d–%d, 2402–2480 MHz)\n", BT_CH_MIN, BT_CH_MAX);
 #else
-    Serial.println("Modo: FULL (ch 0–125, 2400–2525 MHz)");
+    guarded_println("Modo: FULL (ch 0–125, 2400–2525 MHz)");
 #endif
-    Serial.println("Enviando CSV: ch0,ch1,...,ch125 (atividade 0–100%)\n");
+    guarded_println("Enviando CSV: ch0,ch1,...,ch125 (atividade 0–100%)\n");
     tlm_event("analisador", "boot");
 }
 

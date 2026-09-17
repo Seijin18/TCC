@@ -121,7 +121,7 @@ static void log_plr_window()
                              ? 100.0f * (1.0f - ((float)g_session_received / (float)g_session_expected))
                              : 0.0f;
 
-    Serial.printf("PLR;t_ms=%lu;window=%.1f;session=%.1f;recv=%u;exp=%u\n",
+    guarded_printf("PLR;t_ms=%lu;window=%.1f;session=%.1f;recv=%u;exp=%u\n",
                   millis(), plr_window, plr_session, g_window_received, g_window_expected);
     tlm_printf("escravo", "plr", "window=%.1f;session=%.1f;recv=%u;exp=%u",
                plr_window, plr_session, g_window_received, g_window_expected);
@@ -182,7 +182,7 @@ static void escravo_setup()
     if (!g_escravo_ready_sink)
         pinMode(LED_BUILTIN, OUTPUT);
 
-    Serial.println("\n[ESCRAVO] Iniciando receptor (FIXO)...");
+    guarded_println("\n[ESCRAVO] Iniciando receptor (FIXO)...");
 
     printf_begin();
 
@@ -196,7 +196,7 @@ static void escravo_setup()
 
     if (!escravo_radio.begin())
     {
-        Serial.println(F("[ERRO ESCRAVO] Falha fatal! O Módulo NRF24 não respondeu no SPI. Verifique a fiação."));
+        guarded_println(F("[ERRO ESCRAVO] Falha fatal! O Módulo NRF24 não respondeu no SPI. Verifique a fiação."));
     }
 
     escravo_radio.setPALevel(RF24_PA_LOW);
@@ -205,6 +205,9 @@ static void escravo_setup()
 
     escravo_radio.enableDynamicPayloads();
     escravo_radio.enableAckPayload();
+    // adaptive-rendezvous: necessario para radio_send()/writeFast(...,
+    // multicast=true) -- ver shared/protocol.h.
+    escravo_radio.enableDynamicAck();
 
     escravo_radio.setCRCLength(RF24_CRC_16);
     escravo_radio.closeReadingPipe(0);
@@ -218,12 +221,12 @@ static void escravo_setup()
     escravo_radio.flush_rx();
     escravo_radio.flush_tx();
 
-    Serial.println("\n--- STATUS DO RÁDIO ESCRAVO (REGISTRADORES) ---");
+    guarded_println("\n--- STATUS DO RÁDIO ESCRAVO (REGISTRADORES) ---");
     escravo_radio.printDetails();
-    Serial.println("-----------------------------------------------\n");
+    guarded_println("-----------------------------------------------\n");
 
     g_pair_dwell_start = millis();
-    Serial.printf("[ESCRAVO] Varrendo %u candidatos de pareamento...\n", PAIRING_CANDIDATE_COUNT);
+    guarded_printf("[ESCRAVO] Varrendo %u candidatos de pareamento...\n", PAIRING_CANDIDATE_COUNT);
     tlm_event("escravo", "boot");
 }
 
@@ -262,7 +265,13 @@ static void escravo_loop()
                 {
                     LinkPacket ack = {MSG_LINK_ACK};
                     escravo_radio.stopListening();
-                    bool wrote = escravo_radio.write(&ack, sizeof(ack));
+                    // radio_send() em vez de write(): ver shared/protocol.h
+                    // (bug de retry-forever em RF24::write() nesta versao
+                    // da lib) -- o mestre pode nao estar pronto pra
+                    // auto-ack no exato instante, e a confirmacao real vem
+                    // do MSG_LINK_ACK que o mestre le, nao do ack de
+                    // hardware.
+                    bool wrote = radio_send(escravo_radio, &ack, sizeof(ack));
                     escravo_radio.startListening();
 
                     if (wrote)
@@ -272,7 +281,7 @@ static void escravo_loop()
                         g_hops_since_rx = 0;
                         hop_start_at = millis() + HOP_START_DELAY_MS;
                         last_hop_time = millis();
-                        Serial.printf("[ESCRAVO] Pareamento confirmado em ch=%u. Aguardando seed...\n", PAIRING_CANDIDATES[g_pair_idx]);
+                        guarded_printf("[ESCRAVO] Pareamento confirmado em ch=%u. Aguardando seed...\n", PAIRING_CANDIDATES[g_pair_idx]);
                         tlm_printf("escravo", "pair_ok", "ch=%u", PAIRING_CANDIDATES[g_pair_idx]);
                     }
                 }
@@ -301,19 +310,19 @@ static void escravo_loop()
                 g_seed_initialized = true;
                 reset_plr_counters();
 
-                Serial.printf("[ESCRAVO] Seed recebida: %u\n", g_seed);
+                guarded_printf("[ESCRAVO] Seed recebida: %u\n", g_seed);
                 tlm_printf("escravo", "seed", "seed=%u", g_seed);
 
                 SeedAckPacket seed_ack;
                 seed_ack.type = MSG_SEED_ACK;
                 seed_ack.seed = g_seed;
                 escravo_radio.stopListening();
-                bool wrote = escravo_radio.write(&seed_ack, sizeof(seed_ack));
+                bool wrote = radio_send(escravo_radio, &seed_ack, sizeof(seed_ack));
                 escravo_radio.startListening();
 
                 if (wrote)
                 {
-                    Serial.println("[ESCRAVO] Confirmação de seed enviada.");
+                    guarded_println("[ESCRAVO] Confirmação de seed enviada.");
                     hop_start_at = millis() + HOP_START_DELAY_MS;
                     notify_ready(true);
                 }
@@ -391,7 +400,7 @@ static void escravo_loop()
                     if (current_msg_id != pkt.msg_id)
                     {
                         reset_message_state(pkt.msg_id, pkt.total_fragments);
-                        Serial.printf("[ESCRAVO] Nova mensagem msg_id=%u com %u fragmentos\n", pkt.msg_id, pkt.total_fragments);
+                        guarded_printf("[ESCRAVO] Nova mensagem msg_id=%u com %u fragmentos\n", pkt.msg_id, pkt.total_fragments);
                     }
 
                     if (pkt.fragment_index < expected_total_fragments && pkt.payload_len <= FRAGMENT_DATA_SIZE)
@@ -406,7 +415,7 @@ static void escravo_loop()
                                 received_count++;
                             }
 
-                            Serial.printf("[ESCRAVO] Canal=%u frag=%u/%u recebida (len=%u)\n",
+                            guarded_printf("[ESCRAVO] Canal=%u frag=%u/%u recebida (len=%u)\n",
                                           current_channel, pkt.fragment_index + 1, expected_total_fragments, pkt.payload_len);
                         }
                     }
@@ -420,20 +429,20 @@ static void escravo_loop()
                     ack.complete = complete ? 1 : 0;
 
                     escravo_radio.stopListening();
-                    escravo_radio.write(&ack, sizeof(ack));
+                    radio_send(escravo_radio, &ack, sizeof(ack));
                     escravo_radio.startListening();
 
                     if (complete && !completion_logged)
                     {
                         assembled_message[MAX_MESSAGE_SIZE] = '\0';
-                        Serial.printf("[ESCRAVO] Mensagem completa reconstruida: %s\n", assembled_message);
+                        guarded_printf("[ESCRAVO] Mensagem completa reconstruida: %s\n", assembled_message);
                         tlm_event("escravo", "msg_done");
                         completion_logged = true;
                     }
                 }
                 else
                 {
-                    Serial.println("[ESCRAVO] Pacote ignorado por formato invalido.");
+                    guarded_println("[ESCRAVO] Pacote ignorado por formato invalido.");
                 }
             }
             else if (dt_size == sizeof(ControlSeedPacket)) // == sizeof(ControlBlacklistPacket)
@@ -452,7 +461,7 @@ static void escravo_loop()
 
                     ControlAck ack = {MSG_CTRL_ACK, pkt.apply_at_hop};
                     escravo_radio.stopListening();
-                    escravo_radio.write(&ack, sizeof(ack));
+                    radio_send(escravo_radio, &ack, sizeof(ack));
                     escravo_radio.startListening();
                     tlm_printf("escravo", "rekey_ack", "kind=seed;seed=%u;apply=%lu", pkt.new_seed, pkt.apply_at_hop);
                 }
@@ -466,20 +475,20 @@ static void escravo_loop()
 
                     ControlAck ack = {MSG_CTRL_ACK, pkt.apply_at_hop};
                     escravo_radio.stopListening();
-                    escravo_radio.write(&ack, sizeof(ack));
+                    radio_send(escravo_radio, &ack, sizeof(ack));
                     escravo_radio.startListening();
                     tlm_printf("escravo", "rekey_ack", "kind=blacklist;mask=0x%04X;apply=%lu", pkt.mask, pkt.apply_at_hop);
                 }
                 else
                 {
-                    Serial.println("[ESCRAVO] Pacote de controle com tipo desconhecido, descartado.");
+                    guarded_println("[ESCRAVO] Pacote de controle com tipo desconhecido, descartado.");
                 }
             }
             else
             {
                 uint8_t dump[32];
                 escravo_radio.read(dump, dt_size);
-                Serial.printf("[ESCRAVO] Payload inesperado recebido (%d bytes), descartado.\n", dt_size);
+                guarded_printf("[ESCRAVO] Payload inesperado recebido (%d bytes), descartado.\n", dt_size);
             }
         }
         else

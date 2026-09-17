@@ -37,7 +37,7 @@ void setup()
     xTaskCreatePinnedToCore(
         jammerTask,
         "jammer",
-        8192,
+        16384,
         nullptr,
         tskIDLE_PRIORITY + 1,
         nullptr,

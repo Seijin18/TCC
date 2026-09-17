@@ -72,8 +72,8 @@ static unsigned long g_seed_send_time = 0;
 
 static void wait_for_seed_window()
 {
-    Serial.println("[MESTRE] === CONFIGURAÇÃO DE SEED ===");
-    Serial.printf("[MESTRE] Digite a seed desejada (0-100) e pressione ENTER (janela de %lu ms, default=%u):\n",
+    guarded_println("[MESTRE] === CONFIGURAÇÃO DE SEED ===");
+    guarded_printf("[MESTRE] Digite a seed desejada (0-100) e pressione ENTER (janela de %lu ms, default=%u):\n",
                   SEED_WAIT_WINDOW_MS, SEED_DEFAULT);
 
     unsigned long start = millis();
@@ -89,17 +89,17 @@ static void wait_for_seed_window()
             {
                 g_seed = (uint16_t)value;
                 g_seed_initialized = true;
-                Serial.printf("[MESTRE] Seed configurada: %u\n", g_seed);
+                guarded_printf("[MESTRE] Seed configurada: %u\n", g_seed);
                 return;
             }
-            Serial.printf("[MESTRE] Valor inválido: %d. Digite um valor entre 0 e 100.\n", value);
+            guarded_printf("[MESTRE] Valor inválido: %d. Digite um valor entre 0 e 100.\n", value);
         }
         delay(10);
     }
 
     g_seed = SEED_DEFAULT;
     g_seed_initialized = true;
-    Serial.printf("[MESTRE] Nenhuma seed digitada a tempo. Usando default: %u\n", g_seed);
+    guarded_printf("[MESTRE] Nenhuma seed digitada a tempo. Usando default: %u\n", g_seed);
 }
 
 // Comando runtime "seed <n>" -- só tem efeito antes da seed ser confirmada
@@ -117,23 +117,23 @@ static void handle_mestre_command(char *line)
     {
         if (g_seed_confirmed)
         {
-            Serial.println("[MESTRE] Seed já confirmada nesta sessão; reinicie para trocar.");
+            guarded_println("[MESTRE] Seed já confirmada nesta sessão; reinicie para trocar.");
             return;
         }
         int value = atoi(line + 5);
         if (value >= 0 && value <= 100)
         {
             g_seed = (uint16_t)value;
-            Serial.printf("[MESTRE] Seed atualizada via comando: %u\n", g_seed);
+            guarded_printf("[MESTRE] Seed atualizada via comando: %u\n", g_seed);
         }
         else
         {
-            Serial.printf("[MESTRE] Valor de seed inválido: %d\n", value);
+            guarded_printf("[MESTRE] Valor de seed inválido: %d\n", value);
         }
     }
     else
     {
-        Serial.printf("[MESTRE] Comando desconhecido: %s\n", line);
+        guarded_printf("[MESTRE] Comando desconhecido: %s\n", line);
     }
 }
 
@@ -254,7 +254,11 @@ static bool try_establish_link()
 
     mestre_radio.setChannel(g_pair_channel);
     mestre_radio.stopListening();
-    bool sent = mestre_radio.write(&probe, sizeof(probe));
+    // radio_send() em vez de write(): ver shared/protocol.h para o porque
+    // (bug de retry-forever em RF24::write() nesta versao da lib quando
+    // TX_DS/TX_DF nunca setam, reproduzido em bancada com o escravo fora
+    // do canal na hora da sonda).
+    bool sent = radio_send(mestre_radio, &probe, sizeof(probe));
     if (!sent)
     {
         mestre_radio.startListening();
@@ -293,15 +297,15 @@ static bool send_seed_to_slave()
 
     mestre_radio.setChannel(g_pair_channel);
     mestre_radio.stopListening();
-    bool sent = mestre_radio.write(&seed_pkt, sizeof(seed_pkt));
+    bool sent = radio_send(mestre_radio, &seed_pkt, sizeof(seed_pkt));
     if (!sent)
     {
-        Serial.println("[MESTRE] Transmissão de seed falhou.");
+        guarded_println("[MESTRE] Transmissão de seed falhou.");
         mestre_radio.startListening();
         return false;
     }
 
-    Serial.printf("[MESTRE] Seed %u transmitida. Aguardando confirmação...\n", g_seed);
+    guarded_printf("[MESTRE] Seed %u transmitida. Aguardando confirmação...\n", g_seed);
 
     mestre_radio.startListening();
     unsigned long start_wait = millis();
@@ -322,12 +326,12 @@ static bool send_seed_to_slave()
         mestre_radio.read(&ack, sizeof(ack));
         if (ack.type == MSG_SEED_ACK && ack.seed == g_seed)
         {
-            Serial.println("[MESTRE] Confirmação de seed recebida do escravo.");
+            guarded_println("[MESTRE] Confirmação de seed recebida do escravo.");
             return true;
         }
     }
 
-    Serial.println("[MESTRE] Timeout esperando confirmação de seed.");
+    guarded_println("[MESTRE] Timeout esperando confirmação de seed.");
     return false;
 }
 
@@ -488,7 +492,7 @@ static bool send_pending_control_if_any()
         pkt.apply_at_hop = g_control_apply_at;
 
         mestre_radio.stopListening();
-        mestre_radio.write(&pkt, sizeof(pkt));
+        radio_send(mestre_radio, &pkt, sizeof(pkt));
         mestre_radio.startListening();
         acked = wait_control_ack(g_control_apply_at);
 
@@ -507,7 +511,7 @@ static bool send_pending_control_if_any()
         pkt.apply_at_hop = g_control_apply_at;
 
         mestre_radio.stopListening();
-        mestre_radio.write(&pkt, sizeof(pkt));
+        radio_send(mestre_radio, &pkt, sizeof(pkt));
         mestre_radio.startListening();
         acked = wait_control_ack(g_control_apply_at);
 
@@ -563,7 +567,7 @@ static void mestre_setup()
     if (!g_mestre_alert_source)
         pinMode(PIN_ALERT_IN, INPUT_PULLDOWN);
 
-    Serial.println("\n[MESTRE] Iniciando transmissor (FIXO)...");
+    guarded_println("\n[MESTRE] Iniciando transmissor (FIXO)...");
 
     delay(2000);
 
@@ -577,7 +581,7 @@ static void mestre_setup()
 
     if (!mestre_radio.begin())
     {
-        Serial.println(F("[ERRO MESTRE] Falha fatal! O Módulo NRF24 não respondeu no SPI. Verifique a fiação."));
+        guarded_println(F("[ERRO MESTRE] Falha fatal! O Módulo NRF24 não respondeu no SPI. Verifique a fiação."));
     }
 
     mestre_radio.setPALevel(RF24_PA_LOW);
@@ -586,6 +590,11 @@ static void mestre_setup()
 
     mestre_radio.enableDynamicPayloads();
     mestre_radio.enableAckPayload();
+    // adaptive-rendezvous: necessario para write(..., multicast=true) na
+    // sonda de pareamento (ver try_establish_link) -- sem isso o bit
+    // EN_DYN_ACK do FEATURE register nao é setado e o comando
+    // W_TX_PAYLOAD_NO_ACK não tem efeito.
+    mestre_radio.enableDynamicAck();
 
     mestre_radio.setCRCLength(RF24_CRC_16);
     mestre_radio.openWritingPipe(slaveAddress);
@@ -595,12 +604,12 @@ static void mestre_setup()
     mestre_radio.setAutoAck(true);
     mestre_radio.stopListening();
 
-    Serial.println("\n--- STATUS DO RÁDIO MESTRE (REGISTRADORES) ---");
+    guarded_println("\n--- STATUS DO RÁDIO MESTRE (REGISTRADORES) ---");
     mestre_radio.printDetails();
-    Serial.println("----------------------------------------------\n");
+    guarded_println("----------------------------------------------\n");
 
     g_total_fragments = compute_total_fragments();
-    Serial.printf("[MESTRE] Rádio configurado. Total de fragmentos: %u\n", g_total_fragments);
+    guarded_printf("[MESTRE] Rádio configurado. Total de fragmentos: %u\n", g_total_fragments);
 
     wait_for_seed_window();
 
@@ -633,12 +642,12 @@ static void mestre_loop()
         if (alert_now)
         {
             g_reseed_needed = true;
-            Serial.println("[MESTRE] ALERTA: ataque detectado (analisador).");
+            guarded_println("[MESTRE] ALERTA: ataque detectado (analisador).");
             tlm_event("mestre", "alert_on");
         }
         else
         {
-            Serial.println("[MESTRE] ALERTA: ataque encerrado.");
+            guarded_println("[MESTRE] ALERTA: ataque encerrado.");
             tlm_event("mestre", "alert_off");
         }
         g_alert_active = alert_now;
@@ -659,7 +668,7 @@ static void mestre_loop()
                 g_hops_since_ack = 0;
                 g_hop_start_at = millis() + HOP_START_DELAY_MS;
                 g_last_hop_time = millis();
-                Serial.printf("[MESTRE] Pareamento confirmado em ch=%u. Iniciando envio de seed...\n", g_pair_channel);
+                guarded_printf("[MESTRE] Pareamento confirmado em ch=%u. Iniciando envio de seed...\n", g_pair_channel);
                 tlm_printf("mestre", "pair_ok", "ch=%u", g_pair_channel);
             }
         }
@@ -705,10 +714,10 @@ static void mestre_loop()
         fill_fragment(pkt, g_current_fragment);
 
         mestre_radio.stopListening();
-        bool sent = mestre_radio.write(&pkt, sizeof(pkt));
+        bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));
         if (!sent)
         {
-            Serial.printf("[MESTRE] Falha de envio no hop=%lu canal=%u frag=%u\n", g_hop_counter, g_current_channel, g_current_fragment);
+            guarded_printf("[MESTRE] Falha de envio no hop=%lu canal=%u frag=%u\n", g_hop_counter, g_current_channel, g_current_fragment);
             mestre_radio.startListening();
             g_hops_since_ack++;
             uint8_t idx = find_channel_index(channel);
@@ -722,7 +731,7 @@ static void mestre_loop()
         }
 
         tlm_printf("mestre", "hop", "ch=%u;n=%lu;frag=%u", channel, g_hop_counter, g_current_fragment);
-        Serial.printf("[MESTRE] Hop=%lu canal=%u frag=%u/%u len=%u enviada.\n",
+        guarded_printf("[MESTRE] Hop=%lu canal=%u frag=%u/%u len=%u enviada.\n",
                       g_hop_counter, g_current_channel, g_current_fragment + 1, g_total_fragments, pkt.payload_len);
 
         mestre_radio.startListening();
@@ -737,11 +746,11 @@ static void mestre_loop()
                 g_channel_fail[idx]--;
 
             tlm_printf("mestre", "ack", "ch=%u;frag=%u", channel, g_current_fragment);
-            Serial.printf("[MESTRE] ACK recebido para frag=%u\n", g_current_fragment + 1);
+            guarded_printf("[MESTRE] ACK recebido para frag=%u\n", g_current_fragment + 1);
             g_current_fragment++;
             if (completed || g_current_fragment >= g_total_fragments)
             {
-                Serial.println("[MESTRE] Mensagem completa confirmada pelo Escravo.");
+                guarded_println("[MESTRE] Mensagem completa confirmada pelo Escravo.");
                 tlm_event("mestre", "msg_done");
                 g_msg_id++;
                 g_current_fragment = 0;
@@ -753,7 +762,7 @@ static void mestre_loop()
             if (g_channel_fail[idx] < 255)
                 g_channel_fail[idx]++;
             tlm_printf("mestre", "miss", "ch=%u;frag=%u", channel, g_current_fragment);
-            Serial.printf("[MESTRE] Timeout ACK no hop=%lu, frag=%u sera reenviada no proximo salto.\n", g_hop_counter, g_current_fragment + 1);
+            guarded_printf("[MESTRE] Timeout ACK no hop=%lu, frag=%u sera reenviada no proximo salto.\n", g_hop_counter, g_current_fragment + 1);
         }
 
         g_hop_counter++;

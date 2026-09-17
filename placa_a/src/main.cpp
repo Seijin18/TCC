@@ -40,7 +40,7 @@ void setup()
     xTaskCreatePinnedToCore(
         analisadorTask,
         "analisador",
-        8192,
+        16384,
         nullptr,
         tskIDLE_PRIORITY + 1,
         nullptr,

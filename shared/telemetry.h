@@ -75,6 +75,47 @@ static inline void tlm_event(const char *src, const char *event)
     tlm_printf(src, event, "");
 }
 
+// two-board-topology: nas placas combinadas, duas tasks FreeRTOS de
+// núcleos diferentes chamam Serial.print/println/printf diretamente para
+// log humano (não passam por tlm_printf) -- sem sincronização,
+// HardwareSerial não é reentrante entre núcleos, e uma corrida pode
+// travar uma das tasks indefinidamente (observado em bancada: o
+// analisador imprime uma linha CSV de 126 números a cada ciclo, e uma
+// única chamada de Serial.print do mestre nesse meio tempo já basta para
+// travar). guarded_print/println/printf tomam o MESMO lock de
+// tlm_printf() -- todo Serial.*() dos node.h deve passar por aqui, nunca
+// chamar Serial diretamente fora de telemetry.h.
+template <typename T>
+static inline void guarded_print(T val)
+{
+    tlm_lock();
+    Serial.print(val);
+    tlm_unlock();
+}
+
+template <typename T>
+static inline void guarded_println(T val)
+{
+    tlm_lock();
+    Serial.println(val);
+    tlm_unlock();
+}
+
+static inline void guarded_println()
+{
+    tlm_lock();
+    Serial.println();
+    tlm_unlock();
+}
+
+template <typename... Args>
+static inline void guarded_printf(const char *fmt, Args... args)
+{
+    tlm_lock();
+    Serial.printf(fmt, args...);
+    tlm_unlock();
+}
+
 #endif // ARDUINO
 
 #endif // TELEMETRY_H

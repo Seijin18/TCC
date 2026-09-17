@@ -8,6 +8,7 @@
 
 #ifdef ARDUINO
 #include <Arduino.h>
+#include <RF24.h>
 #else
 #include <cstdint>
 #include <cstddef>
@@ -16,6 +17,40 @@ typedef uint8_t byte;
 
 static const byte masterAddress[6] = "MSTR1";
 static const byte slaveAddress[6] = "SLV01";
+
+#ifdef ARDUINO
+// adaptive-rendezvous: substituto seguro para RF24::write(). Essa versao
+// da lib (RF24 1.6.2) tem um bug real em write(buf,len,multicast): o laco
+// "do { startFastWrite(...); } while (errHandler(&doRecovery) < 0);"
+// nunca sai, porque errHandler() testa "if (doRecovery)" (o PONTEIRO,
+// sempre nao-nulo) em vez de "if (*doRecovery)" (o valor) -- toda vez que
+// o timeout interno de 95ms dispara ele retorna -1 de novo e o do-while
+// tenta de novo, para sempre, se TX_DS/TX_DF nunca setarem (peer fora do
+// alcance, canal errado, jammer ativo). Reproduzido em bancada: mestre
+// travava permanentemente na primeira sonda de pareamento sem escravo
+// presente no canal.
+//
+// writeFast()+txStandBy(timeout) usam um caminho de erro DIFERENTE e
+// genuinamente limitado (bound explicito em txStandBy, sem a mesma
+// checagem de ponteiro sempre-verdadeira). multicast=true (NO_ACK)
+// sempre, porque a confirmacao real de qualquer troca deste protocolo já
+// vem de um pacote de resposta explicito lido separadamente
+// (LinkAck/SeedAck/FragmentAck/ControlAck) -- nunca dependemos do ACK de
+// hardware do NRF24 pra saber se algo funcionou, então write() em si só
+// precisa terminar (nao travar), nao confirmar entrega.
+static const uint32_t RADIO_WRITE_TIMEOUT_MS = 50;
+
+static inline bool radio_send(RF24 &radio, const void *buf, uint8_t len)
+{
+    radio.flush_tx(); // garante FIFO limpo -- um payload preso de uma
+                       // tentativa anterior travaria writeFast() em
+                       // TX_FULL para sempre (nunca reenviado).
+    bool queued = radio.writeFast(buf, len, true);
+    if (!queued)
+        return false;
+    return radio.txStandBy(RADIO_WRITE_TIMEOUT_MS, true);
+}
+#endif // ARDUINO
 
 enum MessageType : uint8_t
 {
@@ -48,7 +83,15 @@ static const uint8_t PAIRING_CANDIDATE_COUNT = 8;
 static const uint32_t LINK_RETRY_MS = 300;     // mestre: intervalo entre MSG_LINK_PROBE
 static const uint32_t LINK_ACK_WAIT_MS = 120;  // mestre: espera por MSG_LINK_ACK apos probe
 static const uint32_t PAIR_CAMP_MS = 2000;     // mestre: tempo acampado num candidato antes de rodar pro proximo
-static const uint32_t PAIR_DWELL_MS = 250;     // escravo: tempo escutando cada candidato
+// escravo: tempo escutando cada candidato. DEVE ser maior que
+// LINK_RETRY_MS -- por pigeonhole, qualquer janela de escuta mais larga
+// que o intervalo entre sondas do mestre garante pegar pelo menos uma
+// sonda, não importa a fase relativa entre os dois relogios livres
+// (millis() de cada placa comeca em instante diferente e não se
+// realinha). Com dwell < intervalo de sonda (250 < 300, valor anterior),
+// a janela de escuta podia sistematicamente cair sempre entre duas
+// sondas consecutivas e nunca convergir -- reproduzido em bancada.
+static const uint32_t PAIR_DWELL_MS = 400;
 static const uint32_t PAIR_MEASURE_SAMPLES = 20; // mestre: amostras de testCarrier() por candidato
 
 static const uint32_t HOP_START_DELAY_MS = 900;
