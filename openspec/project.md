@@ -84,8 +84,14 @@ o change `targeted-jammer`, mas não deve ser tratado como já implementado.
 
 ## Changes ativos e ordem de dependência
 
-Cinco lacunas foram convertidas em changes (`openspec/changes/<slug>/`), um
-por lacuna, para poder arquivar cada um ao fechar a fase correspondente:
+Sete lacunas foram convertidas em changes (`openspec/changes/<slug>/`), um
+por lacuna, para poder arquivar cada um ao fechar a fase correspondente.
+Duas foram adicionadas em 2026-09-17 ao tentar colocar o sistema para rodar
+de ponta a ponta na bancada real de 2 placas: `telemetry-logging` (nada do
+que os nós emitem pela serial era persistido — bloqueava qualquer validação
+de bancada auditável) e `adaptive-rendezvous` (o pareamento inicial usava um
+canal fixo sem defesa nenhuma contra jamming, diferente do hopping já em
+andamento que `dynamic-seed-blacklist` protege).
 
 1. **`plr-metric`** (Fase 1) — sem dependências. Pré-requisito de métrica
    para `dynamic-seed-blacklist` (validar self-healing) e
@@ -102,9 +108,26 @@ por lacuna, para poder arquivar cada um ao fechar a fase correspondente:
 5. **`scenario-automation`** (Fase 5) — depende de todos os anteriores;
    fecha o projeto rodando os 3 cenários comparativos do guia com PLR.
 
+6. **`telemetry-logging`** — sem dependências. Pré-requisito para qualquer
+   validação de bancada auditável dos changes seguintes (logs persistentes
+   em vez de memória da GUI).
+7. **`adaptive-rendezvous`** — sem dependências novas (usa `shared/hopping.h`
+   já existente). Entrega `shared/protocol.h`, do qual
+   `dynamic-seed-blacklist` passa a depender para declarar os pacotes de
+   controle (`MUDAR_SEED`/`BLACKLIST_UPDATE`) num único lugar, e o
+   `hop_counter` compartilhado necessário para a comutação de canal
+   sincronizada.
+
 Ordem recomendada de execução: `plr-metric` e `targeted-jammer` em paralelo
 → `spectrum-attack-classification` → `dynamic-seed-blacklist` →
-`scenario-automation`.
+`scenario-automation`. `telemetry-logging` e `adaptive-rendezvous` podem
+avançar em paralelo com qualquer um dos anteriores (sem dependências), mas
+`dynamic-seed-blacklist` não deve começar sua seção de pacotes de controle
+antes de `adaptive-rendezvous` entregar `shared/protocol.h`. Também é
+pré-requisito de qualquer teste em bancada de 2 placas resolver a seção 7
+(correções de pinagem SPI) de `two-board-topology` — sem isso `env:placa_a`/
+`env:placa_b` colocam o nó secundário de cada placa no mesmo barramento
+físico do primário.
 
 ## Bancada real: 2 placas, não 4 (2026-09-16)
 

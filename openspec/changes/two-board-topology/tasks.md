@@ -86,3 +86,38 @@
       (`spectrum-attack-classification`) se a proximidade física entre os
       dois módulos da Placa A distorcer a classificação em relação ao
       cenário de 4 placas.
+## 7. Correções de pinagem SPI (achadas ao tentar rodar de verdade)
+
+A implementação das seções 3/4 assumiu HSPI para o nó secundário, mas os
+`node.h` de origem nunca foram atualizados para aceitar pinos alternativos
+— eles têm `PIN_CE`/`PIN_CSN`/etc. fixos em VSPI e usam o objeto `SPI`
+global incondicionalmente. Resultado: `placa_a`/`placa_b`, como estão,
+colocariam o nó secundário no mesmo barramento/módulo físico do primário
+(nunca foi compilado nem testado em hardware — só `placa_a` tinha entrado
+em `.pio/build/`, e mesmo essa não tinha sido flasheada). Ver
+`docs/pinout.md` para a tabela de pinos HSPI esperada.
+
+- [ ] 7.1 `analisador/src/node.h`: mover para um `SPIClass` HSPI próprio
+      (CE 16, CSN 15, SCK 4, MISO 2, MOSI 17), mesmo padrão que
+      `jammer/src/node.h` já usa para seu segundo rádio; manter o
+      comportamento standalone (VSPI, `SPI` global) quando não estiver
+      rodando como nó secundário — parametrizar via os mesmos `#define`
+      de escopo por nó, não uma flag de build separada.
+- [ ] 7.2 `jammer/src/node.h`: quando `jammer_set_ready_source()` está
+      registrado (placa combinada), usar **só** o rádio HSPI
+      (`has_radio2 = false`, sem tocar no VSPI) — hoje o rádio 1
+      (`jammer_radio`) do jammer é criado em VSPI (CE22/CSN21), que na
+      Placa B é o mesmo módulo físico do escravo.
+- [ ] 7.3 `mestre/src/node.h`/`escravo/src/node.h`: o pino de alerta
+      (`PIN_ALERT_IN`/GPIO 4) só deve ser configurado com `pinMode()`
+      quando nenhuma fonte/sink de callback estiver registrada — GPIO 4 é
+      o SCK do barramento HSPI usado pelo nó secundário na mesma placa.
+- [ ] 7.4 `analisador/src/node.h`: mesma guarda para `pinMode(PIN_ALERT,
+      OUTPUT)` — idem, GPIO 4 é HSPI SCK.
+- [ ] 7.5 Remover (ou colocar atrás de uma guarda) o blink de
+      `LED_BUILTIN` (GPIO 2) em `mestre_setup()`/`escravo_setup()` nas
+      builds combinadas — GPIO 2 é o MISO do barramento HSPI.
+- [ ] 7.6 Compilar `env:placa_a` e `env:placa_b` (a segunda nunca foi
+      compilada) e confirmar ausência de conflito de definição de pino
+      entre os dois `node.h` incluídos no mesmo `main.cpp`.
+

@@ -79,6 +79,19 @@ lida uma vez, via serial, antes do hopping começar (`wait_for_seed`,
   "isolar canais detectados sob ataque severo", que é um processo, não um
   evento único).
 
+## Dependência: `shared/protocol.h` e `hop_counter` compartilhado
+
+`openspec/changes/adaptive-rendezvous/` extrai `FragmentPacket` e os demais
+tipos hoje duplicados em `mestre/src/node.h`/`escravo/src/node.h` para
+`shared/protocol.h`, e adiciona um `hop_counter` explícito ao
+`FragmentPacket` para os dois lados concordarem sobre o hop atual. Os novos
+tipos deste change (`MUDAR_SEED`, `BLACKLIST_UPDATE`, `ControlAck`) devem
+ser definidos em `shared/protocol.h` (não duplicados de novo em cada
+`node.h`), e a implementação da seção 2 deste change deve rodar depois que
+`adaptive-rendezvous` tiver entregue esse arquivo — sem isso não há um lugar
+único para declarar os novos pacotes de controle sem repetir a definição
+nos dois nós.
+
 ## Risks / Trade-offs
 
 - Pacotes de controle ainda podem, em teoria, colidir repetidamente com o
