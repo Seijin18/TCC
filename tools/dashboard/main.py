@@ -337,6 +337,22 @@ class SerialReaderThread(threading.Thread):
         self.bytes_received = 0
         self.raw_lines = 0
         self.last_line = ""
+        self._ser: Optional[serial.Serial] = None
+        self._write_lock = threading.Lock()
+
+    def send_line(self, text: str) -> bool:
+        """Escreve texto + '\\n' na serial — necessário pro fluxo de setup
+        interativo do mestre (\"Digite a seed desejada (0-100)...\"), que
+        bloqueia em setup() esperando entrada antes de iniciar o pareamento."""
+        with self._write_lock:
+            if not self._ser or not self._ser.is_open:
+                return False
+            try:
+                self._ser.write((text.strip() + "\n").encode("utf-8"))
+                self._ser.flush()
+                return True
+            except serial.SerialException:
+                return False
 
     def run(self):
         try:
@@ -347,6 +363,7 @@ class SerialReaderThread(threading.Thread):
             ser.dtr = False
             ser.rts = False
             ser.open()
+            self._ser = ser
             time.sleep(0.3)
             while not self._stop_event.is_set():
                 raw = ser.readline()
@@ -367,6 +384,8 @@ class SerialReaderThread(threading.Thread):
             self.error = str(exc)
             if self.status_cb:
                 self.status_cb(self.error)
+        finally:
+            self._ser = None
 
     def stop(self):
         self._stop_event.set()
@@ -399,6 +418,17 @@ class PortPanel(ttk.LabelFrame):
         self.raw_lbl = ttk.Label(self, text="", foreground=COLOR_IDLE, font=("TkDefaultFont", 8))
         self.raw_lbl.pack(anchor="w")
 
+        # Alguns nós esperam entrada interativa antes de seguir em frente
+        # (ex.: mestre bloqueia em setup() até receber a seed pelo serial
+        # monitor) — sem isso o painel fica só observando, sem forma de
+        # destravar o node.
+        send_row = ttk.Frame(self)
+        send_row.pack(fill=tk.X, pady=(4, 0))
+        self.send_entry = ttk.Entry(send_row, width=14)
+        self.send_entry.pack(side=tk.LEFT, padx=(0, 4))
+        self.send_entry.bind("<Return>", lambda _evt: self.send())
+        ttk.Button(send_row, text="Enviar", command=self.send).pack(side=tk.LEFT)
+
         self.refresh_ports()
         if default_port and default_port in self.port_cb["values"]:
             self.port_cb.set(default_port)
@@ -411,6 +441,15 @@ class PortPanel(ttk.LabelFrame):
             self.port_cb.set(current)
         elif ports:
             self.port_cb.set(ports[0])
+
+    def send(self):
+        text = self.send_entry.get()
+        if not text or not self.reader:
+            return
+        ok = self.reader.send_line(text)
+        self.send_entry.delete(0, tk.END)
+        if not ok:
+            self.raw_lbl.config(text=f"Falha ao enviar {text!r}", foreground=COLOR_BAD)
 
     def toggle(self):
         if self.reader:
