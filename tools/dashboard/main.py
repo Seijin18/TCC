@@ -2,19 +2,22 @@
 TCC — Painel de Monitoramento do Sistema
 
 Visualiza em tempo real o estado dos 4 nós (mestre, escravo, analisador,
-jammer) a partir da serial das placas, sem assumir qual porta USB é qual
-placa — cada linha recebida é classificada pelo próprio conteúdo (prefixo
-"[MESTRE]", "PLR;...", CSV de espectro, etc.) e atualiza o painel do nó
-correspondente. Funciona tanto com a bancada de 2 placas (env:placa_a +
-env:placa_b, cada uma com 2 nós combinados) quanto com a de 4 placas
-standalone — o parser não depende da topologia, só do que aparece na serial.
+jammer) lendo logs/latest.jsonl (telemetry-logging) em vez de abrir a
+porta serial diretamente — tools/logger/main.py é o dono exclusivo das
+portas, o que permite ao painel abrir/fechar sem perder histórico e sem
+disputar a porta com o logger. Cada linha recebida é classificada pelo
+próprio conteúdo (prefixo "[MESTRE]", "PLR;...", CSV de espectro, etc.),
+igual a antes — só a fonte da linha mudou.
 
 Uso:
+    python3 tools/logger/main.py &   # dono das portas, escreve logs/
     cd tools/dashboard
     pip install -r ../spectrum/requirements.txt
     python main.py
 """
 
+import json
+import os
 import re
 import threading
 import time
@@ -24,8 +27,6 @@ from queue import Empty, Queue
 from typing import Optional
 
 import numpy as np
-import serial
-import serial.tools.list_ports
 import tkinter as tk
 from tkinter import ttk, scrolledtext
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -35,7 +36,10 @@ from matplotlib.colors import LinearSegmentedColormap
 # ---------------------------------------------------------------------------
 # Constants (espelham shared/hopping.h e analisador/src/node.h)
 # ---------------------------------------------------------------------------
-BAUD_RATE = 115200
+LOGS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "logs"))
+LATEST_JSONL = os.path.join(LOGS_DIR, "latest.jsonl")
+CMD_IN_PATH = os.path.join(LOGS_DIR, "cmd.in")
+BOARD_NAMES = ["placa_a", "placa_b"]
 N_CHANNELS = 126
 HOPPING_CHANNELS = [10, 22, 34, 46, 58, 70, 82, 94, 100, 105, 110, 115, 120, 125, 15, 27]
 WIFI_CHANNELS = {1: 12, 6: 37, 11: 62}
@@ -50,16 +54,6 @@ COLOR_OK = "#2e7d32"
 COLOR_WARN = "#e65100"
 COLOR_BAD = "#c62828"
 COLOR_IDLE = "#757575"
-
-
-def guess_ports() -> list:
-    keywords = ("usb", "serial", "cp210", "ch340", "ch910", "silicon", "esp32", "uart", "enhanced", "acm")
-    scored = []
-    for info in serial.tools.list_ports.comports():
-        desc = f"{info.device} {info.description} {info.manufacturer or ''}".lower()
-        scored.append((0 if any(k in desc for k in keywords) else 1, info.device))
-    scored.sort()
-    return [dev for _, dev in scored]
 
 
 # ---------------------------------------------------------------------------
@@ -326,10 +320,16 @@ def classify_line(line: str, state: SystemState, now: float, log_cb) -> None:
 # ---------------------------------------------------------------------------
 # Serial reader thread — generico, so entrega linhas cruas pra fila
 # ---------------------------------------------------------------------------
-class SerialReaderThread(threading.Thread):
-    def __init__(self, port: str, line_queue: Queue, status_cb=None):
+class LogTailThread(threading.Thread):
+    """Segue logs/latest.jsonl (telemetry-logging) filtrando pelo campo
+    "board" ('placa_a'/'placa_b'), reemitindo a linha bruta original
+    (campo "raw") na mesma Queue que classify_line() já consumia quando a
+    fonte era a porta serial direta — só a origem da linha mudou, o resto
+    do painel não precisa saber a diferença."""
+
+    def __init__(self, board_name: str, line_queue: Queue, status_cb=None):
         super().__init__(daemon=True)
-        self.port = port
+        self.board_name = board_name
         self.line_queue = line_queue
         self.status_cb = status_cb
         self._stop_event = threading.Event()
@@ -337,55 +337,56 @@ class SerialReaderThread(threading.Thread):
         self.bytes_received = 0
         self.raw_lines = 0
         self.last_line = ""
-        self._ser: Optional[serial.Serial] = None
-        self._write_lock = threading.Lock()
 
     def send_line(self, text: str) -> bool:
-        """Escreve texto + '\\n' na serial — necessário pro fluxo de setup
-        interativo do mestre (\"Digite a seed desejada (0-100)...\"), que
-        bloqueia em setup() esperando entrada antes de iniciar o pareamento."""
-        with self._write_lock:
-            if not self._ser or not self._ser.is_open:
-                return False
-            try:
-                self._ser.write((text.strip() + "\n").encode("utf-8"))
-                self._ser.flush()
-                return True
-            except serial.SerialException:
-                return False
+        """Anexa um comando em logs/cmd.in no formato que
+        tools/logger/main.py espera ('<placa> <comando>') -- o painel não
+        tem mais acesso direto à porta serial, o logger é quem reenvia."""
+        try:
+            os.makedirs(LOGS_DIR, exist_ok=True)
+            with open(CMD_IN_PATH, "a", encoding="utf-8") as f:
+                f.write(f"{self.board_name} {text.strip()}\n")
+            return True
+        except OSError:
+            return False
 
     def run(self):
+        waited = 0.0
+        while not self._stop_event.is_set() and not os.path.exists(LATEST_JSONL):
+            if waited == 0.0 and self.status_cb:
+                self.status_cb(f"Aguardando {LATEST_JSONL} (logger rodando?)")
+            time.sleep(0.5)
+            waited += 0.5
+
         try:
-            ser = serial.Serial()
-            ser.port = self.port
-            ser.baudrate = BAUD_RATE
-            ser.timeout = 1
-            ser.dtr = False
-            ser.rts = False
-            ser.open()
-            self._ser = ser
-            time.sleep(0.3)
+            f = open(LATEST_JSONL, "r", encoding="utf-8")
+        except OSError as exc:
+            self.error = f"Nao foi possivel abrir {LATEST_JSONL}: {exc}"
+            if self.status_cb:
+                self.status_cb(self.error)
+            return
+
+        f.seek(0, os.SEEK_END)  # só linhas novas a partir de agora
+        try:
             while not self._stop_event.is_set():
-                raw = ser.readline()
-                if not raw:
+                line = f.readline()
+                if not line:
+                    time.sleep(0.2)
                     continue
-                self.bytes_received += len(raw)
-                line = raw.decode("utf-8", errors="ignore").strip()
-                if line:
+                self.bytes_received += len(line)
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("board") != self.board_name:
+                    continue
+                raw = record.get("raw", "")
+                if raw:
                     self.raw_lines += 1
-                    self.last_line = line
-                    self.line_queue.put(line)
-            ser.close()
-        except serial.SerialException as exc:
-            self.error = f"Nao foi possivel abrir {self.port}: {exc}"
-            if self.status_cb:
-                self.status_cb(self.error)
-        except Exception as exc:  # pragma: no cover
-            self.error = str(exc)
-            if self.status_cb:
-                self.status_cb(self.error)
+                    self.last_line = raw
+                    self.line_queue.put(raw)
         finally:
-            self._ser = None
+            f.close()
 
     def stop(self):
         self._stop_event.set()
@@ -395,21 +396,23 @@ class SerialReaderThread(threading.Thread):
 # UI
 # ---------------------------------------------------------------------------
 class PortPanel(ttk.LabelFrame):
-    """Um seletor de porta + botao conectar/desconectar. O papel (qual nó
-    fala nessa porta) é descoberto pelo conteúdo das linhas, não fixado
-    aqui — funciona tanto com env:placa_a/placa_b quanto com os 4 nós
-    standalone em portas separadas."""
+    """Um seletor de placa ('placa_a'/'placa_b') + botao conectar/
+    desconectar. O papel (qual nó fala nessa placa) é descoberto pelo
+    conteúdo das linhas, não fixado aqui. Desde telemetry-logging, "conectar"
+    abre um LogTailThread sobre logs/latest.jsonl filtrado por essa placa —
+    quem tem a porta serial de verdade é tools/logger/main.py."""
 
-    def __init__(self, parent, title: str, line_queue: Queue, default_port: Optional[str]):
+    def __init__(self, parent, title: str, line_queue: Queue, default_board: Optional[str]):
         super().__init__(parent, text=title, padding=8)
         self.line_queue = line_queue
-        self.reader: Optional[SerialReaderThread] = None
+        self.reader: Optional[LogTailThread] = None
 
         row = ttk.Frame(self)
         row.pack(fill=tk.X)
-        self.port_cb = ttk.Combobox(row, state="readonly", width=16)
-        self.port_cb.pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(row, text="Atualizar", command=self.refresh_ports).pack(side=tk.LEFT)
+        self.board_cb = ttk.Combobox(row, state="readonly", width=16, values=BOARD_NAMES)
+        self.board_cb.pack(side=tk.LEFT, padx=(0, 6))
+        if default_board in BOARD_NAMES:
+            self.board_cb.set(default_board)
         self.toggle_btn = ttk.Button(row, text="Conectar", command=self.toggle)
         self.toggle_btn.pack(side=tk.LEFT, padx=(6, 0))
 
@@ -419,28 +422,14 @@ class PortPanel(ttk.LabelFrame):
         self.raw_lbl.pack(anchor="w")
 
         # Alguns nós esperam entrada interativa antes de seguir em frente
-        # (ex.: mestre bloqueia em setup() até receber a seed pelo serial
-        # monitor) — sem isso o painel fica só observando, sem forma de
-        # destravar o node.
+        # (ex.: comando runtime "seed <n>" do mestre) — sem isso, o painel
+        # fica só observando, sem forma de comandar o node.
         send_row = ttk.Frame(self)
         send_row.pack(fill=tk.X, pady=(4, 0))
         self.send_entry = ttk.Entry(send_row, width=14)
         self.send_entry.pack(side=tk.LEFT, padx=(0, 4))
         self.send_entry.bind("<Return>", lambda _evt: self.send())
         ttk.Button(send_row, text="Enviar", command=self.send).pack(side=tk.LEFT)
-
-        self.refresh_ports()
-        if default_port and default_port in self.port_cb["values"]:
-            self.port_cb.set(default_port)
-
-    def refresh_ports(self):
-        ports = guess_ports()
-        current = self.port_cb.get()
-        self.port_cb["values"] = ports
-        if current in ports:
-            self.port_cb.set(current)
-        elif ports:
-            self.port_cb.set(ports[0])
 
     def send(self):
         text = self.send_entry.get()
@@ -460,14 +449,14 @@ class PortPanel(ttk.LabelFrame):
             self.raw_lbl.config(text="")
             return
 
-        port = self.port_cb.get()
-        if not port:
-            self.status_lbl.config(text="Selecione uma porta", foreground=COLOR_BAD)
+        board = self.board_cb.get()
+        if not board:
+            self.status_lbl.config(text="Selecione uma placa", foreground=COLOR_BAD)
             return
-        self.reader = SerialReaderThread(port, self.line_queue, status_cb=self._on_error)
+        self.reader = LogTailThread(board, self.line_queue, status_cb=self._on_error)
         self.reader.start()
         self.toggle_btn.config(text="Desconectar")
-        self.status_lbl.config(text=f"Conectado em {port}", foreground=COLOR_OK)
+        self.status_lbl.config(text=f"Lendo logs de {board}", foreground=COLOR_OK)
         self.raw_lbl.config(text="Aguardando dados...", foreground=COLOR_IDLE)
 
     def tick(self):
@@ -480,7 +469,7 @@ class PortPanel(ttk.LabelFrame):
         preview = self.reader.last_line[:48]
         if self.reader.raw_lines == 0:
             self.raw_lbl.config(
-                text=f"0 linhas recebidas ({self.reader.bytes_received} bytes brutos) — verifique porta/baud/firmware",
+                text=f"0 linhas recebidas ({self.reader.bytes_received} bytes brutos de {LATEST_JSONL}) — logger rodando?",
                 foreground=COLOR_WARN if self.reader.bytes_received == 0 else COLOR_BAD,
             )
         else:
@@ -519,15 +508,11 @@ class App(tk.Tk):
         top = ttk.Frame(self, padding=8)
         top.pack(fill=tk.X)
 
-        ports = guess_ports()
-        p1 = ports[0] if len(ports) > 0 else None
-        p2 = ports[1] if len(ports) > 1 else None
-
         self.queue_a: Queue = Queue()
         self.queue_b: Queue = Queue()
-        self.panel_a = PortPanel(top, "Porta 1", self.queue_a, p1)
+        self.panel_a = PortPanel(top, "Placa A (mestre+analisador)", self.queue_a, "placa_a")
         self.panel_a.pack(side=tk.LEFT, padx=(0, 8))
-        self.panel_b = PortPanel(top, "Porta 2", self.queue_b, p2)
+        self.panel_b = PortPanel(top, "Placa B (escravo+jammer)", self.queue_b, "placa_b")
         self.panel_b.pack(side=tk.LEFT)
 
         self.alert_lbl = tk.Label(
