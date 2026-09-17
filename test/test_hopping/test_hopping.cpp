@@ -105,6 +105,60 @@ static void test_get_next_channel_different_seeds_offset_sequence(void)
     TEST_ASSERT_TRUE_MESSAGE(any_difference, "seeds distintas produziram exatamente a mesma sequencia de canais");
 }
 
+// --- get_next_active_channel (dynamic-seed-blacklist) --------------------
+
+static void test_get_next_active_channel_full_mask_matches_get_next_channel(void)
+{
+    // Mascara cheia (0xFFFF) deve se comportar identico a get_next_channel.
+    for (uint16_t seed = 0; seed < 5; seed++)
+        for (uint32_t counter = 0; counter < TABLE_SIZE * 2; counter++)
+            TEST_ASSERT_EQUAL_UINT8(get_next_channel(seed, counter),
+                                     get_next_active_channel(seed, counter, 0xFFFF));
+}
+
+static void test_get_next_active_channel_only_returns_enabled_channels(void)
+{
+    // Mascara habilita so os indices pares (0,2,4,...,14).
+    uint16_t mask = 0;
+    for (uint8_t i = 0; i < TABLE_SIZE; i += 2)
+        mask |= (1u << i);
+
+    for (uint32_t counter = 0; counter < TABLE_SIZE * 3; counter++)
+    {
+        uint8_t ch = get_next_active_channel(7, counter, mask);
+        bool enabled = false;
+        for (uint8_t i = 0; i < TABLE_SIZE; i += 2)
+            if (HOPPING_CHANNELS[i] == ch)
+                enabled = true;
+        TEST_ASSERT_TRUE_MESSAGE(enabled, "get_next_active_channel retornou canal fora da mascara");
+    }
+}
+
+static void test_get_next_active_channel_single_channel_mask(void)
+{
+    // Mascara com um unico canal habilitado deve sempre retornar esse canal.
+    uint8_t only_index = 5;
+    uint16_t mask = (uint16_t)(1u << only_index);
+
+    for (uint32_t counter = 0; counter < 30; counter++)
+        TEST_ASSERT_EQUAL_UINT8(HOPPING_CHANNELS[only_index], get_next_active_channel(3, counter, mask));
+}
+
+static void test_get_next_active_channel_zero_mask_falls_back_to_full_table(void)
+{
+    // Guarda: mascara vazia nao deve travar (divisao por zero) -- degrada
+    // para a tabela cheia.
+    for (uint32_t counter = 0; counter < TABLE_SIZE; counter++)
+    {
+        uint8_t ch = get_next_active_channel(1, counter, 0);
+        bool found = false;
+        for (uint8_t i = 0; i < TABLE_SIZE; i++)
+            if (HOPPING_CHANNELS[i] == ch)
+                found = true;
+        TEST_ASSERT_TRUE_MESSAGE(found, "mascara zero nao degradou para a tabela cheia");
+    }
+}
+
 int main(int argc, char **argv)
 {
     UNITY_BEGIN();
@@ -114,5 +168,9 @@ int main(int argc, char **argv)
     RUN_TEST(test_get_next_channel_returns_table_entries);
     RUN_TEST(test_get_next_channel_cycles_through_full_table_per_seed);
     RUN_TEST(test_get_next_channel_different_seeds_offset_sequence);
+    RUN_TEST(test_get_next_active_channel_full_mask_matches_get_next_channel);
+    RUN_TEST(test_get_next_active_channel_only_returns_enabled_channels);
+    RUN_TEST(test_get_next_active_channel_single_channel_mask);
+    RUN_TEST(test_get_next_active_channel_zero_mask_falls_back_to_full_table);
     return UNITY_END();
 }

@@ -6,6 +6,7 @@
 #include <RF24.h>
 #include <cstring>
 #include "../../shared/hopping.h"
+#include "../../shared/telemetry.h"
 
 #define PIN_CE_VSPI 22
 #define PIN_CSN_VSPI 21
@@ -51,14 +52,21 @@ enum JamMode
 static JamMode g_mode = JAM_MODE_SWEEP;
 
 // Fonte opcional de "handshake concluído" — quando registrada (placa_b,
-// via jammer_set_ready_source()), o jammer configura os rádios mas só
-// inicia a portadora depois que a fonte retornar true, ao invés de
-// emitir desde o boot. Sem fonte registrada (nós standalone, cenário de
-// 4 placas), preserva o comportamento original: emite imediatamente.
-// Mesmo padrão de callback de mestre_set_alert_source()/
-// escravo_set_ready_sink().
+// via jammer_set_ready_source()), o jammer usa **só** o rádio HSPI (o
+// barramento VSPI da placa pertence ao escravo -- two-board-topology
+// seção 7) e só inicia a portadora depois que a fonte retornar true. Sem
+// fonte registrada (nós standalone, cenário de 4 placas), preserva o
+// comportamento original: dois rádios (VSPI+HSPI), emite desde o boot.
 static bool (*g_jammer_ready_source)() = nullptr;
+static bool g_combined_mode = false;
 static bool g_carrier_started = false;
+
+// jam on|off — na placa combinada, default é OFF (não emitir até um
+// comando explícito), diferente do padrão standalone (emite assim que o
+// handshake completa). "power min|low|high|max" ajusta RF24_PA_* em
+// runtime nos dois testes graduais (T4/T5 do plano de bancada).
+static bool g_jam_enabled = true;
+static rf24_pa_dbm_e g_jam_power = RF24_PA_MAX;
 
 static void jammer_set_ready_source(bool (*source)())
 {
@@ -69,19 +77,48 @@ static void jammer_set_ready_source(bool (*source)())
 static char cmdBuf[CMD_BUF_SIZE];
 static uint8_t cmdLen = 0;
 
+static void applyPowerLevel()
+{
+    jammer_radio.setPALevel(g_jam_power);
+    if (has_radio2)
+        jammer_radio2.setPALevel(g_jam_power);
+}
+
+static void stopCarrier()
+{
+    if (!g_carrier_started)
+        return;
+    jammer_radio.stopConstCarrier();
+    if (has_radio2)
+        jammer_radio2.stopConstCarrier();
+    g_carrier_started = false;
+    tlm_event("jammer", "jam_state_off");
+    Serial.println("[JAMMER] Emissao interrompida (jam off).");
+}
+
 static void configureJammerRadio(RF24 &r)
 {
     r.setAutoAck(false);
     r.setRetries(0, 0);
     r.disableCRC();
     r.setDataRate(RF24_2MBPS);
-    r.setPALevel(RF24_PA_MAX);
+    r.setPALevel(g_jam_power);
     r.stopListening();
 }
 
 static void startCarrierOn(RF24 &r, uint8_t channel)
 {
-    r.startConstCarrier(RF24_PA_MAX, channel);
+    r.startConstCarrier(g_jam_power, channel);
+}
+
+static void startCarrier()
+{
+    startCarrierOn(jammer_radio, BT_CH_MIN);
+    if (has_radio2)
+        startCarrierOn(jammer_radio2, BT_CH_MAX);
+    g_carrier_started = true;
+    tlm_event("jammer", "jam_state_on");
+    Serial.println("[JAMMER] Emissao CW ativa. '.' = heartbeat a cada 1 s\n");
 }
 
 static void hopCarrier(RF24 &r, uint8_t channel)
@@ -116,12 +153,48 @@ static void handleCommand(char *line)
     if (cmdMatches(line, "mode sweep"))
     {
         g_mode = JAM_MODE_SWEEP;
+        tlm_event("jammer", "jam_mode_sweep");
         Serial.println("[MODE] sweep");
     }
     else if (cmdMatches(line, "mode targeted"))
     {
         g_mode = JAM_MODE_TARGETED;
+        tlm_event("jammer", "jam_mode_targeted");
         Serial.println("[MODE] targeted");
+    }
+    else if (cmdMatches(line, "jam off"))
+    {
+        g_jam_enabled = false;
+        stopCarrier();
+    }
+    else if (cmdMatches(line, "jam on"))
+    {
+        g_jam_enabled = true;
+        Serial.println("[JAMMER] Habilitado (jam on) -- emissao retoma no proximo ciclo.");
+    }
+    else if (cmdMatches(line, "power min"))
+    {
+        g_jam_power = RF24_PA_MIN;
+        applyPowerLevel();
+        Serial.println("[JAMMER] Potencia: MIN");
+    }
+    else if (cmdMatches(line, "power low"))
+    {
+        g_jam_power = RF24_PA_LOW;
+        applyPowerLevel();
+        Serial.println("[JAMMER] Potencia: LOW");
+    }
+    else if (cmdMatches(line, "power high"))
+    {
+        g_jam_power = RF24_PA_HIGH;
+        applyPowerLevel();
+        Serial.println("[JAMMER] Potencia: HIGH");
+    }
+    else if (cmdMatches(line, "power max"))
+    {
+        g_jam_power = RF24_PA_MAX;
+        applyPowerLevel();
+        Serial.println("[JAMMER] Potencia: MAX");
     }
     else
     {
@@ -158,6 +231,17 @@ static void jammer_setup()
     Serial.begin(115200);
     delay(1000);
 
+    g_combined_mode = (g_jammer_ready_source != nullptr);
+    // Placa combinada: nao emitir por padrao ate um "jam on"/"mode ..."
+    // explicito, e em potencia baixa -- PA_MAX a centimetros do escravo
+    // (docs/pinout.md) satura o receptor na banda inteira, destruindo a
+    // premissa de "escapar para um canal livre".
+    if (g_combined_mode)
+    {
+        g_jam_enabled = false;
+        g_jam_power = RF24_PA_LOW;
+    }
+
     Serial.println("\n\n=== JAMMER BLUETOOTH (CW) — TESTE CELULAR + FONE ===");
     Serial.println("Faixa: 2402–2480 MHz | NRF24 ch 2–80");
 #if JAMMER_SPECTRUM_TEST
@@ -165,44 +249,58 @@ static void jammer_setup()
 #else
     Serial.printf("Modo: NORMAL | Dwell: %u us/canal\n", PLL_DWELL_US);
 #endif
-    Serial.println("Alvo: BT Classic + BLE (ex.: BT 5.3). Ambiente controlado.\n");
 
-    vspi.begin(PIN_SCK_VSPI, PIN_MISO_VSPI, PIN_MOSI_VSPI, PIN_CSN_VSPI);
     hspi.begin(PIN_SCK_HSPI, PIN_MISO_HSPI, PIN_MOSI_HSPI, PIN_CSN_HSPI);
 
-    jammer_radio.begin(&vspi, PIN_CE_VSPI, PIN_CSN_VSPI);
-    jammer_radio2.begin(&hspi, PIN_CE_HSPI, PIN_CSN_HSPI);
-    has_radio2 = jammer_radio2.isChipConnected();
-
-    if (!jammer_radio.isChipConnected())
+    if (g_combined_mode)
     {
-        Serial.println("[ERRO] Radio 1 (VSPI) nao detectado. Verifique fiação e 3.3V.");
-    }
+        // Um único rádio, no HSPI -- o barramento VSPI desta placa
+        // pertence ao escravo (two-board-topology seção 7).
+        jammer_radio.begin(&hspi, PIN_CE_HSPI, PIN_CSN_HSPI);
+        has_radio2 = false;
 
-    configureJammerRadio(jammer_radio);
-    if (has_radio2)
-    {
-        configureJammerRadio(jammer_radio2);
-        Serial.println("[OK] 2 radios: faixa dividida (2–41 e 41–80 MHz)");
+        if (!jammer_radio.isChipConnected())
+            Serial.println("[ERRO] Radio (HSPI) nao detectado. Verifique fiação e 3.3V.");
+
+        configureJammerRadio(jammer_radio);
+        Serial.println("[OK] 1 radio (HSPI, placa combinada): varredura completa 2–80");
     }
     else
     {
-        Serial.println("[OK] 1 radio: varredura completa 2–80");
+        vspi.begin(PIN_SCK_VSPI, PIN_MISO_VSPI, PIN_MOSI_VSPI, PIN_CSN_VSPI);
+
+        jammer_radio.begin(&vspi, PIN_CE_VSPI, PIN_CSN_VSPI);
+        jammer_radio2.begin(&hspi, PIN_CE_HSPI, PIN_CSN_HSPI);
+        has_radio2 = jammer_radio2.isChipConnected();
+
+        if (!jammer_radio.isChipConnected())
+            Serial.println("[ERRO] Radio 1 (VSPI) nao detectado. Verifique fiação e 3.3V.");
+
+        configureJammerRadio(jammer_radio);
+        if (has_radio2)
+        {
+            configureJammerRadio(jammer_radio2);
+            Serial.println("[OK] 2 radios: faixa dividida (2–41 e 41–80 MHz)");
+        }
+        else
+        {
+            Serial.println("[OK] 1 radio: varredura completa 2–80");
+        }
     }
 
-    if (g_jammer_ready_source)
+    tlm_event("jammer", "boot");
+
+    if (!g_jam_enabled)
+    {
+        Serial.println("[JAMMER] Desabilitado no boot (placa combinada). Envie 'jam on' para habilitar.");
+    }
+    else if (g_jammer_ready_source)
     {
         Serial.println("[JAMMER] Aguardando handshake mestre/escravo antes de emitir...");
     }
     else
     {
-        // Sem fonte de prontidão (nó standalone): comportamento original,
-        // emite desde o boot.
-        startCarrierOn(jammer_radio, BT_CH_MIN);
-        if (has_radio2)
-            startCarrierOn(jammer_radio2, BT_CH_MAX);
-        g_carrier_started = true;
-        Serial.println("[JAMMER] Emissao CW ativa. '.' = heartbeat a cada 1 s\n");
+        startCarrier();
     }
 }
 
@@ -213,7 +311,6 @@ static void loopSweep()
 
     if (has_radio2)
     {
-        // Radio 1: metade inferior | Radio 2: metade superior (cobertura paralela)
         hopCarrier(jammer_radio, ch_fwd);
         hopCarrier(jammer_radio2, ch_rev);
 
@@ -238,9 +335,6 @@ static void loopSweep()
 
 static void loopTargeted()
 {
-    // Round-robin restrito a HOPPING_CHANNELS (shared/hopping.h). Com 2
-    // rádios, divide os 16 canais ao meio (mesma estratégia do sweep,
-    // aplicada à lista menor) em vez de reaproveitar BT_CH_MID.
     static uint8_t idx_fwd = 0;
     static uint8_t idx_rev = TABLE_SIZE - 1;
 
@@ -265,18 +359,21 @@ static void jammer_loop()
 {
     static unsigned long last_print = 0;
 
-    processSerial(); // mantém comandos de modo (sweep/targeted) sendo aceitos mesmo em espera
+    processSerial(); // mantém comandos (mode/jam/power) sendo aceitos mesmo em espera
+
+    if (!g_jam_enabled)
+    {
+        if (g_carrier_started)
+            stopCarrier();
+        return;
+    }
 
     if (!g_carrier_started)
     {
-        if (!g_jammer_ready_source || !g_jammer_ready_source())
+        if (g_jammer_ready_source && !g_jammer_ready_source())
             return; // ainda esperando o handshake mestre/escravo
 
-        startCarrierOn(jammer_radio, BT_CH_MIN);
-        if (has_radio2)
-            startCarrierOn(jammer_radio2, BT_CH_MAX);
-        g_carrier_started = true;
-        Serial.println("[JAMMER] Handshake detectado. Emissao CW iniciada. '.' = heartbeat a cada 1 s\n");
+        startCarrier();
     }
 
     if (g_mode == JAM_MODE_TARGETED)

@@ -28,10 +28,14 @@ static void analisadorTask(void *pvParameters)
 
 void setup()
 {
-    mestre_setup();
-
+    // Registrar os callbacks ANTES de mestre_setup(): o guard de pinMode do
+    // pino de alerta e do blink de LED_BUILTIN (GPIO 2 == MISO do HSPI do
+    // analisador, two-board-topology seção 7) só decide corretamente se
+    // mestre_set_alert_source() já foi chamado quando mestre_setup() roda.
     mestre_set_alert_source(placaA_alert_get);
     analisador_set_alert_sink(placaA_alert_set);
+
+    mestre_setup();
 
     xTaskCreatePinnedToCore(
         analisadorTask,

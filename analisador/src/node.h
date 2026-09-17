@@ -26,22 +26,37 @@
 #include <SPI.h>
 #include <RF24.h>
 #include "../../shared/hopping.h"
+#include "../../shared/telemetry.h"
 
+// Pinagem standalone (4 placas, barramento único): CE/CSN/SCK/MISO/MOSI
+// abaixo. Numa Placa A combinada (two-board-topology seção 7), o VSPI
+// pertence ao mestre -- o analisador usa o barramento HSPI (PIN_*_HSPI),
+// selecionado em analisador_setup() quando analisador_set_alert_sink() já
+// foi registrado antes da chamada.
 #define PIN_CE 22
 #define PIN_CSN 21
 #define PIN_SCK 18
 #define PIN_MISO 19
 #define PIN_MOSI 23
 
+#define PIN_CE_HSPI 16
+#define PIN_CSN_HSPI 15
+#define PIN_SCK_HSPI 4
+#define PIN_MISO_HSPI 2
+#define PIN_MOSI_HSPI 17
+
 // Pino de alerta para o mestre (spectrum-attack-classification) — nivel
 // HIGH enquanto "ataque ativo", LOW caso contrario. Usado como default
 // quando nenhum sink alternativo é registrado via
 // analisador_set_alert_sink() (ver two-board-topology). Ver docs/pinout.md.
+// GPIO 4 também é o SCK do barramento HSPI usado pelo analisador quando
+// combinado -- por isso o pinMode() só roda no cenário standalone.
 #define PIN_ALERT 4
 
 // 1 = varre apenas ch 2–80 (banda BT, refresh ~3x mais rapido)
-// 0 = varredura completa 126 canais (2400–2525 MHz)
-#define FAST_BT_SCAN 1
+// 0 = varredura completa 126 canais (2400–2525 MHz) -- necessário para
+// enxergar os canais de escape 94–125 usados pelo dynamic-seed-blacklist.
+#define FAST_BT_SCAN 0
 
 #define BT_CH_MIN 2
 #define BT_CH_MAX 80
@@ -64,6 +79,7 @@ static const int NUM_CHANNELS = 126;
 static const int SCAN_SAMPLES = 10;
 static const int PLL_DWELL_US = 130;
 
+static SPIClass analisador_hspi(HSPI);
 static RF24 analisador_radio(PIN_CE, PIN_CSN);
 static int channelData[NUM_CHANNELS];
 
@@ -179,6 +195,7 @@ static void classifyAttack()
             g_attack_active = true;
             setAlertPin(true);
             Serial.printf("[ALERTA] Ataque direcionado detectado. alvo_avg=%d fora_avg=%d\n", alvo_avg, fora_avg);
+            tlm_printf("analisador", "alert_on", "alvo_avg=%d;fora_avg=%d", alvo_avg, fora_avg);
         }
     }
     else
@@ -189,6 +206,7 @@ static void classifyAttack()
             g_attack_active = false;
             setAlertPin(false);
             Serial.println("[ALERTA] Ataque encerrado.");
+            tlm_event("analisador", "alert_off");
         }
     }
 }
@@ -211,15 +229,26 @@ static void analisador_setup()
 
     Serial.println("\n=== TCC Analisador v1 — Espectro 2.4 GHz ===");
 
-    pinMode(PIN_ALERT, OUTPUT);
-    digitalWrite(PIN_ALERT, LOW);
+    bool combined_mode = (g_analisador_alert_sink != nullptr);
 
-    SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CSN);
+    if (!combined_mode)
+    {
+        pinMode(PIN_ALERT, OUTPUT);
+        digitalWrite(PIN_ALERT, LOW);
+    }
+
+    if (combined_mode)
+        analisador_hspi.begin(PIN_SCK_HSPI, PIN_MISO_HSPI, PIN_MOSI_HSPI, PIN_CSN_HSPI);
+    else
+        SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CSN);
 
     bool radioOK = false;
     for (int attempt = 1; attempt <= 5; attempt++)
     {
-        if (analisador_radio.begin())
+        bool began = combined_mode
+                         ? analisador_radio.begin(&analisador_hspi, PIN_CE_HSPI, PIN_CSN_HSPI)
+                         : analisador_radio.begin();
+        if (began)
         {
             radioOK = true;
             break;
@@ -245,6 +274,7 @@ static void analisador_setup()
     Serial.println("Modo: FULL (ch 0–125, 2400–2525 MHz)");
 #endif
     Serial.println("Enviando CSV: ch0,ch1,...,ch125 (atividade 0–100%)\n");
+    tlm_event("analisador", "boot");
 }
 
 static void analisador_loop()

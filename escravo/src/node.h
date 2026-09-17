@@ -7,6 +7,8 @@
 #include <printf.h>
 #include <string.h>
 #include "../../shared/hopping.h"
+#include "../../shared/protocol.h"
+#include "../../shared/telemetry.h"
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 2
@@ -25,7 +27,6 @@
 // VCC:  3.3V
 // GND:  GND
 
-// Pinos do SPI para o ESP32 (Forçando VSPI)
 #define PIN_CE 22
 #define PIN_CSN 21
 
@@ -35,58 +36,8 @@
 
 static RF24 escravo_radio(PIN_CE, PIN_CSN);
 
-static const byte masterAddress[6] = "MSTR1"; // Endereço do mestre
-static const byte myAddress[6] = "SLV01";     // Endereço deste escravo
-
-enum MessageType : uint8_t
-{
-    MSG_LINK_PROBE = 1,
-    MSG_LINK_ACK = 2,
-    MSG_FRAGMENT = 3,
-    MSG_FRAGMENT_ACK = 4,
-    MSG_SEED_INIT = 5,
-    MSG_SEED_ACK = 6
-};
-
-static const uint8_t FRAGMENT_DATA_SIZE = 20;
 static const uint8_t MAX_FRAGMENTS = 16;
 static const uint16_t MAX_MESSAGE_SIZE = FRAGMENT_DATA_SIZE * MAX_FRAGMENTS;
-static const uint8_t PAIRING_CHANNEL = 76;
-static const uint32_t HOP_START_DELAY_MS = 900;
-
-struct __attribute__((packed)) FragmentPacket
-{
-    uint8_t type;
-    uint16_t msg_id;
-    uint8_t fragment_index;
-    uint8_t total_fragments;
-    uint8_t payload_len;
-    char payload[FRAGMENT_DATA_SIZE];
-};
-
-struct __attribute__((packed)) FragmentAck
-{
-    uint8_t type;
-    uint16_t msg_id;
-    uint8_t fragment_index;
-    uint8_t complete;
-};
-
-struct __attribute__((packed)) LinkPacket
-{
-    uint8_t type;
-};
-
-struct __attribute__((packed)) SeedAckPacket
-{
-    uint8_t type;
-    uint16_t seed;      // Confirmação da seed recebida
-};
-
-static_assert(sizeof(FragmentPacket) <= 32, "FragmentPacket excede 32 bytes do NRF24");
-static_assert(sizeof(FragmentAck) <= 32, "FragmentAck excede 32 bytes do NRF24");
-static_assert(sizeof(LinkPacket) <= 32, "LinkPacket excede 32 bytes do NRF24");
-static_assert(sizeof(SeedAckPacket) <= 32, "SeedAckPacket excede 32 bytes do NRF24");
 
 static char assembled_message[MAX_MESSAGE_SIZE + 1];
 static bool received_bitmap[MAX_FRAGMENTS];
@@ -94,16 +45,31 @@ static uint8_t expected_total_fragments = 0;
 static uint16_t current_msg_id = 0;
 static uint8_t received_count = 0;
 static bool completion_logged = false;
+
+// ---- Estado de pareamento (adaptive-rendezvous) ----
 static bool link_established = false;
+static uint8_t g_pair_idx = 0;
+static unsigned long g_pair_dwell_start = 0;
+
+// ---- Estado de hopping ----
 static uint32_t hop_counter = 0;
 static unsigned long last_hop_time = 0;
 static unsigned long hop_start_at = 0;
-static uint8_t current_channel = PAIRING_CHANNEL;
-static const uint32_t HOP_INTERVAL_MS = 220;
+static uint8_t current_channel = PAIRING_CANDIDATES[0];
+static uint32_t g_hops_since_rx = 0;
 
-// Variáveis para controle da seed
+// ---- Seed ----
 static uint16_t g_seed = 0;
 static bool g_seed_initialized = false;
+
+// ---- dynamic-seed-blacklist: máscara de canais ativos ----
+static uint16_t g_channel_mask = 0xFFFF;
+static bool g_seed_apply_scheduled = false;
+static uint16_t g_seed_apply_value = 0;
+static uint32_t g_seed_apply_at = 0;
+static bool g_mask_apply_scheduled = false;
+static uint16_t g_mask_apply_value = 0;
+static uint32_t g_mask_apply_at = 0;
 
 // ---- Métricas de PLR (Packet Loss Rate) ----
 static const uint32_t g_window_size = 50; // hops por janela (~11s a 220ms/hop)
@@ -117,9 +83,13 @@ static bool g_hop_received_flag = false; // já contabilizou recepção do hop a
 // começar) para quem precisar segurar alguma ação até esse ponto — hoje
 // usado pelo jammer em placa_b (start-after-handshake) via
 // escravo_set_ready_sink(), mesmo padrão de callback de
-// mestre_set_alert_source()/analisador_set_alert_sink() do
-// spectrum-attack-classification. Sem fonte registrada (nós standalone),
-// não tem efeito nenhum.
+// mestre_set_alert_source() do spectrum-attack-classification. Sem fonte
+// registrada (nós standalone), não tem efeito nenhum.
+//
+// NOTA para o main.cpp de quem registrar isto: precisa ser chamado ANTES
+// de escravo_setup() -- o guard do blink de LED_BUILTIN (GPIO 2 == MISO do
+// HSPI usado pelo jammer na Placa B combinada) decide uma única vez em
+// escravo_setup().
 static void (*g_escravo_ready_sink)(bool) = nullptr;
 
 static void escravo_set_ready_sink(void (*sink)(bool))
@@ -153,6 +123,8 @@ static void log_plr_window()
 
     Serial.printf("PLR;t_ms=%lu;window=%.1f;session=%.1f;recv=%u;exp=%u\n",
                   millis(), plr_window, plr_session, g_window_received, g_window_expected);
+    tlm_printf("escravo", "plr", "window=%.1f;session=%.1f;recv=%u;exp=%u",
+               plr_window, plr_session, g_window_received, g_window_expected);
 }
 
 static void reset_message_state(uint16_t msg_id, uint8_t total_fragments)
@@ -170,62 +142,79 @@ static bool is_message_complete()
     return expected_total_fragments > 0 && received_count >= expected_total_fragments;
 }
 
+static void apply_scheduled_changes()
+{
+    if (g_seed_apply_scheduled && hop_counter >= g_seed_apply_at)
+    {
+        g_seed = g_seed_apply_value;
+        g_seed_apply_scheduled = false;
+        tlm_printf("escravo", "rekey_apply", "kind=seed;seed=%u;hop=%lu", g_seed, hop_counter);
+    }
+    if (g_mask_apply_scheduled && hop_counter >= g_mask_apply_at)
+    {
+        g_channel_mask = g_mask_apply_value;
+        g_mask_apply_scheduled = false;
+        tlm_printf("escravo", "blacklist", "mask=0x%04X;hop=%lu", g_channel_mask, hop_counter);
+    }
+}
+
+static void reset_to_scanning()
+{
+    link_established = false;
+    g_seed_initialized = false;
+    hop_counter = 0;
+    g_hops_since_rx = 0;
+    g_seed_apply_scheduled = false;
+    g_mask_apply_scheduled = false;
+    g_channel_mask = 0xFFFF;
+    notify_ready(false);
+    tlm_event("escravo", "loss_of_sync");
+}
+
 static void escravo_setup()
 {
     Serial.begin(115200);
     delay(1000); // Aguarda o monitor serial abrir
-    Serial.println("\n[TESTE] Iniciando o Blink básico...");
-    pinMode(LED_BUILTIN, OUTPUT);
+
+    // Blink de heartbeat só na placa standalone: na Placa B combinada,
+    // GPIO 2 é o MISO do barramento HSPI usado pela task do jammer
+    // (two-board-topology seção 7).
+    if (!g_escravo_ready_sink)
+        pinMode(LED_BUILTIN, OUTPUT);
 
     Serial.println("\n[ESCRAVO] Iniciando receptor (FIXO)...");
 
-    // Configurar lib de Debug caso o Begin() da antena morra
     printf_begin();
 
-    // Dá um tempo para a fonte de alimentação do NRF24L01 estabilizar antes de tocar no SPI
     delay(2000);
 
-    // FIX: Desliga explicitamente o Chip Select (CSN) antes de iniciar o barramento SPI
     pinMode(PIN_CSN, OUTPUT);
     digitalWrite(PIN_CSN, HIGH);
     delay(10);
 
-    // Iniciamos o barramento forçando os pinos do VSPI pra placa não se confundir
     SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CSN);
 
-    // Inicializa o rádio
     if (!escravo_radio.begin())
     {
         Serial.println(F("[ERRO ESCRAVO] Falha fatal! O Módulo NRF24 não respondeu no SPI. Verifique a fiação."));
     }
 
-    // Configurações base para bater com o transmissor
     escravo_radio.setPALevel(RF24_PA_LOW);
     escravo_radio.setDataRate(RF24_1MBPS);
-    escravo_radio.setChannel(PAIRING_CHANNEL);
+    escravo_radio.setChannel(PAIRING_CANDIDATES[g_pair_idx]);
 
-    // Obrigatório para AckPayload funcionar, precisamos de tamanhos dinâmicos habilitados
     escravo_radio.enableDynamicPayloads();
     escravo_radio.enableAckPayload();
 
     escravo_radio.setCRCLength(RF24_CRC_16);
-
-    // Abre APENAS o pipe 1. Fecha o Pipe 0, que é usado primariamente por transmissores.
-    // Isso evita captar lixo do ar que pinga no pipe padrão da biblioteca (gerando Pipe 0 ou 7).
     escravo_radio.closeReadingPipe(0);
-
-    // Limpa qualquer lixo que tenha ficado preso na memória da antena de testes anteriores
     escravo_radio.flush_rx();
-
-    // Auto ACK para ele responder o transmissor (Habilitado por default, mas é bom reforçar)
     escravo_radio.setAutoAck(true);
 
-    // Abre pipe de leitura para receber do mestre e configura pipe de escrita para responder
-    escravo_radio.openReadingPipe(1, myAddress); // Inicia modo de escuta
+    escravo_radio.openReadingPipe(1, slaveAddress);
     escravo_radio.openWritingPipe(masterAddress);
     escravo_radio.startListening();
 
-    // Limpa a memória pra garantir inicialização fria limpa
     escravo_radio.flush_rx();
     escravo_radio.flush_tx();
 
@@ -233,22 +222,33 @@ static void escravo_setup()
     escravo_radio.printDetails();
     Serial.println("-----------------------------------------------\n");
 
-    Serial.printf("[ESCRAVO] Aguardando pareamento no canal fixo %u...\n", PAIRING_CHANNEL);
+    g_pair_dwell_start = millis();
+    Serial.printf("[ESCRAVO] Varrendo %u candidatos de pareamento...\n", PAIRING_CANDIDATE_COUNT);
+    tlm_event("escravo", "boot");
 }
 
 static void escravo_loop()
 {
     // ---- BLINK NÃO-BLOQUEANTE (HEARTBEAT) ----
-    static unsigned long last_blink = 0;
-    if (millis() - last_blink >= 500)
+    if (!g_escravo_ready_sink)
     {
-        last_blink = millis();
-        digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+        static unsigned long last_blink = 0;
+        if (millis() - last_blink >= 500)
+        {
+            last_blink = millis();
+            digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+        }
     }
 
     if (!link_established)
     {
-        escravo_radio.setChannel(PAIRING_CHANNEL);
+        if (millis() - g_pair_dwell_start >= PAIR_DWELL_MS)
+        {
+            g_pair_idx = (uint8_t)((g_pair_idx + 1) % PAIRING_CANDIDATE_COUNT);
+            g_pair_dwell_start = millis();
+            escravo_radio.setChannel(PAIRING_CANDIDATES[g_pair_idx]);
+            tlm_printf("escravo", "pair_scan", "ch=%u", PAIRING_CANDIDATES[g_pair_idx]);
+        }
 
         uint8_t pipe;
         if (escravo_radio.available(&pipe))
@@ -269,9 +269,11 @@ static void escravo_loop()
                     {
                         link_established = true;
                         hop_counter = 0;
+                        g_hops_since_rx = 0;
                         hop_start_at = millis() + HOP_START_DELAY_MS;
                         last_hop_time = millis();
-                        Serial.println("[ESCRAVO] Pareamento confirmado. Aguardando seed...");
+                        Serial.printf("[ESCRAVO] Pareamento confirmado em ch=%u. Aguardando seed...\n", PAIRING_CANDIDATES[g_pair_idx]);
+                        tlm_printf("escravo", "pair_ok", "ch=%u", PAIRING_CANDIDATES[g_pair_idx]);
                     }
                 }
             }
@@ -285,11 +287,8 @@ static void escravo_loop()
         return;
     }
 
-    // Se o link foi estabelecido mas a seed ainda não foi recebida
     if (!g_seed_initialized)
     {
-        escravo_radio.setChannel(PAIRING_CHANNEL);
-
         uint8_t pipe;
         if (escravo_radio.available(&pipe))
         {
@@ -303,9 +302,11 @@ static void escravo_loop()
                 reset_plr_counters();
 
                 Serial.printf("[ESCRAVO] Seed recebida: %u\n", g_seed);
+                tlm_printf("escravo", "seed", "seed=%u", g_seed);
 
-                // Enviar confirmação de seed
-                SeedAckPacket seed_ack = {MSG_SEED_ACK, g_seed};
+                SeedAckPacket seed_ack;
+                seed_ack.type = MSG_SEED_ACK;
+                seed_ack.seed = g_seed;
                 escravo_radio.stopListening();
                 bool wrote = escravo_radio.write(&seed_ack, sizeof(seed_ack));
                 escravo_radio.startListening();
@@ -314,7 +315,6 @@ static void escravo_loop()
                 {
                     Serial.println("[ESCRAVO] Confirmação de seed enviada.");
                     hop_start_at = millis() + HOP_START_DELAY_MS;
-                    Serial.println("[ESCRAVO] Iniciando hopping em breve...");
                     notify_ready(true);
                 }
             }
@@ -335,14 +335,17 @@ static void escravo_loop()
     {
         last_hop_time = millis();
 
-        // Fecha a contagem do hop que está terminando: sempre esperado,
-        // recebido só se algum FragmentPacket válido chegou durante ele.
         g_window_expected++;
         g_session_expected++;
         if (g_hop_received_flag)
         {
             g_window_received++;
             g_session_received++;
+            g_hops_since_rx = 0;
+        }
+        else
+        {
+            g_hops_since_rx++;
         }
         g_hop_received_flag = false;
 
@@ -353,18 +356,25 @@ static void escravo_loop()
             g_window_received = 0;
         }
 
-        current_channel = get_next_channel(g_seed, hop_counter);
+        current_channel = get_next_active_channel(g_seed, hop_counter, g_channel_mask);
         escravo_radio.setChannel(current_channel);
         hop_counter++;
+        apply_scheduled_changes();
+
+        if (g_hops_since_rx >= LOSS_HOPS)
+        {
+            reset_to_scanning();
+            return;
+        }
     }
 
-    // Se recebeu um dado no canal atual
     uint8_t current_pipe;
     if (escravo_radio.available(&current_pipe))
     {
         if (current_pipe == 1)
         {
             uint8_t dt_size = escravo_radio.getDynamicPayloadSize();
+
             if (dt_size == sizeof(FragmentPacket))
             {
                 FragmentPacket pkt;
@@ -373,6 +383,10 @@ static void escravo_loop()
                 if (pkt.type == MSG_FRAGMENT && pkt.total_fragments > 0 && pkt.total_fragments <= MAX_FRAGMENTS)
                 {
                     g_hop_received_flag = true;
+                    // adaptive-rendezvous: adota o contador de hop do
+                    // mestre em vez de manter contagem própria -- corrige
+                    // qualquer deriva entre os dois lados.
+                    hop_counter = pkt.hop_counter;
 
                     if (current_msg_id != pkt.msg_id)
                     {
@@ -392,22 +406,13 @@ static void escravo_loop()
                                 received_count++;
                             }
 
-                            char fragment_text[FRAGMENT_DATA_SIZE + 1];
-                            memset(fragment_text, 0, sizeof(fragment_text));
-                            memcpy(fragment_text, pkt.payload, pkt.payload_len);
-
                             Serial.printf("[ESCRAVO] Canal=%u frag=%u/%u recebida (len=%u)\n",
-                                          current_channel,
-                                          pkt.fragment_index + 1,
-                                          expected_total_fragments,
-                                          pkt.payload_len);
-                            Serial.printf("[ESCRAVO] Texto do fragmento: %s\n", fragment_text);
+                                          current_channel, pkt.fragment_index + 1, expected_total_fragments, pkt.payload_len);
                         }
                     }
 
                     bool complete = is_message_complete();
 
-                    // Envia ACK do fragmento
                     FragmentAck ack;
                     ack.type = MSG_FRAGMENT_ACK;
                     ack.msg_id = pkt.msg_id;
@@ -415,21 +420,15 @@ static void escravo_loop()
                     ack.complete = complete ? 1 : 0;
 
                     escravo_radio.stopListening();
-                    bool wrote = escravo_radio.write(&ack, sizeof(ack));
-                    if (wrote)
-                        Serial.printf("[ESCRAVO] ACK frag=%u enviado (complete=%u)\n", ack.fragment_index + 1, ack.complete);
-                    else
-                        Serial.println("[ESCRAVO] Falha ao enviar ACK do fragmento");
+                    escravo_radio.write(&ack, sizeof(ack));
                     escravo_radio.startListening();
 
-                    if (complete)
+                    if (complete && !completion_logged)
                     {
-                        if (!completion_logged)
-                        {
-                            assembled_message[MAX_MESSAGE_SIZE] = '\0';
-                            Serial.printf("[ESCRAVO] Mensagem completa reconstruida: %s\n", assembled_message);
-                            completion_logged = true;
-                        }
+                        assembled_message[MAX_MESSAGE_SIZE] = '\0';
+                        Serial.printf("[ESCRAVO] Mensagem completa reconstruida: %s\n", assembled_message);
+                        tlm_event("escravo", "msg_done");
+                        completion_logged = true;
                     }
                 }
                 else
@@ -437,9 +436,47 @@ static void escravo_loop()
                     Serial.println("[ESCRAVO] Pacote ignorado por formato invalido.");
                 }
             }
+            else if (dt_size == sizeof(ControlSeedPacket)) // == sizeof(ControlBlacklistPacket)
+            {
+                uint8_t raw[sizeof(ControlSeedPacket)];
+                escravo_radio.read(raw, dt_size);
+                uint8_t ctrl_type = raw[0];
+
+                if (ctrl_type == MSG_CTRL_SEED)
+                {
+                    ControlSeedPacket pkt;
+                    memcpy(&pkt, raw, sizeof(pkt));
+                    g_seed_apply_scheduled = true;
+                    g_seed_apply_value = pkt.new_seed;
+                    g_seed_apply_at = pkt.apply_at_hop;
+
+                    ControlAck ack = {MSG_CTRL_ACK, pkt.apply_at_hop};
+                    escravo_radio.stopListening();
+                    escravo_radio.write(&ack, sizeof(ack));
+                    escravo_radio.startListening();
+                    tlm_printf("escravo", "rekey_ack", "kind=seed;seed=%u;apply=%lu", pkt.new_seed, pkt.apply_at_hop);
+                }
+                else if (ctrl_type == MSG_CTRL_BLACKLIST)
+                {
+                    ControlBlacklistPacket pkt;
+                    memcpy(&pkt, raw, sizeof(pkt));
+                    g_mask_apply_scheduled = true;
+                    g_mask_apply_value = pkt.mask;
+                    g_mask_apply_at = pkt.apply_at_hop;
+
+                    ControlAck ack = {MSG_CTRL_ACK, pkt.apply_at_hop};
+                    escravo_radio.stopListening();
+                    escravo_radio.write(&ack, sizeof(ack));
+                    escravo_radio.startListening();
+                    tlm_printf("escravo", "rekey_ack", "kind=blacklist;mask=0x%04X;apply=%lu", pkt.mask, pkt.apply_at_hop);
+                }
+                else
+                {
+                    Serial.println("[ESCRAVO] Pacote de controle com tipo desconhecido, descartado.");
+                }
+            }
             else
             {
-                // descarta payloads inesperados
                 uint8_t dump[32];
                 escravo_radio.read(dump, dt_size);
                 Serial.printf("[ESCRAVO] Payload inesperado recebido (%d bytes), descartado.\n", dt_size);
@@ -447,7 +484,6 @@ static void escravo_loop()
         }
         else
         {
-            // Descarta completamente pacotes que caírem nos pipes errados
             uint32_t dump_buffer;
             escravo_radio.read(&dump_buffer, sizeof(dump_buffer));
         }

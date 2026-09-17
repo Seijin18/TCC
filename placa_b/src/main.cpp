@@ -25,10 +25,14 @@ static void jammerTask(void *pvParameters)
 
 void setup()
 {
-    escravo_setup();
-
+    // Registrar o callback ANTES de escravo_setup(): o guard do blink de
+    // LED_BUILTIN (GPIO 2 == MISO do HSPI do jammer, two-board-topology
+    // seção 7) só decide corretamente se escravo_set_ready_sink() já foi
+    // chamado quando escravo_setup() roda.
     escravo_set_ready_sink(placaB_ready_set);
     jammer_set_ready_source(placaB_ready_get);
+
+    escravo_setup();
 
     xTaskCreatePinnedToCore(
         jammerTask,

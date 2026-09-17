@@ -30,13 +30,9 @@ struct BeaconPacket
     uint8_t payload[8]; // Dados úteis (pode aumentar depois)
 };
 
-// Estrutura para transmissão da Seed inicial
-struct SeedPacket
-{
-    uint16_t seed;      // Semente para cálculo da sequência (0-100)
-};
-
-static_assert(sizeof(SeedPacket) <= 32, "SeedPacket excede 32 bytes do NRF24");
+// SeedPacket e os demais pacotes de protocolo (Link/Fragment/Control) foram
+// movidos para shared/protocol.h (adaptive-rendezvous) -- este header fica
+// só com a lógica pura de seleção de canal.
 
 /**
  * Fase inicial: hopping sem seed.
@@ -56,6 +52,30 @@ uint8_t get_next_channel(uint16_t seed, uint32_t counter)
     // Lógica simples de embaralhamento matemático usando módulo circular
     uint8_t index = (seed + counter) % TABLE_SIZE;
     return HOPPING_CHANNELS[index];
+}
+
+/**
+ * dynamic-seed-blacklist: mesma função de f(seed, contador), mas restrita
+ * aos canais habilitados por `mask` (bit i = 1 -> HOPPING_CHANNELS[i]
+ * disponível). Guarda: mask == 0 (nenhum canal habilitado) nunca deveria
+ * acontecer nos chamadores -- degrada para a tabela cheia em vez de causar
+ * divisão por zero.
+ */
+inline uint8_t get_next_active_channel(uint16_t seed, uint32_t counter, uint16_t mask)
+{
+    if (mask == 0)
+        mask = 0xFFFF;
+
+    uint8_t active_indices[TABLE_SIZE];
+    uint8_t active_count = 0;
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+    {
+        if (mask & (1u << i))
+            active_indices[active_count++] = i;
+    }
+
+    uint8_t pos = (uint8_t)((seed + counter) % active_count);
+    return HOPPING_CHANNELS[active_indices[pos]];
 }
 
 #endif // HOPPING_H
