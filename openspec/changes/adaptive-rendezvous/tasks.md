@@ -53,8 +53,12 @@
 
 ## 6. Validação manual em bancada
 
-- [ ] 6.1 Jammer desligado: confirmar pareamento no candidato 76 (primeiro
-      da lista) igual ao comportamento anterior.
+- [x] 6.1 Jammer desligado: confirmar pareamento no candidato 76 (primeiro
+      da lista) igual ao comportamento anterior. Confirmado em
+      2026-09-17 após remover `enableAckPayload()` (bug real, ver
+      design.md "Correção") — `pair_ok`/`seed` em ambos os lados,
+      repetível. Fase de hopping ativo (6.4) segue bloqueada por um
+      problema separado e ainda não resolvido (ver design.md).
 - [ ] 6.2 Jammer sweep ativo **antes** do boot das duas placas: confirmar
       que o escravo varre, evita candidatos ruidosos, e o par converge num
       candidato fora de 2–80.

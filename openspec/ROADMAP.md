@@ -6,7 +6,7 @@ verdade de contexto/dependências) — é a camada de "o que fazer agora, em que
 ordem" derivada dele. Atualizar esta lista conforme tasks forem fechadas ou
 changes forem arquivados.
 
-## Estado em 2026-09-17: todo o código pronto, bloqueado em hardware
+## Estado em 2026-09-17: hardware validado, pareamento funciona, hopping ainda bloqueado (bug de software não resolvido)
 
 Todo o código planejado para os cinco changes de fase mais
 `telemetry-logging`/`adaptive-rendezvous`/`two-board-topology` §7 está
@@ -31,7 +31,44 @@ listado abaixo é validação manual em bancada.
 - **`scenario-automation`** — único change ainda sem código, porque depende
   de todos os anteriores estarem validados em bancada primeiro.
 
-## Bloqueio atual: comunicação RF não fecha nesta bancada
+## Atualização (2026-09-17, mesma sessão): hardware validado, bug de software encontrado — pareamento funciona; hopping ainda não
+
+A seção abaixo ("Bloqueio atual") documentava uma conclusão que **se
+provou errada**: uma bateria completa e final de `Tests/AntennaCross`,
+testando os 4 módulos físicos (após o usuário trocá-los fisicamente
+várias vezes entre VSPI/HSPI e Placa A/B ao longo do diagnóstico)
+confirmou **todos os 4 módulos funcionando em ambos os sentidos,
+~100% de entrega** — não existe módulo defeituoso. O padrão "só VSPI da
+Placa A falha como transmissor" era um artefato de qual módulo físico
+estava conectado em qual barramento naquele instante da sessão, não uma
+propriedade fixa da placa/barramento.
+
+Com o hardware descartado, a causa real era software:
+`enableAckPayload()` (presente desde antes desta sessão em
+`mestre/src/node.h`/`escravo/src/node.h`, nunca de fato usado —
+`writeAckPayload()` nunca é chamado no protocolo) faz estes módulos
+clone (base SI24R1) descartarem silenciosamente pacotes NO_ACK
+(`radio_send()`/`writeFast(..., multicast=true)`, o único caminho de
+envio do projeto). Isolado e confirmado 100% repetível com
+`Tests/AntennaCross`; removido dos dois lados. **Resultado: pareamento e
+troca de seed funcionam de forma confiável pela primeira vez em toda a
+sessão.**
+
+**O que ainda não funciona**: com o pareamento ok, a fase de hopping
+ativo (fragmentos, troca de canal a cada 220ms) ainda falha na grande
+maioria dos hops (~0–10% de entrega). PA, DPL, assentamento de PLL,
+contenção de mutex de telemetria, rajada de relógio na largada e mesmo
+um teste decisivo de offset de fase (dwell 2000ms + ~76 reenvios/hop,
+ainda só 2/14 hops) já foram descartados como causa única — ver detalhe
+completo em `openspec/changes/adaptive-rendezvous/design.md`, seção
+"Correção". Causa raiz ainda desconhecida.
+
+A seção "Bloqueio atual" e "Diagnóstico em duas rodadas" abaixo ficam só
+como registro histórico do processo de diagnóstico (útil pra não repetir
+os mesmos passos) — a conclusão final delas (trocar o módulo VSPI da
+Placa A) **não deve ser seguida**.
+
+## Bloqueio atual (histórico — ver correção acima): comunicação RF não fecha nesta bancada
 
 Ao tentar validar o handshake mestre↔escravo pela primeira vez, dois bugs
 reais de firmware foram encontrados e corrigidos (detalhe completo em
@@ -98,17 +135,28 @@ VSPI da Placa A. Essa é exatamente a posição do **mestre** no firmware
 principal, o que explica o pareamento nunca ter funcionado em nenhuma
 das duas fases desta sessão.
 
-### Próximo passo: trocar o módulo VSPI da Placa A
+### Próximo passo (atualizado): investigar a falha específica da fase de hopping
 
-Como o problema está isolado a um componente físico específico (não
-fiação, não alimentação, não código), o próximo passo é trocar o módulo
-NRF24L01+ que está no barramento VSPI da Placa A (pinos CE22/CSN21/
-SCK18/MISO19/MOSI23) por outro módulo. Para confirmar rapidamente após a
-troca, sem precisar do sistema completo: reflashear
-`env:antenna_tx`/`env:antenna_rx` (uma placa cada, portas fixadas por
-`/dev/serial/by-id/...`) e conferir com `tools/logger/main.py` +
-`echo "placa_a status" >> logs/cmd.in` se `total_recebido_VSPI` na Placa B
-volta a subir junto com `total_recebido_HSPI`.
+~~Trocar o módulo VSPI da Placa A~~ — descartado, ver correção acima: os
+4 módulos funcionam. Pareamento/seed já funcionam de forma confiável.
+
+O que falta é achar por que o envio de fragmentos falha especificamente
+durante troca ativa de canal (~0–10% de entrega), quando o mesmo
+`radio_send()` no canal fixo do pareamento funciona quase 100%. Hipóteses
+ainda não testadas, por ordem de suspeita:
+
+1. `flush_rx()` explícito logo após `setChannel()` em ambos os lados —
+   verificar se o RX FIFO carrega lixo de antes da troca de canal.
+2. Reproduzir `Tests/AntennaCross` com troca de canal ativa a cada
+   ~220ms (hoje ele só testa canal fixo) — se a falha aparecer isolada
+   ali, descarta de vez qualquer interação com o resto do protocolo
+   (pareamento, `hop_counter`, `FragmentPacket`) e confirma que é
+   específico da troca de canal em si.
+3. Comparar captura de telemetria (`tlm_printf`) dos dois lados hop a
+   hop lado a lado (timestamp de `setChannel()`, de envio, de
+   `startListening()`) pra checar se a janela de escuta do escravo e a
+   de envio do mestre realmente se sobrepõem no relógio real, não só no
+   `HOP_INTERVAL_MS` nominal.
 
 ## Ordem de execução após o hardware ser resolvido
 
@@ -128,7 +176,10 @@ e alerta (spectrum-attack-classification) confirmados funcionando primeiro.
 
 ## Próxima ação recomendada
 
-Resolver o checklist de inspeção física acima. Assim que uma sonda
-qualquer do mestre chegar ao escravo (confirmável por `pair_ok` em
-`logs/events.log`), toda a bateria de testes graduais T1–T7 do plano de
-bancada pode rodar em sequência sem mais trabalho de código esperado.
+`pair_ok`/`seed` já acontecem de forma confiável (confirmado em
+2026-09-17 após remover `enableAckPayload()`) — a bateria T1–T7 do plano
+de bancada segue bloqueada não mais por hardware, mas pela fase de
+hopping ativo (envio de fragmentos) ainda falhar na maioria dos hops.
+Resolver isso é o item que destrava toda a validação restante — ver
+"Próximo passo" acima e `openspec/changes/adaptive-rendezvous/design.md`
+("Correção") para o que já foi descartado como causa.

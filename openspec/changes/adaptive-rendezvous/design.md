@@ -141,6 +141,66 @@ da Placa A, que é exatamente a posição do mestre no firmware principal.
 Validação manual (seção 6, abaixo) permanece bloqueada até esse módulo
 ser trocado ou reparado.
 
+## Correção (2026-09-17, mesma sessão): não era hardware — `enableAckPayload()` quebrava a entrega
+
+A conclusão acima (módulo VSPI da Placa A com defeito de transmissão)
+**estava errada**, e a rodada 2 do diagnóstico tinha uma variável não
+controlada: o usuário trocou fisicamente os 4 módulos entre as sondas de
+diagnóstico ao longo da sessão (antenas/adaptadores realocados entre VSPI
+e HSPI, entre placa A e B) tentando isolar o problema por eliminação. Uma
+bateria final e completa (`Tests/AntennaCross`, os 4 módulos já
+embaralhados pelas trocas do usuário, cada um testado como TX e como RX
+nas duas direções) confirmou **os 4 módulos físicos funcionando nos dois
+sentidos, ~100% de entrega** — não havia mais nenhum módulo
+identificável como defeituoso. Isso invalidou a conclusão anterior: o
+"padrão" de falha só-VSPI-só-Placa-A observado antes era um artefato de
+qual módulo físico estava fisicamente conectado em qual barramento
+naquele momento, não uma propriedade fixa do barramento/placa.
+
+Com o hardware validado, a suspeita voltou pro software. Isolado com o
+mesmo `Tests/AntennaCross` (incrementando a config do teste até bater com
+o firmware real, um item por vez): `setAutoAck(true)` sozinho entrega
+~100%; adicionar `enableAckPayload()` (presente em `mestre/src/node.h` e
+`escravo/src/node.h` desde antes desta sessão) derruba a entrega pra
+~0%, **mesmo sem `writeAckPayload()` nunca ser chamado em nenhum lugar
+do protocolo**. Comportamento visto nestes módulos clone (base SI24R1
+comum em módulos NRF24L01+ de baixo custo) — o bit de ack payload
+habilitado no `FEATURE` register muda como o chip trata pacotes NO_ACK
+(`W_TX_PAYLOAD_NO_ACK`, usado por `radio_send()`/`writeFast(...,
+multicast=true)`, o único caminho de envio deste projeto), fazendo o
+receptor descartar o pacote antes de `available()` sequer disparar.
+
+**Fix**: `enableAckPayload()` removido dos dois lados (era herança do
+código original, nunca teve uso real — a confirmação de qualquer troca
+deste protocolo sempre veio de pacotes de resposta explícitos:
+LinkAck/SeedAck/FragmentAck/ControlAck). Com a remoção, **pareamento e
+troca de seed funcionam de forma confiável pela primeira vez em toda a
+sessão** — tarefa 6.1 abaixo considerada cumprida.
+
+**O que continua em aberto**: com o pareamento funcionando, a fase de
+hopping ativo (envio de fragmentos com troca de canal a cada
+`HOP_INTERVAL_MS`) ainda falha na esmagadora maioria dos hops (~0–10% de
+entrega, tipicamente 0–2 acks bem-sucedidos a cada ~25–30 hops antes do
+`loss_of_sync`). Já descartados como causa única: nível de PA (testado
+`PA_MAX`, sem melhora), payload dinâmico vs. estático (DPL isolado
+funcionou ~100% no teste standalone), assentamento de PLL insuficiente
+após `setChannel()` (130µs → 500µs, melhora marginal só), contenção do
+mutex de telemetria atrasando `startListening()` (prints reordenados
+para depois das operações críticas — ver commit de firmware desta
+sessão), a "rajada" de hops na largada do relógio (corrigida via
+`hop_clock_primed`, eliminada e confirmada por timestamp, mas sem
+melhora na entrega), e — de forma decisiva — o próprio offset de fase
+residual entre os relógios livres do mestre e do escravo (aumentar
+`HOP_INTERVAL_MS` para 2000ms com ~76 reenvios do mesmo fragmento por
+hop, o que deveria garantir sobreposição temporal independente de
+qualquer offset, ainda assim só teve 2/14 hops bem-sucedidos). A causa
+raiz da falha específica da fase de hopping permanece desconhecida;
+áreas ainda não investigadas: possível necessidade de `flush_rx()`
+explícito após cada `setChannel()` (RX FIFO potencialmente contendo lixo
+de antes da troca de canal), ou alguma interação de protocolo específica
+do `FragmentPacket` (30 bytes, DPL) sob trocas de canal rápidas e
+sucessivas que os testes isolados em canal fixo não reproduziram.
+
 ## Risks / Trade-offs
 
 - **Candidatos fixos são conhecidos por qualquer jammer que leia o código
