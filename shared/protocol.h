@@ -95,7 +95,13 @@ static const uint32_t PAIR_DWELL_MS = 400;
 static const uint32_t PAIR_MEASURE_SAMPLES = 20; // mestre: amostras de testCarrier() por candidato
 
 static const uint32_t HOP_START_DELAY_MS = 900;
-static const uint32_t HOP_INTERVAL_MS = 220;
+// Hopping por evento (nao mais por relogio periodico fixo): mestre
+// reenvia o fragmento corrente e escravo escuta no canal corrente ate
+// UM dos dois acontecer primeiro -- confirmacao (ack recebido / fragmento
+// recebido e ackado) ou este timeout esgotar (fallback: avanca pro
+// proximo canal mesmo sem confirmacao, pra o enlace nao travar
+// indefinidamente num canal jamado). Ver mestre_loop()/escravo_loop().
+static const uint32_t HOP_TIMEOUT_MS = 220;
 static const uint32_t ACK_TIMEOUT_MS = 120;
 static const uint32_t SEED_ACK_WAIT_MS = 500;
 static const uint32_t SEED_WAIT_WINDOW_MS = 3000; // seed nao-bloqueante: janela na serial antes do default
