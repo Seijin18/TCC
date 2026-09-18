@@ -29,10 +29,28 @@
 - [ ] 3.1 Rodar o analisador sozinho em ambiente com Wi-Fi/BT normal do
       laboratório (sem jammer) por alguns minutos e confirmar que nenhum
       "ataque ativo" é declarado (ajustar limiares se houver falso
-      positivo).
+      positivo). **Rodado em 2026-09-18** via
+      `tools/validation/run_scenario.py` (fase baseline, jammer desligado)
+      — nenhum falso positivo (`alert_on` nunca disparou, correto), mas o
+      CSV bruto mostrou vários canais (inclusive fora de
+      `HOPPING_CHANNELS`) com 40–60% de atividade mesmo sem jammer —
+      piso de ruído desta bancada mais alto que o assumido pelos valores
+      default de `LIMIAR_ALVO`/`LIMIAR_CONCENTRACAO`. Ver
+      `openspec/ROADMAP.md` para os números medidos.
 - [ ] 3.2 Rodar com o `targeted-jammer` ativo e confirmar que o alerta é
       declarado dentro de poucos ciclos e mantido enquanto o ataque
-      persistir.
+      persistir. **Rodado em 2026-09-18, ainda não passa**: mesmo com
+      `jam mode targeted` + `power high` por 75s (PLR do enlace medido
+      subindo de ~0% para ~12%, confirmando jamming real), `alert_on`
+      nunca disparou. Corrigido um bug real no caminho (`classifyAttack()`
+      usava snapshot único por sweep — `channelData[]` — que um jammer de
+      rádio único quase nunca preenchia nos 16 canais simultaneamente;
+      trocado por acúmulo de calor entre sweeps, `channelHeat[]`), mas o
+      piso de ruído de 3.1 ainda mantém `fora_avg` alto o bastante pra
+      `alvo_avg - fora_avg` nunca cruzar `LIMIAR_CONCENTRACAO=30`. Falta:
+      recalibrar `LIMIAR_ALVO`/`LIMIAR_CONCENTRACAO` (ou o próprio esquema
+      de calor -- `HEAT_HIT_THRESHOLD`/decaimento) contra o piso de ruído
+      real medido em 3.1, não os valores default herdados sem calibração.
 - [ ] 3.3 Rodar com o jammer em modo `sweep` (banda inteira) e verificar o
       comportamento: se `fora_avg` sobe junto com `alvo_avg`, o alerta não
       deve disparar (ou deve disparar com uma classificação diferenciada,

@@ -6,6 +6,49 @@ verdade de contexto/dependências) — é a camada de "o que fazer agora, em que
 ordem" derivada dele. Atualizar esta lista conforme tasks forem fechadas ou
 changes forem arquivados.
 
+## Achado adicional (2026-09-18): analisador não dispara alerta contra o jammer real desta bancada — piso de ruído alto + bug de snapshot único (parcialmente corrigido)
+
+Construindo `tools/validation/run_scenario.py` (cenário automatizado
+baseline→jamming→recovery com plot, ver commit correspondente) e rodando
+pela primeira vez jammer+analisador juntos de forma medida, dois problemas
+foram encontrados em `spectrum-attack-classification`:
+
+1. **Sweep nunca poderia disparar o alerta, estruturalmente**: cobre só
+   2–80 MHz, faixa com apenas 8 dos 16 canais de `HOPPING_CHANNELS` — o
+   teto de `alvo_avg` (média sobre os 16) é ~50%, sempre abaixo de
+   `LIMIAR_ALVO=70`. Não é bug, é limite de cobertura — usar `jam mode
+   targeted` para exercitar o alerta.
+2. **Mesmo em targeted, o alerta não disparava**: `classifyAttack()`
+   usava um snapshot único por sweep (`channelData[]`, resetado a cada
+   ciclo) — um jammer de rádio único visita 1 canal por vez, e seu ciclo
+   pelos 16 alvos raramente coincidia no tempo com o scanSpectrum() do
+   analisador (~860ms para 126 canais), então um hit isolado num canal
+   não sobrevivia até o próximo canal-alvo ser atingido. **Corrigido**:
+   `channelHeat[]` acumula calor entre sweeps em vez de resetar
+   (`analisador/src/node.h`); jammer targeted ganhou dwell mais longo por
+   canal (`JAM_TARGETED_HOLD_MS=60ms`, `jammer/src/node.h`).
+3. **Ainda não dispara, por um terceiro motivo — piso de ruído desta
+   bancada**: mesmo com o fix acima e jamming real confirmado (PLR do
+   enlace subindo de ~0% pra ~12% durante 75s de `jam mode targeted` +
+   `power high`), `alert_on` não disparou. O CSV bruto do analisador
+   mostra vários canais com 40–60% de atividade **mesmo com o jammer
+   desligado** — ruído ambiente (Wi-Fi/BT do ambiente) mantém `fora_avg`
+   alto o bastante pra `alvo_avg - fora_avg` nunca cruzar
+   `LIMIAR_CONCENTRACAO=30`. Essa é exatamente a tarefa de calibração já
+   registrada e nunca executada
+   (`openspec/changes/spectrum-attack-classification/tasks.md` seção 3) —
+   agora com dados reais medidos pra calibrar contra, em vez dos valores
+   default herdados sem calibração.
+
+**Consequência para `dynamic-seed-blacklist`**: como `maybe_enqueue_control()`
+(`mestre/src/node.h`) só enfileira rekey de seed/blacklist quando
+`g_alert_active`/`g_reseed_needed` estão ligados pelo analisador, a
+mitigação inteira fica bloqueada até os limiares serem recalibrados
+contra o piso de ruído real. `tools/validation/plot_scenario.py` já está
+pronto pra mostrar `rekey_tx`/`rekey_apply`/`blacklist` assim que o
+alerta passar a disparar — não precisa de mais nenhum código, só a
+recalibração.
+
 ## Estado em 2026-09-18: hardware validado, pareamento funciona, hopping ativo resolvido (trocado por evento) — falta soak longo e sob jammer
 
 A causa raiz da falha da fase de hopping (seção abaixo, "hardware
