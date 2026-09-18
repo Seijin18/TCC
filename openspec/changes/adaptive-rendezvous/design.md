@@ -201,6 +201,53 @@ de antes da troca de canal), ou alguma interação de protocolo específica
 do `FragmentPacket` (30 bytes, DPL) sob trocas de canal rápidas e
 sucessivas que os testes isolados em canal fixo não reproduziram.
 
+## Correção 2 (2026-09-18): hopping por evento resolveu a falha da fase de hopping
+
+O usuário apontou que o hopping deveria ser **por evento** (canal só
+avança quando o hop atual já foi confirmado recebido), não por relógio
+periódico — e o código, desde o commit inicial do projeto (`git show
+97fca79:mestre/src/main.cpp`), sempre foi por relógio: `g_hop_counter`
+avançava a cada `HOP_INTERVAL_MS` (220ms) **incondicionalmente**, sucesso
+ou falha, mantendo mestre e escravo em relógios livres independentes,
+sincronizados só por sorte residual de fase. Essa era exatamente a
+hipótese investigada e descartada como causa única na sessão anterior
+(teste decisivo com dwell de 2000ms + ~76 reenvios/hop ainda só conseguiu
+2/14 hops) — o que sugeria a causa não ser só timing. Em retrospecto, o
+teste decisivo tinha uma falha: aumentar o dwell não muda a NATUREZA do
+mecanismo (ainda avança incondicionalmente a cada tick, só que um tick
+maior), então não isolava de fato "relógio vs. evento" como variável.
+
+**Fix**: reescrito `mestre_loop()`/`escravo_loop()` para hopping
+genuinamente orientado a evento, com fallback de timeout —
+`HOP_INTERVAL_MS` renomeado para `HOP_TIMEOUT_MS` (mesmo valor, 220ms),
+agora como teto por tentativa, não período fixo. Cada rodada de hop só
+termina por (a) confirmação recebida (mestre: ack; escravo: fragmento ou
+pacote de controle válido recebido e ackado) — os dois lados avançam
+imediatamente para o MESMO próximo `hop_counter` (o escravo resincroniza
+o dele a partir do valor recebido no pacote antes de avançar) — ou (b)
+`HOP_TIMEOUT_MS` esgotado sem nada (fallback: avança mesmo assim, para
+não travar para sempre num canal jamado). Não há mais nenhum relógio
+livre rodando contra o wall-clock; o único estado compartilhado é
+`hop_counter`, um inteiro que avança em exatamente 1 por rodada em cada
+lado, então não diverge mesmo que as duas rodadas não terminem no mesmo
+instante real. Adicionado também, no mesmo ponto de código,
+`flush_rx()` logo após cada `setChannel()` nos dois lados — uma das
+hipóteses não testadas listadas acima, mais relevante agora que hops de
+sucesso podem ser bem mais rápidos que o antigo tick fixo.
+
+**Resultado medido em bancada, imediatamente após o reflash**: PLR de
+sessão caiu de ~90–100% (todas as tentativas anteriores) para ~0,6% e
+caindo continuamente; `hop_counter` chegou a 4023 em ~97s de execução
+(~41 hops/s, contra ~4,5 hops/s do relógio fixo antigo) — confirma que
+hops de sucesso agora terminam quase instantaneamente em vez de esperar
+o resto de uma janela fixa de 220ms. Nenhum `loss_of_sync` observado no
+período observado (jammer desligado). Isso resolve o bloqueio descrito
+na seção anterior — a causa raiz real era a arquitetura de agendamento
+por relógio periódico em si, não nenhum dos fatores testados
+individualmente (PA, DPL, PLL, mutex, rajada de largada, offset de
+fase). Validação de soak mais longa (minutos, não segundos) e sob jammer
+ativo ainda não foi feita — ver tasks.md seção 6.
+
 ## Risks / Trade-offs
 
 - **Candidatos fixos são conhecidos por qualquer jammer que leia o código

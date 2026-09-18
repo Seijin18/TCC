@@ -6,7 +6,26 @@ verdade de contexto/dependências) — é a camada de "o que fazer agora, em que
 ordem" derivada dele. Atualizar esta lista conforme tasks forem fechadas ou
 changes forem arquivados.
 
-## Estado em 2026-09-17: hardware validado, pareamento funciona, hopping ainda bloqueado (bug de software não resolvido)
+## Estado em 2026-09-18: hardware validado, pareamento funciona, hopping ativo resolvido (trocado por evento) — falta soak longo e sob jammer
+
+A causa raiz da falha da fase de hopping (seção abaixo, "hardware
+validado... hopping ainda bloqueado") foi encontrada: hopping era
+disparado por **relógio periódico** (avançava o canal a cada 220ms
+incondicionalmente, sucesso ou falha) desde o commit inicial do projeto
+— mantendo mestre e escravo em relógios livres independentes,
+sincronizados só por sorte residual de fase. Reescrito para hopping **por
+evento com fallback de timeout** (`mestre_loop()`/`escravo_loop()`, ver
+`openspec/changes/adaptive-rendezvous/design.md` "Correção 2"): o canal
+só avança quando o hop atual é confirmado (ack/fragmento recebido) ou
+quando um timeout por tentativa esgota (fallback, evita travar num canal
+jamado pra sempre).
+
+**Resultado medido logo após o reflash**: PLR de sessão caiu de
+~90–100% pra ~0,6% (jammer desligado, teste curto de ~1-2 min);
+`hop_counter` avançou a ~41 hops/s (vs. ~4,5 hops/s do relógio fixo
+antigo), confirmando que hops de sucesso agora terminam quase
+instantaneamente. Falta: soak de vários minutos (tasks.md 6.4) e
+validação com jammer ativo (6.2) — ver "Próximo passo" abaixo.
 
 Todo o código planejado para os cinco changes de fase mais
 `telemetry-logging`/`adaptive-rendezvous`/`two-board-topology` §7 está
@@ -135,28 +154,26 @@ VSPI da Placa A. Essa é exatamente a posição do **mestre** no firmware
 principal, o que explica o pareamento nunca ter funcionado em nenhuma
 das duas fases desta sessão.
 
-### Próximo passo (atualizado): investigar a falha específica da fase de hopping
+### Próximo passo (atualizado 2026-09-18): soak longo + validação sob jammer
 
 ~~Trocar o módulo VSPI da Placa A~~ — descartado, ver correção acima: os
-4 módulos funcionam. Pareamento/seed já funcionam de forma confiável.
+4 módulos funcionam. ~~Investigar causa da falha de hopping~~ —
+encontrada e corrigida: hopping era por relógio periódico, trocado por
+evento com fallback de timeout (`openspec/changes/adaptive-rendezvous/design.md`
+"Correção 2"). Pareamento/seed/hopping já funcionam de forma confiável
+num teste curto.
 
-O que falta é achar por que o envio de fragmentos falha especificamente
-durante troca ativa de canal (~0–10% de entrega), quando o mesmo
-`radio_send()` no canal fixo do pareamento funciona quase 100%. Hipóteses
-ainda não testadas, por ordem de suspeita:
+O que falta antes de fechar `adaptive-rendezvous` seção 6 por completo:
 
-1. `flush_rx()` explícito logo após `setChannel()` em ambos os lados —
-   verificar se o RX FIFO carrega lixo de antes da troca de canal.
-2. Reproduzir `Tests/AntennaCross` com troca de canal ativa a cada
-   ~220ms (hoje ele só testa canal fixo) — se a falha aparecer isolada
-   ali, descarta de vez qualquer interação com o resto do protocolo
-   (pareamento, `hop_counter`, `FragmentPacket`) e confirma que é
-   específico da troca de canal em si.
-3. Comparar captura de telemetria (`tlm_printf`) dos dois lados hop a
-   hop lado a lado (timestamp de `setChannel()`, de envio, de
-   `startListening()`) pra checar se a janela de escuta do escravo e a
-   de envio do mestre realmente se sobrepõem no relógio real, não só no
-   `HOP_INTERVAL_MS` nominal.
+1. **Soak de vários minutos** (tasks.md 6.4) com jammer desligado —
+   confirmar que o PLR de ~0,6% observado num teste de ~1-2 min se
+   mantém estável (não degrada) ao longo do tempo.
+2. **Jammer sweep ativo** (tasks.md 6.2) — confirmar que o novo hopping
+   por evento continua convergindo e escapando de canais ruidosos sob
+   ataque real, não só em bancada limpa.
+3. **Perda de sincronismo forçada** (tasks.md 6.3) e **resync de
+   `hop_counter` após reboot assimétrico** (tasks.md 6.5) — ainda não
+   re-testados com o novo mecanismo de hop.
 
 ## Ordem de execução após o hardware ser resolvido
 
@@ -176,10 +193,11 @@ e alerta (spectrum-attack-classification) confirmados funcionando primeiro.
 
 ## Próxima ação recomendada
 
-`pair_ok`/`seed` já acontecem de forma confiável (confirmado em
-2026-09-17 após remover `enableAckPayload()`) — a bateria T1–T7 do plano
-de bancada segue bloqueada não mais por hardware, mas pela fase de
-hopping ativo (envio de fragmentos) ainda falhar na maioria dos hops.
-Resolver isso é o item que destrava toda a validação restante — ver
-"Próximo passo" acima e `openspec/changes/adaptive-rendezvous/design.md`
-("Correção") para o que já foi descartado como causa.
+`pair_ok`/`seed`/hopping já funcionam de forma confiável num teste curto
+(confirmado em 2026-09-18 após trocar hopping por relógio periódico por
+hopping por evento, ver `openspec/changes/adaptive-rendezvous/design.md`
+"Correção 2"). O que falta pra destravar a bateria T1–T7 do plano de
+bancada não é mais nenhum bug conhecido — é rodar as validações mais
+longas/sob ataque que só um teste curto de bancada não cobre: soak de
+vários minutos, jammer sweep ativo, perda de sincronismo forçada (ver
+"Próximo passo" acima).

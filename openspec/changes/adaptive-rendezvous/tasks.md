@@ -57,8 +57,7 @@
       da lista) igual ao comportamento anterior. Confirmado em
       2026-09-17 após remover `enableAckPayload()` (bug real, ver
       design.md "Correção") — `pair_ok`/`seed` em ambos os lados,
-      repetível. Fase de hopping ativo (6.4) segue bloqueada por um
-      problema separado e ainda não resolvido (ver design.md).
+      repetível.
 - [ ] 6.2 Jammer sweep ativo **antes** do boot das duas placas: confirmar
       que o escravo varre, evita candidatos ruidosos, e o par converge num
       candidato fora de 2–80.
@@ -67,7 +66,11 @@
       pareamento e o enlace se recupera sem intervenção manual.
 - [ ] 6.4 Rodar por vários minutos com tráfego contínuo, confirmar PLR
       mensurável de forma sustentada (pré-requisito para `plr-metric` seção
-      3 e para qualquer teste de `dynamic-seed-blacklist`).
+      3 e para qualquer teste de `dynamic-seed-blacklist`). Hopping por
+      evento (2026-09-18, ver design.md "Correção 2") já mostrou PLR de
+      sessão caindo pra ~0,6% num teste curto (~1-2 min, jammer
+      desligado) — falta confirmar isso sustentado por vários minutos
+      antes de marcar concluído.
 - [ ] 6.5 Confirmar em log que o `hop_counter` do escravo converge para o
       do mestre mesmo partindo de valores diferentes após um reboot
       assimétrico.
