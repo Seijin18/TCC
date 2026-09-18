@@ -35,6 +35,18 @@
 #define PLL_DWELL_US 130
 #endif
 
+// Achado de bancada (2026-09-18, validacao end-to-end): em modo targeted,
+// com o dwell padrao (~1ms/canal, dominado pelo vTaskDelay(1) da task),
+// o jammer troca de canal rapido demais em relacao ao scanSpectrum() do
+// analisador (~860ms pra varrer os 126 canais) -- um canal-alvo so era
+// pego pelo analisador raramente e por acaso, levando dezenas de segundos
+// entre hits no MESMO canal. Aumentar o hold especificamente em targeted
+// (nao mexe no sweep, que deve continuar rapido/amplo) da mais chance de
+// QUALQUER scanner (nao so este analisador) perceber a presenca -- ainda
+// nao elimina o problema de fundo (um radio so pode estar em 1 canal por
+// vez), mas reduz o tempo medio ate uma primeira deteccao.
+static const uint32_t JAM_TARGETED_HOLD_MS = 60;
+
 static SPIClass vspi(VSPI);
 static SPIClass hspi(HSPI);
 
@@ -353,6 +365,8 @@ static void loopTargeted()
         else
             idx_rev--;
     }
+
+    delay(JAM_TARGETED_HOLD_MS);
 }
 
 static void jammer_loop()

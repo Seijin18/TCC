@@ -79,9 +79,44 @@ static const int NUM_CHANNELS = 126;
 static const int SCAN_SAMPLES = 10;
 static const int PLL_DWELL_US = 130;
 
+// Achado de bancada (2026-09-18, validacao end-to-end com jammer real):
+// um jammer sequencial de radio unico so ocupa UM canal por vez, e cada
+// ciclo dele (~1ms/canal em sweep ou targeted, dominado pelo vTaskDelay(1)
+// da task) e muito mais rapido que um sweep completo do analisador
+// (~126 canais * ~1.4ms = ~176ms). Isso faz o jammer "passar" por cada
+// canal-alvo so ocasionalmente durante a janela de 1.4ms em que o
+// analisador amostra ESSE canal especifico -- medido em bancada: so ~1
+// dos 16 canais de HOPPING_CHANNELS aparecia com atividade em cada
+// scanSpectrum() individual, os outros 15 zerados. Com alvo_avg somando
+// os 16 de UM UNICO sweep (classifyAttack() original), isso nunca
+// ultrapassava ~6% de media -- LIMIAR_ALVO=70% nunca disparava, mesmo com
+// o jammer realmente ativo e mirando exatamente esses canais (targeted).
+//
+// Fix: channelHeat[] acumula um "calor" por canal que sobe pra 100 a
+// cada hit real e decai devagar entre sweeps (HEAT_DECAY_PER_CYCLE por
+// ciclo) em vez de resetar a cada scanSpectrum(). Assim, hits raros e
+// espalhados ao longo de varios sweeps em canais DIFERENTES ainda somam
+// uma media alta quando avaliados juntos, porque o calor de um hit
+// antigo ainda nao decaiu totalmente quando um canal diferente e
+// atingido. classifyAttack() agora usa channelHeat[], nao channelData[]
+// bruto -- channelData[] continua intacto (leitura instantanea) porque
+// e o que sendCSV() manda pro heatmap do tools/spectrum/.
+static const int HEAT_HIT_THRESHOLD = 20;      // channelData[] acima disso conta como hit
+static const int HEAT_ON_HIT = 100;            // calor atribuido a um hit
+// Decaimento lento de propósito: medido em bancada que um jammer
+// sequencial de rádio único (targeted, 16 canais) só re-visita um canal
+// específico a cada ~15-20s nesta cadência -- com decaimento rápido
+// (ensaiado em 5/ciclo, ~17s pra zerar) o calor de um canal já sumia
+// antes do jammer sequer terminar de passar pelos outros 15, e a media
+// dos 16 nunca chegava perto de LIMIAR_ALVO. 1/ciclo (~150s pra zerar,
+// SCAN_SAMPLES*NUM_CHANNELS ciclos de ~... ver medição real em bancada)
+// dá margem suficiente pra cobrir uma rodada completa dos 16 canais.
+static const int HEAT_DECAY_PER_CYCLE = 1;
+
 static SPIClass analisador_hspi(HSPI);
 static RF24 analisador_radio(PIN_CE, PIN_CSN);
 static int channelData[NUM_CHANNELS];
+static int channelHeat[NUM_CHANNELS];
 
 static uint8_t g_attack_streak = 0;
 static bool g_attack_active = false;
@@ -131,6 +166,14 @@ static int measureChannel(uint8_t ch)
     return (hits * 100) / SCAN_SAMPLES;
 }
 
+static inline void updateHeat(int ch)
+{
+    if (channelData[ch] > HEAT_HIT_THRESHOLD)
+        channelHeat[ch] = HEAT_ON_HIT;
+    else if (channelHeat[ch] > 0)
+        channelHeat[ch] = (channelHeat[ch] > HEAT_DECAY_PER_CYCLE) ? channelHeat[ch] - HEAT_DECAY_PER_CYCLE : 0;
+}
+
 static void scanSpectrum()
 {
 #if FAST_BT_SCAN
@@ -138,10 +181,16 @@ static void scanSpectrum()
         channelData[i] = 0;
 
     for (int ch = BT_CH_MIN; ch <= BT_CH_MAX; ch++)
+    {
         channelData[ch] = measureChannel((uint8_t)ch);
+        updateHeat(ch);
+    }
 #else
     for (int ch = 0; ch < NUM_CHANNELS; ch++)
+    {
         channelData[ch] = measureChannel((uint8_t)ch);
+        updateHeat(ch);
+    }
 #endif
 }
 
@@ -172,12 +221,12 @@ static void classifyAttack()
     {
         if (isHoppingChannel((uint8_t)ch))
         {
-            alvo_sum += channelData[ch];
+            alvo_sum += channelHeat[ch];
             alvo_n++;
         }
         else
         {
-            fora_sum += channelData[ch];
+            fora_sum += channelHeat[ch];
             fora_n++;
         }
     }
