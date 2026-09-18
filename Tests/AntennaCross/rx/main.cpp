@@ -20,7 +20,7 @@
 #define PIN_MISO_H 2
 #define PIN_MOSI_H 17
 
-#define CH_VSPI 100
+#define CH_VSPI 76
 #define CH_HSPI 90
 
 static SPIClass vspi(VSPI);
@@ -34,6 +34,7 @@ struct __attribute__((packed)) Msg
 {
     uint32_t counter;
     char tag[5];
+    uint8_t padding[21]; // DIAG: aproxima do tamanho do FragmentPacket real (30 bytes)
 };
 
 static void setupRadio(RF24 &r, SPIClass &spi, uint8_t ce, uint8_t csn, uint8_t ch)
@@ -42,13 +43,15 @@ static void setupRadio(RF24 &r, SPIClass &spi, uint8_t ce, uint8_t csn, uint8_t 
     r.setPALevel(RF24_PA_MAX);
     r.setDataRate(RF24_1MBPS);
     r.setChannel(ch);
-    r.setAutoAck(false);
+    r.setAutoAck(true);
     r.setCRCLength(RF24_CRC_16);
-    r.setPayloadSize(sizeof(Msg));
+    r.enableDynamicPayloads(); // DIAG: testando se DPL e o problema
     r.openReadingPipe(1, addr);
     r.startListening();
 }
 
+static bool okV = false;
+static bool okH = false;
 static uint32_t rxCountV = 0;
 static uint32_t rxCountH = 0;
 
@@ -61,20 +64,28 @@ void setup()
     vspi.begin(PIN_SCK_V, PIN_MISO_V, PIN_MOSI_V, PIN_CSN_V);
     hspi.begin(PIN_SCK_H, PIN_MISO_H, PIN_MOSI_H, PIN_CSN_H);
 
-    if (!radioV.begin(&vspi, PIN_CE_V, PIN_CSN_V) || !radioV.isChipConnected())
+    okV = radioV.begin(&vspi, PIN_CE_V, PIN_CSN_V) && radioV.isChipConnected();
+    if (!okV)
         Serial.println("[ERRO] radioV (VSPI) nao detectado no SPI");
-    if (!radioH.begin(&hspi, PIN_CE_H, PIN_CSN_H) || !radioH.isChipConnected())
+    okH = radioH.begin(&hspi, PIN_CE_H, PIN_CSN_H) && radioH.isChipConnected();
+    if (!okH)
         Serial.println("[ERRO] radioH (HSPI) nao detectado no SPI");
 
-    setupRadio(radioV, vspi, PIN_CE_V, PIN_CSN_V, CH_VSPI);
-    setupRadio(radioH, hspi, PIN_CE_H, PIN_CSN_H, CH_HSPI);
+    // Sem essa guarda, available()/read() num radio nao inicializado
+    // (chip ausente/nao detectado) pode retornar lixo da SPI e imprimir
+    // "recebido" falso -- confundiu o diagnostico quando um dos modulos
+    // foi removido pra teste cruzado.
+    if (okV)
+        setupRadio(radioV, vspi, PIN_CE_V, PIN_CSN_V, CH_VSPI);
+    if (okH)
+        setupRadio(radioH, hspi, PIN_CE_H, PIN_CSN_H, CH_HSPI);
 
     Serial.printf("VSPI RX em ch=%u | HSPI RX em ch=%u | escutando...\n", CH_VSPI, CH_HSPI);
 }
 
 void loop()
 {
-    if (radioV.available())
+    if (okV && radioV.available())
     {
         Msg m;
         radioV.read(&m, sizeof(m));
@@ -82,7 +93,7 @@ void loop()
         Serial.printf("[RX-VSPI] n=%lu tag=%s total=%lu\n", m.counter, m.tag, rxCountV);
     }
 
-    if (radioH.available())
+    if (okH && radioH.available())
     {
         Msg m;
         radioH.read(&m, sizeof(m));

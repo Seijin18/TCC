@@ -26,7 +26,7 @@
 #define PIN_MISO_H 2
 #define PIN_MOSI_H 17
 
-#define CH_VSPI 100
+#define CH_VSPI 76
 #define CH_HSPI 90
 
 static SPIClass vspi(VSPI);
@@ -40,6 +40,7 @@ struct __attribute__((packed)) Msg
 {
     uint32_t counter;
     char tag[5];
+    uint8_t padding[21]; // DIAG: aproxima do tamanho do FragmentPacket real (30 bytes)
 };
 
 static bool safeSend(RF24 &r, const Msg &m)
@@ -55,10 +56,10 @@ static void setupRadio(RF24 &r, SPIClass &spi, uint8_t ce, uint8_t csn, uint8_t 
     r.setPALevel(RF24_PA_MAX);
     r.setDataRate(RF24_1MBPS);
     r.setChannel(ch);
-    r.setAutoAck(false);
+    r.setAutoAck(true);
     r.enableDynamicAck();
     r.setCRCLength(RF24_CRC_16);
-    r.setPayloadSize(sizeof(Msg));
+    r.enableDynamicPayloads(); // DIAG: testando se DPL e o problema
     r.openWritingPipe(addr);
     r.stopListening();
 }
@@ -85,22 +86,32 @@ void setup()
     Serial.printf("VSPI TX em ch=%u | HSPI TX em ch=%u | 1 msg/segundo em cada\n", CH_VSPI, CH_HSPI);
 }
 
+// DIAG: alterna qual radio transmite a cada ciclo, em vez dos dois juntos
+// -- isola se a perda no VSPI e por interferencia mutua entre as duas
+// antenas transmitindo ao mesmo tempo (PA_MAX, centimetros de distancia)
+// ou um problema persistente do proprio VSPI.
 void loop()
 {
     counter++;
 
-    Msg mv;
-    mv.counter = counter;
-    memcpy(mv.tag, "VSPI", 5);
-    bool okV = safeSend(radioV, mv);
-
-    Msg mh;
-    mh.counter = counter;
-    memcpy(mh.tag, "HSPI", 5);
-    bool okH = safeSend(radioH, mh);
-
-    Serial.printf("[TX] n=%lu VSPI(ch=%u)=%s HSPI(ch=%u)=%s\n",
-                  counter, CH_VSPI, okV ? "enviado" : "FALHOU", CH_HSPI, okH ? "enviado" : "FALHOU");
+    if (counter % 2 == 1)
+    {
+        Msg mv;
+        memset(&mv, 0, sizeof(mv));
+        mv.counter = counter;
+        memcpy(mv.tag, "VSPI", 5);
+        bool okV = safeSend(radioV, mv);
+        Serial.printf("[TX] n=%lu VSPI(ch=%u)=%s (sozinho)\n", counter, CH_VSPI, okV ? "enviado" : "FALHOU");
+    }
+    else
+    {
+        Msg mh;
+        memset(&mh, 0, sizeof(mh));
+        mh.counter = counter;
+        memcpy(mh.tag, "HSPI", 5);
+        bool okH = safeSend(radioH, mh);
+        Serial.printf("[TX] n=%lu HSPI(ch=%u)=%s (sozinho)\n", counter, CH_HSPI, okH ? "enviado" : "FALHOU");
+    }
 
     delay(1000);
 }
