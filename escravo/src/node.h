@@ -55,6 +55,7 @@ static unsigned long g_pair_dwell_start = 0;
 static uint32_t hop_counter = 0;
 static unsigned long last_hop_time = 0;
 static unsigned long hop_start_at = 0;
+static bool hop_clock_primed = false;
 static uint8_t current_channel = PAIRING_CANDIDATES[0];
 static uint32_t g_hops_since_rx = 0;
 
@@ -167,6 +168,7 @@ static void reset_to_scanning()
     g_seed_apply_scheduled = false;
     g_mask_apply_scheduled = false;
     g_channel_mask = 0xFFFF;
+    hop_clock_primed = false;
     notify_ready(false);
     tlm_event("escravo", "loss_of_sync");
 }
@@ -204,7 +206,12 @@ static void escravo_setup()
     escravo_radio.setChannel(PAIRING_CANDIDATES[g_pair_idx]);
 
     escravo_radio.enableDynamicPayloads();
-    escravo_radio.enableAckPayload();
+    // NAO chamar enableAckPayload(): achado de bancada -- ver comentario
+    // em mestre/src/node.h (mesmo ponto). Com ack payload habilitado, o
+    // receptor descarta silenciosamente pacotes enviados como NO_ACK
+    // (radio_send(), usado em todo write() deste projeto) -- reproduzido
+    // isolado e 100% repetível com Tests/AntennaCross.
+    //
     // adaptive-rendezvous: necessario para radio_send()/writeFast(...,
     // multicast=true) -- ver shared/protocol.h.
     escravo_radio.enableDynamicAck();
@@ -340,9 +347,21 @@ static void escravo_loop()
     if (millis() < hop_start_at)
         return;
 
-    if (millis() - last_hop_time >= HOP_INTERVAL_MS)
+    // Achado de bancada: mesmo motivo do lado do mestre (ver
+    // mestre/src/node.h) -- ajusta o relógio de hop no instante exato em
+    // que o hopping começa de fato, não antes.
+    if (!hop_clock_primed)
     {
         last_hop_time = millis();
+        hop_clock_primed = true;
+    }
+
+    if (millis() - last_hop_time >= HOP_INTERVAL_MS)
+    {
+        // Achado de bancada: incremento fixo, não "= millis()" -- mesmo
+        // motivo do lado do mestre (ver mestre/src/node.h), pra não
+        // acumular deriva relativa entre os dois relógios de hop.
+        last_hop_time += HOP_INTERVAL_MS;
 
         g_window_expected++;
         g_session_expected++;
@@ -367,6 +386,9 @@ static void escravo_loop()
 
         current_channel = get_next_active_channel(g_seed, hop_counter, g_channel_mask);
         escravo_radio.setChannel(current_channel);
+        // Achado de bancada: mesmo motivo do lado do mestre (ver
+        // mestre/src/node.h) -- 500us em vez dos 130us do datasheet.
+        delayMicroseconds(500);
         hop_counter++;
         apply_scheduled_changes();
 
@@ -397,12 +419,19 @@ static void escravo_loop()
                     // qualquer deriva entre os dois lados.
                     hop_counter = pkt.hop_counter;
 
-                    if (current_msg_id != pkt.msg_id)
-                    {
+                    // Achado de bancada: nenhum guarded_printf/tlm_printf
+                    // roda antes do ACK ser enviado (só depois, mais
+                    // abaixo) -- eles competem pelo mesmo mutex de
+                    // telemetria que a task do jammer também usa, e um
+                    // print antes do ack podia atrasar o suficiente pra
+                    // mestre já ter desistido de esperar (ACK_TIMEOUT_MS)
+                    // quando o ack finalmente saía. Só o estado (reset de
+                    // mensagem, bitmap, contagem) é atualizado aqui.
+                    bool is_new_message = (current_msg_id != pkt.msg_id);
+                    if (is_new_message)
                         reset_message_state(pkt.msg_id, pkt.total_fragments);
-                        guarded_printf("[ESCRAVO] Nova mensagem msg_id=%u com %u fragmentos\n", pkt.msg_id, pkt.total_fragments);
-                    }
 
+                    bool fragment_stored = false;
                     if (pkt.fragment_index < expected_total_fragments && pkt.payload_len <= FRAGMENT_DATA_SIZE)
                     {
                         size_t offset = (size_t)pkt.fragment_index * FRAGMENT_DATA_SIZE;
@@ -414,9 +443,7 @@ static void escravo_loop()
                                 received_bitmap[pkt.fragment_index] = true;
                                 received_count++;
                             }
-
-                            guarded_printf("[ESCRAVO] Canal=%u frag=%u/%u recebida (len=%u)\n",
-                                          current_channel, pkt.fragment_index + 1, expected_total_fragments, pkt.payload_len);
+                            fragment_stored = true;
                         }
                     }
 
@@ -431,6 +458,14 @@ static void escravo_loop()
                     escravo_radio.stopListening();
                     radio_send(escravo_radio, &ack, sizeof(ack));
                     escravo_radio.startListening();
+
+                    // Prints adiados pra depois do ack (ver comentário
+                    // acima) -- não afetam o timing crítico daqui em diante.
+                    if (is_new_message)
+                        guarded_printf("[ESCRAVO] Nova mensagem msg_id=%u com %u fragmentos\n", pkt.msg_id, pkt.total_fragments);
+                    if (fragment_stored)
+                        guarded_printf("[ESCRAVO] Canal=%u frag=%u/%u recebida (len=%u)\n",
+                                      current_channel, pkt.fragment_index + 1, expected_total_fragments, pkt.payload_len);
 
                     if (complete && !completion_logged)
                     {

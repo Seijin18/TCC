@@ -173,6 +173,7 @@ static uint8_t g_total_fragments = 0;
 static uint32_t g_hop_counter = 0;
 static unsigned long g_last_hop_time = 0;
 static unsigned long g_hop_start_at = 0;
+static bool g_hop_clock_primed = false;
 static uint8_t g_current_channel = PAIRING_CANDIDATES[0];
 static uint32_t g_hops_since_ack = 0;
 
@@ -359,11 +360,11 @@ static void fill_fragment(FragmentPacket &pkt, uint8_t fragment_index)
         memcpy(pkt.payload, kFullMessage + start, chunk);
 }
 
-static bool wait_fragment_ack(uint8_t expected_fragment, bool &all_complete)
+static bool wait_fragment_ack(uint8_t expected_fragment, bool &all_complete, uint32_t timeout_ms)
 {
     all_complete = false;
     unsigned long start_wait = millis();
-    while (millis() - start_wait < ACK_TIMEOUT_MS)
+    while (millis() - start_wait < timeout_ms)
     {
         if (!mestre_radio.available())
             continue;
@@ -555,6 +556,7 @@ static void reset_to_pairing()
     g_mask_apply_scheduled = false;
     g_channel_mask = 0xFFFF;
     memset(g_channel_fail, 0, sizeof(g_channel_fail));
+    g_hop_clock_primed = false;
     tlm_event("mestre", "loss_of_sync");
 }
 
@@ -589,11 +591,21 @@ static void mestre_setup()
     mestre_radio.setChannel(g_pair_channel);
 
     mestre_radio.enableDynamicPayloads();
-    mestre_radio.enableAckPayload();
-    // adaptive-rendezvous: necessario para write(..., multicast=true) na
-    // sonda de pareamento (ver try_establish_link) -- sem isso o bit
-    // EN_DYN_ACK do FEATURE register nao é setado e o comando
-    // W_TX_PAYLOAD_NO_ACK não tem efeito.
+    // NAO chamar enableAckPayload(): achado de bancada -- nestes módulos
+    // (clones comuns baseados em SI24R1), habilitar ack payload junto com
+    // envios NO_ACK (radio_send(), usado em todo write() deste projeto)
+    // faz o receptor descartar o pacote silenciosamente, sem nunca disparar
+    // available() -- reproduzido de forma isolada e 100% repetível com
+    // Tests/AntennaCross (setAutoAck(true) sozinho: ~100% de entrega;
+    // + enableAckPayload(): ~0%). writeAckPayload() nunca é chamado neste
+    // protocolo (a confirmação real vem de pacotes de resposta explícitos
+    // -- LinkAck/SeedAck/FragmentAck/ControlAck), então a feature nunca fez
+    // falta.
+    //
+    // adaptive-rendezvous: enableDynamicAck() é necessário para
+    // write(..., multicast=true) na sonda de pareamento (ver
+    // try_establish_link) -- sem isso o bit EN_DYN_ACK do FEATURE register
+    // nao é setado e o comando W_TX_PAYLOAD_NO_ACK não tem efeito.
     mestre_radio.enableDynamicAck();
 
     mestre_radio.setCRCLength(RF24_CRC_16);
@@ -693,15 +705,56 @@ static void mestre_loop()
     if (millis() < g_hop_start_at)
         return;
 
-    if (millis() - g_last_hop_time >= HOP_INTERVAL_MS)
+    // Achado de bancada: g_last_hop_time é ajustado aqui, no instante
+    // exato em que o hopping realmente começa -- não em
+    // pair_ok/seed_confirmed (bem antes, por até ~900ms+RTT de
+    // HOP_START_DELAY_MS). Sem isso, na primeira checagem abaixo
+    // "millis() - g_last_hop_time" já vinha bem maior que
+    // HOP_INTERVAL_MS, disparando uma rajada de hops em sequência (sem
+    // nenhuma espera real) até "alcançar" o relógio atual. Mestre e
+    // escravo faziam essa rajada em velocidades diferentes (mestre é mais
+    // lento por hop, por causa do wait_fragment_ack), terminando a rajada
+    // em pontos diferentes da tabela de canais -- criava um desalinhamento
+    // fixo entre os dois lados (escravo ficava ~100ms atrasado em relação
+    // ao mestre a cada hop), fazendo cada fragmento ser transmitido *antes*
+    // do escravo sequer trocar pro canal certo. Resultado observado:
+    // handshake e seed funcionavam perfeitamente (não passam por este
+    // relógio), mas quase 100% dos fragmentos hopados eram perdidos.
+    if (!g_hop_clock_primed)
     {
         g_last_hop_time = millis();
+        g_hop_clock_primed = true;
+    }
+
+    if (millis() - g_last_hop_time >= HOP_INTERVAL_MS)
+    {
+        // Achado de bancada: agenda por incremento fixo, não por
+        // "= millis()" -- cada hop cujo wait_fragment_ack() estoura o
+        // timeout completo (ACK_TIMEOUT_MS) empurra o relógio de hop do
+        // mestre pra mais tarde permanentemente se resetado pro instante
+        // atual, já que o escravo (sem essa espera bloqueante) mantém seu
+        // próprio relógio de hop muito mais perto do nominal. Isso fazia
+        // os dois lados divergirem de canal a cada miss, numa espiral que
+        // nunca se corrige sozinha. Incrementar por HOP_INTERVAL_MS deixa
+        // o agendamento se recuperar sozinho (múltiplos hops disparam em
+        // sequência até alcançar o relógio real) em vez de arrastar.
+        g_last_hop_time += HOP_INTERVAL_MS;
 
         maybe_enqueue_control();
 
         uint8_t channel = get_next_active_channel(g_seed, g_hop_counter, g_channel_mask);
         g_current_channel = channel;
         mestre_radio.setChannel(channel);
+        // Achado de bancada: sem esta espera, o PLL do NRF24 ainda nao
+        // assentou na nova frequencia quando o write() seguinte tenta
+        // transmitir -- ao contrario do pareamento (que so reescreve o
+        // MESMO canal a cada tentativa, nunca troca de fato), aqui o
+        // canal muda em TODO hop, às vezes por >100MHz de uma vez (ex.
+        // 125->15 na tabela). Os 130us do datasheet (suficientes para o
+        // pareamento e para o scan do analisador) não bastaram aqui —
+        // 100% de perda mesmo com o link sincronizado; 500us reduziu bem
+        // a perda nestes módulos.
+        delayMicroseconds(500);
 
         if (send_pending_control_if_any())
         {
@@ -713,12 +766,41 @@ static void mestre_loop()
         FragmentPacket pkt;
         fill_fragment(pkt, g_current_fragment);
 
-        mestre_radio.stopListening();
-        bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));
-        if (!sent)
+        // Achado de bancada: mestre e escravo mantêm cadências de 220ms
+        // estáveis, mas com um offset de fase fixo entre si (~100ms,
+        // vindo da assimetria do round-trip de confirmação de seed --
+        // cada lado ancora seu próprio relógio de hop no instante em que
+        // VÊ a seed confirmada, e esses instantes não coincidem). Um
+        // único envio no início da janela do mestre chega antes do
+        // escravo sequer trocar pro mesmo canal. Em vez de perseguir
+        // alinhamento sub-100ms entre dois relógios independentes (frágil
+        // a jitter), reenvia o mesmo fragmento repetidamente pelo resto da
+        // janela de 220ms deste hop -- garante sobreposição com a janela
+        // de escuta do escravo mesmo com a fase atual.
+        unsigned long hop_window_end = g_last_hop_time + HOP_INTERVAL_MS;
+        const uint32_t attempt_wait_ms = 25;
+        bool ack_ok = false;
+        bool completed = false;
+        bool any_sent = false;
+
+        while (millis() + attempt_wait_ms < hop_window_end)
+        {
+            mestre_radio.stopListening();
+            bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));
+            mestre_radio.startListening();
+
+            if (sent)
+            {
+                any_sent = true;
+                ack_ok = wait_fragment_ack(g_current_fragment, completed, attempt_wait_ms);
+                if (ack_ok)
+                    break;
+            }
+        }
+
+        if (!any_sent)
         {
             guarded_printf("[MESTRE] Falha de envio no hop=%lu canal=%u frag=%u\n", g_hop_counter, g_current_channel, g_current_fragment);
-            mestre_radio.startListening();
             g_hops_since_ack++;
             uint8_t idx = find_channel_index(channel);
             if (g_channel_fail[idx] < 255)
@@ -730,13 +812,14 @@ static void mestre_loop()
             return;
         }
 
+        // Prints depois de já ter tentado o ack (não antes) -- ver
+        // comentário histórico: eles competem pelo mutex de telemetria
+        // com a task do analisador/jammer e não devem atrasar a janela
+        // de escuta do ack.
+
         tlm_printf("mestre", "hop", "ch=%u;n=%lu;frag=%u", channel, g_hop_counter, g_current_fragment);
         guarded_printf("[MESTRE] Hop=%lu canal=%u frag=%u/%u len=%u enviada.\n",
                       g_hop_counter, g_current_channel, g_current_fragment + 1, g_total_fragments, pkt.payload_len);
-
-        mestre_radio.startListening();
-        bool completed = false;
-        bool ack_ok = wait_fragment_ack(g_current_fragment, completed);
 
         uint8_t idx = find_channel_index(channel);
         if (ack_ok)
