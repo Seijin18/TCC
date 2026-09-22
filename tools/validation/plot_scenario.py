@@ -207,86 +207,108 @@ def main():
     print("=" * 70)
 
     # =================== FIGURA ===================
+    # Fontes bem maiores que o default -- o gráfico é visto reduzido (chat,
+    # slide, PDF), então precisa ser legível mesmo pequeno. Legendas ficam
+    # DENTRO da área de cada painel (não em bbox_to_anchor fora do eixo,
+    # que ficava minúsculo ao encolher a imagem).
+    plt.rcParams.update(
+        {
+            "font.size": 13,
+            "axes.titlesize": 15,
+            "axes.labelsize": 13,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
+            "legend.fontsize": 11.5,
+        }
+    )
+
     fig, axes = plt.subplots(
-        3, 1, figsize=(13, 9.5), sharex=True, gridspec_kw={"height_ratios": [1.1, 1, 1.3]}
+        3, 1, figsize=(16, 12), sharex=True, gridspec_kw={"height_ratios": [1.1, 1, 1.3]}
     )
     ax_hop, ax_plr, ax_ch = axes
 
-    def shade_jam(ax):
+    def shade_jam(ax, label_y_frac=0.92):
         for lo, hi in jam_windows:
-            ax.axvspan(lo, hi, color="red", alpha=0.08, zorder=0)
+            ax.axvspan(lo, hi, color="red", alpha=0.12, zorder=0)
+            mid = (lo + hi) / 2
+            ylo, yhi = ax.get_ylim()
+            ax.text(
+                mid, ylo + (yhi - ylo) * label_y_frac, "JAMMER LIGADO",
+                ha="center", va="top", fontsize=11, color="firebrick", fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="firebrick", alpha=0.75),
+            )
 
     # --- painel 1: ack/miss por hop ---
     if misses:
         ax_hop.scatter(
             [rel(e["epoch"]) for e in misses], [0] * len(misses),
-            marker="x", color="crimson", s=30, label=f"miss ({len(misses)})", zorder=3,
+            marker="x", color="crimson", s=45, linewidths=2, label=f"miss ({len(misses)})", zorder=3,
         )
     if acks:
         ax_hop.scatter(
             [rel(e["epoch"]) for e in acks], [1] * len(acks),
-            marker="o", color="seagreen", s=14, label=f"ack ({len(acks)})", zorder=3,
+            marker="o", color="seagreen", s=18, label=f"ack ({len(acks)})", zorder=3,
         )
     ax_hop.set_yticks([0, 1])
     ax_hop.set_yticklabels(["miss", "ack"])
     ax_hop.set_ylim(-0.5, 1.5)
-    ax_hop.set_title("Envio de fragmentos por hop (mestre) — onde o jamming interrompe a entrega")
+    ax_hop.set_title("1. Envio de fragmentos por hop (mestre) — onde o jamming interrompe a entrega")
     if acks or misses:
-        ax_hop.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8)
+        ax_hop.legend(loc="upper left", framealpha=0.9)
     shade_jam(ax_hop)
 
     # --- painel 2: PLR + fallback ---
     if plrs:
         xs = [rel(e["epoch"]) for e in plrs]
         ys = [float(e["fields"]["window"]) for e in plrs]
-        ax_plr.plot(xs, ys, color="steelblue", linewidth=1.2, label="PLR de janela (%)")
+        ax_plr.plot(xs, ys, color="steelblue", linewidth=2, label="PLR de janela (%)")
     for e in loss:
-        ax_plr.axvline(rel(e["epoch"]), color="black", linestyle="--", linewidth=1, alpha=0.7)
+        ax_plr.axvline(rel(e["epoch"]), color="black", linestyle="--", linewidth=1.5, alpha=0.8)
     for e in pair_ok:
-        ax_plr.axvline(rel(e["epoch"]), color="darkgreen", linestyle=":", linewidth=1.2, alpha=0.8)
+        ax_plr.axvline(rel(e["epoch"]), color="darkgreen", linestyle=":", linewidth=2, alpha=0.9)
     if loss:
-        ax_plr.plot([], [], color="black", linestyle="--", label="loss_of_sync (entra no fallback)")
+        ax_plr.plot([], [], color="black", linestyle="--", linewidth=1.5, label="loss_of_sync (entra no fallback)")
     if pair_ok:
-        ax_plr.plot([], [], color="darkgreen", linestyle=":", label="pair_ok (recuperado)")
+        ax_plr.plot([], [], color="darkgreen", linestyle=":", linewidth=2, label="pair_ok (recuperado)")
     ax_plr.set_ylabel("PLR (%)")
-    ax_plr.set_title("Packet loss rate + fallback de pareamento (adaptive-rendezvous)")
-    ax_plr.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8)
+    ax_plr.set_title("2. Packet loss rate + fallback de pareamento (adaptive-rendezvous)")
+    ax_plr.legend(loc="upper left", framealpha=0.9)
     shade_jam(ax_plr)
 
     # --- painel 3: canal + rekey/blacklist ---
     if hops:
         xs = [rel(e["epoch"]) for e in hops]
         ys = [int(e["fields"]["ch"]) for e in hops]
-        ax_ch.scatter(xs, ys, s=4, color="gray", alpha=0.5, label="canal usado")
+        ax_ch.scatter(xs, ys, s=8, color="gray", alpha=0.6, label="canal usado")
     for e in rekey_tx:
-        ax_ch.axvline(rel(e["epoch"]), color="orange", linestyle="-.", linewidth=1)
+        ax_ch.axvline(rel(e["epoch"]), color="orange", linestyle="-.", linewidth=1.5)
     for e in rekey_apply:
-        ax_ch.axvline(rel(e["epoch"]), color="purple", linestyle="-", linewidth=1.3)
+        ax_ch.axvline(rel(e["epoch"]), color="purple", linestyle="-", linewidth=2)
     for e in blacklist:
-        ax_ch.axvline(rel(e["epoch"]), color="magenta", linestyle="-", linewidth=1.3)
+        ax_ch.axvline(rel(e["epoch"]), color="magenta", linestyle="-", linewidth=2)
     if rekey_tx:
-        ax_ch.plot([], [], color="orange", linestyle="-.", label="rekey_tx (seed/mask proposto)")
+        ax_ch.plot([], [], color="orange", linestyle="-.", linewidth=1.5, label="rekey_tx (seed/mask proposto)")
     if rekey_apply:
-        ax_ch.plot([], [], color="purple", linestyle="-", label="rekey_apply (seed trocada)")
+        ax_ch.plot([], [], color="purple", linestyle="-", linewidth=2, label="rekey_apply (seed trocada)")
     if blacklist:
-        ax_ch.plot([], [], color="magenta", linestyle="-", label="blacklist (máscara trocada)")
-    ax_ch.axhspan(2, 80, color="red", alpha=0.05, zorder=0)
+        ax_ch.plot([], [], color="magenta", linestyle="-", linewidth=2, label="blacklist (máscara trocada)")
+    ax_ch.axhspan(2, 80, color="steelblue", alpha=0.06, zorder=0)
+    t_span = (t_end - t0) or 1.0
+    ax_ch.text(
+        0.01 * t_span, 41, "faixa 2–80 MHz (varrida pelo jammer sweep)",
+        fontsize=9.5, color="steelblue", va="center", ha="left",
+    )
     ax_ch.set_ylabel("Canal RF")
     ax_ch.set_xlabel("Tempo (s desde início do cenário)")
-    ax_ch.set_title("Canal em uso por hop + troca de seed/blacklist (faixa 2–80 = varrida pelo jammer sweep)")
-    ax_ch.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8)
-    shade_jam(ax_ch)
+    ax_ch.set_title("3. Canal em uso por hop + troca de seed/blacklist")
+    ax_ch.legend(loc="upper left", framealpha=0.9)
+    shade_jam(ax_ch, label_y_frac=0.06)
 
-    fig.text(
-        0.5, 0.988,
-        "área vermelha sombreada = jammer emitindo de fato (jam_state_on…jam_state_off)",
-        ha="center", fontsize=9, color="dimgray",
-    )
-    fig.suptitle("Validação end-to-end: jamming, fallback e rekey", fontsize=13, y=1.01)
-    fig.tight_layout(rect=[0, 0, 0.86, 0.97])
+    fig.suptitle("Validação end-to-end: jamming, fallback e rekey", fontsize=18, y=0.995, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
 
     out_png = scenario_path.replace(".json", ".png")
-    fig.savefig(out_png, dpi=140, bbox_inches="tight")
+    fig.savefig(out_png, dpi=170, bbox_inches="tight")
     print(f"\nGráfico salvo em: {out_png}")
 
 
