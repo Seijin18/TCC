@@ -39,9 +39,10 @@ atualizado periodicamente e legível sem reprocessar o histórico completo.
   partir do snapshot derivado, sem varrer o arquivo de sessão inteiro
 
 ### Requirement: Canal de comando desacoplado da porta serial exclusiva
-Quando o daemon de captura é o dono exclusivo de uma porta serial, DEVE
-(MUST) existir um canal indireto (arquivo ou equivalente) pelo qual outros
-processos possam enviar comandos às placas sem abrir a porta diretamente.
+DEVE (MUST) existir um canal indireto (arquivo ou equivalente) pelo qual
+outros processos possam enviar comandos às placas sem abrir a porta
+diretamente, quando o daemon de captura é o dono exclusivo dessa porta
+serial.
 
 #### Scenario: Dashboard envia comando com o daemon rodando
 - **WHEN** o dashboard não tem acesso direto à porta serial (daemon já a

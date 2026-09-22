@@ -23,10 +23,10 @@ mestre.
   candidato e completa o handshake
 
 ### Requirement: Recuperação automática após perda de sincronismo
-Quando o enlace já estabelecido deixa de trocar tráfego válido por um número
-definido de hops consecutivos, tanto mestre quanto escravo DEVEM (MUST)
-retornar ao estado de pareamento (acampar / varrer, respectivamente) sem
-intervenção manual.
+Mestre e escravo DEVEM (MUST) retornar ao estado de pareamento (acampar /
+varrer, respectivamente) sem intervenção manual quando o enlace já
+estabelecido deixar de trocar tráfego válido por um número definido de
+hops consecutivos.
 
 #### Scenario: Recuperação após uma placa reiniciar
 - **WHEN** uma das placas perde e recupera energia enquanto a outra
