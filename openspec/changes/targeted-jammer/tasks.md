@@ -31,6 +31,11 @@
       paralelo, confirmar visualmente no heatmap que o modo `targeted`
       concentra energia só nos 16 canais da tabela, diferente do padrão
       disperso do `sweep`.
-- [ ] 3.3 Rodar mestre+escravo com PLR (`plr-metric`) sob jammer targeted e
+- [x] 3.3 Rodar mestre+escravo com PLR (`plr-metric`) sob jammer targeted e
       confirmar que o PLR sobe de forma comparável ao sweep — serve de
-      baseline para o cenário B da Fase 5.
+      baseline para o cenário B da Fase 5. **Confirmado em 2026-09-18**
+      via `tools/validation/run_scenario.py --jammer-mode targeted`:
+      `plr_window` chegou a 12,4% sob targeted + potência alta (vs.
+      3,5–5,8% sob sweep no mesmo teste) — mesma ordem de grandeza,
+      targeted inclusive mais efetivo por mirar direto nos 16 canais do
+      hopping.

@@ -70,8 +70,11 @@
 
 ## 6. Validação manual em bancada
 
-- [ ] 6.1 Flashear `placa_a` e `placa_b`, confirmar handshake
+- [x] 6.1 Flashear `placa_a` e `placa_b`, confirmar handshake
       mestre↔escravo funcionando igual ao cenário de 4 placas.
+      **Confirmado repetidamente entre 2026-09-17 e 2026-09-18** —
+      `pair_ok`/`seed` em ambos os lados, de forma reprodutível, em
+      dezenas de execuções via `tools/validation/run_scenario.py`.
 - [ ] 6.2 Confirmar no log serial do mestre que o alerta do analisador
       (via flag compartilhada) chega corretamente ao ligar/desligar o
       jammer em modo targeted.
@@ -82,10 +85,12 @@
       ligado-e-parado vs. ligado-e-rodando, para isolar se alguma queda de
       PLR é causada por contenção de CPU em vez de RF real (ver Risks em
       `design.md`).
-- [ ] 6.5 Recalibrar `LIMIAR_ALVO`/`LIMIAR_CONCENTRACAO`/`ATTACK_STREAK_N`
-      (`spectrum-attack-classification`) se a proximidade física entre os
-      dois módulos da Placa A distorcer a classificação em relação ao
-      cenário de 4 placas.
+- [ ] 6.5 (Duplicado — ver
+      `openspec/changes/spectrum-attack-classification/tasks.md` seção 3)
+      A calibração de `LIMIAR_ALVO`/`LIMIAR_CONCENTRACAO`/`ATTACK_STREAK_N`
+      é rastreada só lá, já com achados registrados em 2026-09-18 (piso de
+      ruído da bancada, teto estrutural do modo sweep). Este item fica
+      como referência cruzada, não como tarefa independente.
 ## 7. Correções de pinagem SPI (achadas ao tentar rodar de verdade)
 
 A implementação das seções 3/4 assumiu HSPI para o nó secundário, mas os

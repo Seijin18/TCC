@@ -24,9 +24,15 @@
 
 ## 3. Validação manual
 
-- [ ] 3.1 Rodar mestre+escravo sem jammer por alguns minutos e confirmar
-      `plr_window` ≈ 0% de forma consistente no log serial.
-- [ ] 3.2 Rodar com o jammer sweep atual (`jammer/src/main.cpp`) ativo e
+- [x] 3.1 Rodar mestre+escravo sem jammer por alguns minutos e confirmar
+      `plr_window` ≈ 0% de forma consistente no log serial. **Confirmado
+      em 2026-09-18** via `tools/validation/run_scenario.py` (fase
+      baseline) — `plr_window` entre 0% e 0,6% em várias execuções.
+- [x] 3.2 Rodar com o jammer sweep atual (`jammer/src/main.cpp`) ativo e
       confirmar que `plr_window` sobe visivelmente enquanto o ataque está
       ativo, servindo de baseline para os changes seguintes
-      (`dynamic-seed-blacklist`, `scenario-automation`).
+      (`dynamic-seed-blacklist`, `scenario-automation`). **Confirmado em
+      2026-09-18**: `plr_window` subiu para 3,5–12,4% sob jamming (sweep e
+      targeted, potência baixa e alta) — ver
+      `openspec/changes/targeted-jammer/tasks.md` 3.3 para o número sob
+      targeted especificamente.
