@@ -29,9 +29,9 @@ explicitamente ao núcleo diferente do usado pelo `loop()` padrão.
   o `loop()` do nó primário de rodar no núcleo dele
 
 ### Requirement: Alerta de ataque via flag compartilhada na Placa A
-Quando o mestre e o analisador rodam na mesma placa, o alerta de "ataque
-ativo" (`spectrum-attack-classification`) DEVE (MUST) ser propagado por uma
-flag compartilhada em memória entre as duas tasks, em vez de um pino GPIO
+O mestre e o analisador DEVEM (MUST) propagar o alerta de ataque ativo
+(`spectrum-attack-classification`) por uma flag compartilhada em memória
+entre as duas tasks quando rodam na mesma placa, em vez de um pino GPIO
 físico — preservando a mesma semântica observável (nível lógico mantido
 enquanto o ataque persistir) descrita no `design.md` daquele change.
 
