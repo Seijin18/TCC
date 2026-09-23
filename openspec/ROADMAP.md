@@ -6,7 +6,49 @@ verdade de contexto/dependências) — é a camada de "o que fazer agora, em que
 ordem" derivada dele. Atualizar esta lista conforme tasks forem fechadas ou
 changes forem arquivados.
 
-## Achado adicional (2026-09-18): analisador não dispara alerta contra o jammer real desta bancada — piso de ruído alto + bug de snapshot único (parcialmente corrigido)
+## Resolvido (2026-09-23): pipeline completo jamming→alerta→rekey→blacklist funciona de ponta a ponta pela primeira vez
+
+Depois de três causas encontradas e corrigidas em sequência (histórico
+completo abaixo), o analisador agora detecta jamming real de forma
+confiável, disparando `dynamic-seed-blacklist` de ponta a ponta. A causa
+final — nenhuma média sobre os 16 canais da tabela de hopping conseguia
+separar ruído ambiente de jamming real, não importa o limiar escolhido
+(achado de 2026-09-23, detalhado abaixo) — foi resolvida trocando a
+métrica inteira: em vez de comparar a MÉDIA dos 16 canais contra o resto
+do espectro, cada canal agora é avaliado contra a PRÓPRIA baseline
+aprendida (equivalente a um detector CFAR, técnica padrão em radar para
+o mesmo problema de limiar fixo contra piso de ruído variável), com
+persistência por janela deslizante de votos. Detalhe completo, incluindo
+dois achados de processo (uma aproximação EWMA não-validada que
+silenciou o detector, e uma janela pequena demais para o piso de ruído
+desta bancada) em
+`openspec/changes/spectrum-attack-classification/design.md` ("Achado de
+calibração 2026-09-23, parte 3").
+
+**Resultado medido em bancada** (`tools/validation/run_scenario.py
+--jammer-mode targeted --jammer-power high`, 150s): `alert_on` disparou
+2x com evidência real por canal; `dynamic-seed-blacklist` reagiu de
+ponta a ponta — rekey de seed enfileirado, blacklist aplicada
+(`mask=0xFFFB`, canal 34 excluído), 18 `rekey_ack` confirmados, máscara
+nunca zerou. PLR subiu de 0,2% (baseline) para 35% (jamming), confirmando
+jamming real por trás da detecção. Pendente:
+`openspec/changes/dynamic-seed-blacklist/tasks.md` 4.4 — o enlace entrou
+em fallback ~5s após a mitigação e não se recuperou dentro da janela de
+150s de jamming contínuo (não fica claro se é o jamming forte demais
+impedindo repareamento, ou algo específico do repareamento sob ataque
+ativo — precisa de mais investigação).
+
+Achado sem relação com este trabalho, registrado para não se perder:
+mestre e escravo rebotando quase simultaneamente (ex. reflash de uma
+placa logo após a outra resetar por abertura de porta serial) pode
+deixar o pareamento travado indefinidamente — resetar só um dos dois
+lados resolveu imediatamente. Não investigado a fundo.
+
+### Histórico do diagnóstico (2026-09-18 a 2026-09-23)
+
+Resumo de como se chegou até aqui — três causas encontradas em sequência,
+as duas primeiras corrigidas em 2026-09-18, a terceira exigiu redesenhar
+a métrica inteira em 2026-09-23 (seção acima).
 
 Construindo `tools/validation/run_scenario.py` (cenário automatizado
 baseline→jamming→recovery com plot, ver commit correspondente) e rodando
@@ -58,15 +100,13 @@ calibração 2026-09-23"). **Nenhuma mudança foi aplicada aos limiares** —
 os valores herdados permanecem, porque nenhum valor testado é defensável
 como melhoria real.
 
-**Consequência para `dynamic-seed-blacklist`**: como `maybe_enqueue_control()`
-(`mestre/src/node.h`) só enfileira rekey de seed/blacklist quando
-`g_alert_active`/`g_reseed_needed` estão ligados pelo analisador, a
-mitigação inteira fica bloqueada — não mais até uma recalibração simples
-executar, mas até uma das duas opções acima (aceitar a limitação, ou
-redesenhar a métrica de detecção) ser decidida e, se for o caso,
-implementada. `tools/validation/plot_scenario.py` já está pronto pra
-mostrar `rekey_tx`/`rekey_apply`/`blacklist` assim que o alerta passar a
-disparar, de qualquer forma que isso venha a acontecer.
+**Consequência para `dynamic-seed-blacklist` (histórica -- resolvida, ver
+seção no topo)**: como `maybe_enqueue_control()` (`mestre/src/node.h`) só
+enfileira rekey de seed/blacklist quando `g_alert_active`/
+`g_reseed_needed` estão ligados pelo analisador, a mitigação inteira
+ficou bloqueada até a Opção B (redesenhar a métrica de detecção) ser
+implementada em 2026-09-23 -- ver seção "Resolvido" no topo deste
+documento para o resultado.
 
 ## Estado em 2026-09-18: hardware validado, pareamento funciona, hopping ativo resolvido (trocado por evento) — falta soak longo e sob jammer
 

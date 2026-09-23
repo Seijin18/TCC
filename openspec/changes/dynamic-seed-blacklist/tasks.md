@@ -45,17 +45,40 @@
 
 ## 4. Validação manual (self-healing)
 
-- [ ] 4.1 Com `plr-metric` e `spectrum-attack-classification` já
+- [x] 4.1 Com `plr-metric` e `spectrum-attack-classification` já
       integrados, rodar mestre+escravo sob `targeted-jammer` até o
-      `plr_window` subir e o alerta disparar.
-- [ ] 4.2 Confirmar via log serial do mestre que `MUDAR_SEED` foi
+      `plr_window` subir e o alerta disparar. **Confirmado em 2026-09-23**
+      via `tools/validation/run_scenario.py --jammer-mode targeted
+      --jammer-power high` (150s), após o fix do detector por-canal em
+      `spectrum-attack-classification` (design.md "Achado de calibração
+      2026-09-23, parte 3") — `plr_window` subiu de 0,2% pra 35%,
+      `alert_on` disparou 2x com evidência real (`mask=0x0001`/canal 10,
+      depois canal 22).
+- [x] 4.2 Confirmar via log serial do mestre que `MUDAR_SEED` foi
       enfileirado, enviado e confirmado logo após o início do alerta.
-- [ ] 4.3 Confirmar que, ao longo do ataque contínuo, canais com falha
+      **Confirmado na mesma execução**: `rekey_tx` com `kind=seed`
+      enfileirado logo após o primeiro `alert_on`.
+- [x] 4.3 Confirmar que, ao longo do ataque contínuo, canais com falha
       severa entram na blacklist (`BLACKLIST_UPDATE` confirmado) e que a
-      máscara nunca chega a zero canais habilitados.
+      máscara nunca chega a zero canais habilitados. **Confirmado**: 13
+      `rekey_tx` de blacklist, 18 `rekey_ack` confirmados, máscara final
+      aplicada `mask=0xFFFB` (14 dos 16 canais habilitados — nunca zerou).
 - [ ] 4.4 Registrar `plr_window` antes e depois da mitigação e confirmar
       queda visível (critério de "self-healing" para a monografia) —
       esses números alimentam o cenário C de `scenario-automation`.
+      **Tentado em 2026-09-23, ainda não passa**: a mitigação disparou
+      corretamente (4.1-4.3), mas ~5s depois o enlace caiu de vez
+      (`loss_of_sync`, 2x) e ficou preso tentando repareear pelo resto da
+      janela de jamming (150s) sem se recuperar enquanto o ataque
+      continuava ativo — sem PLR pós-mitigação pra registrar. Não fica
+      claro se é por causa do jamming ser forte demais pra permitir
+      repareamento nos 8 canais candidato durante o ataque, ou algo mais
+      especifico do repareamento nessas condições -- precisa de mais
+      investigação (testar com jamming mais fraco, ou uma janela de
+      recuperação mais longa) antes de fechar este item.
 - [ ] 4.5 Calibrar `g_channel_fail` threshold e `ATTACK_STREAK_N` (de
       `spectrum-attack-classification`) em conjunto, já que os dois
-      interagem no tempo de reação total.
+      interagem no tempo de reação total. `ATTACK_STREAK_N` mudou de 3
+      pra 2 como parte do redesenho do detector (2026-09-23), mas não
+      houve calibração conjunta deliberada com `CHANNEL_FAIL_THRESHOLD`
+      ainda.

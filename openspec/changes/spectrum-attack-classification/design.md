@@ -231,3 +231,85 @@ Nenhuma mudança de código foi aplicada a `LIMIAR_ALVO`/
 partir deste achado — os valores atuais (herdados, nunca calibrados)
 permanecem, porque nenhum valor testado é defensável como melhoria real
 sobre o comportamento atual.
+
+## Achado de calibração (2026-09-23, parte 3): Opção B implementada -- baseline adaptativo por canal funciona
+
+Escolhida a Opção B da seção acima (redesenhar a métrica em vez de
+aceitar a limitação): `LIMIAR_ALVO`/`LIMIAR_CONCENTRACAO`/
+`channelHeat[]`/`classifyAttack()` (médias sobre os 16 canais)
+substituídos por um **baseline adaptativo por canal**, equivalente a um
+detector CFAR (comum em radar, para o mesmo problema de limiar fixo
+contra piso de ruído variável) aplicado no tempo em vez de entre canais
+vizinhos:
+
+- Cada canal aprende sua própria "normal" (EWMA lenta da leitura,
+  `g_baseline[ch]`) e sua própria variabilidade típica (desvio absoluto
+  médio, `g_mad[ch]`) -- um canal com Wi-Fi/BT presente o tempo todo
+  simplesmente tem baseline mais alta, sem contar como suspeito por
+  comparação com OUTROS canais (a causa raiz do problema anterior).
+- Um canal vira candidato a comprometido quando o valor atual desvia da
+  PRÓPRIA baseline por `ADAPTIVE_K` desvios E por uma margem absoluta
+  mínima (`ADAPTIVE_MIN_ABS_DEV`).
+- Persistência por **janela deslizante de votos** (buffer circular de
+  `ADAPTIVE_WINDOW` sweeps, `ADAPTIVE_VOTES` candidatos dentro dela para
+  declarar comprometido) -- não por sweeps consecutivos, porque o sinal
+  real do jammer por canal também é intermitente.
+- A baseline só se adapta enquanto o canal NÃO está marcado como
+  comprometido, para um ataque sustentado não ser "aprendido" como novo
+  normal.
+- `classifyAttack()` agora conta quantos dos 16 canais de
+  `HOPPING_CHANNELS` estão simultaneamente comprometidos
+  (`ATTACK_MIN_CHANNELS`) em vez de comparar médias -- e emite o mapa
+  completo por canal via telemetria (`chmap`, mask + count) a cada
+  ciclo, revivendo a ideia de cruzar informação por canal que tinha sido
+  descartada em `telemetry-logging` (ver tasks.md 2.4 daquele change) --
+  agora com um sinal que de fato funciona por trás dela.
+
+**Dois achados de processo durante a implementação, ambos documentados em
+comentário no código-fonte (`analisador/src/node.h`) para não se
+repetirem**:
+
+1. A primeira porta para C trocou o buffer circular de votos por uma
+   aproximação EWMA "pra economizar memória" sem revalidar a
+   aproximação -- rodado em bancada real, o detector nunca disparou a
+   sessão inteira. Só foi identificado atualizando
+   `tools/validation/adaptive_baseline_sim.py` pra simular a MESMA
+   aproximação e reproduzir o mesmo resultado nulo offline. Reversão
+   para o buffer literal (custo real: ~1,9KB de RAM num ESP32 de
+   320KB — irrelevante).
+2. Os parâmetros de janela/votos calibrados contra as primeiras 5
+   sessões (`ADAPTIVE_WINDOW=15`, `ADAPTIVE_VOTES=4`) ficaram
+   silenciosos em 2 sessões novas rodadas na sequência, mesmo com
+   jamming real confirmado -- causa: o número de vezes que o analisador
+   realmente amostra um canal-alvo específico enquanto o jammer está lá
+   depende da fase relativa entre dois ciclos periódicos não
+   sincronizados, que varia por sessão (às vezes essa expectativa cai
+   abaixo de 1 por janela). Recalibrado com janela bem maior
+   (`ADAPTIVE_WINDOW=60`, `ADAPTIVE_VOTES=5`) contra as 7 sessões
+   disponíveis (as 5 originais + as 2 que silenciaram) -- zero falsos
+   positivos e detecção real nas 7, ao custo de mais latência até o
+   primeiro disparo possível (até ~60 sweeps de histórico).
+
+**Resultado medido em bancada, ponta a ponta, pela primeira vez neste
+projeto** (`tools/validation/run_scenario.py --jammer-mode targeted
+--jammer-power high`, 150s de jamming): `alert_on` disparou 2 vezes com
+evidência real por canal (`mask=0x0001` → canal 10, depois `mask=0x0002`
+→ canal 22); `dynamic-seed-blacklist` reagiu -- `rekey_tx` (seed +
+13 tentativas de blacklist), 18 `rekey_ack` confirmados, máscara final
+`mask=0xFFFB` aplicada (canal 34 excluído, nunca zerou os 16). PLR subiu
+de 0,2% (baseline) para 35% (jamming). O enlace entrou em
+`loss_of_sync`/fallback ~5s depois da mitigação e não se recuperou
+dentro da janela de 150s de jamming contínuo -- ver
+`openspec/changes/dynamic-seed-blacklist/tasks.md` 4.4 para essa parte,
+ainda em aberto (não fica claro se é jamming forte demais pra permitir
+repareamento durante o ataque, ou algo específico do repareamento
+nessas condições).
+
+Também identificado, sem relação com este change: mestre e escravo
+rebotando quase no mesmo instante (ex.: after reflash de `placa_a` logo
+após o logger reconectar em `placa_b`, causando um reset por abertura de
+porta serial) pode deixar o pareamento travado indefinidamente --
+escravo confirma `pair_ok` mas mestre nunca sai do `pair_scan`. Resetar
+só um dos dois lados resolveu imediatamente. Não investigado a fundo
+(não é do escopo de `spectrum-attack-classification`); registrado aqui
+para não se perder.

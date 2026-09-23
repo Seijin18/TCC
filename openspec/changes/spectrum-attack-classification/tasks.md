@@ -2,12 +2,19 @@
 
 - [x] 1.1 Incluir `shared/hopping.h` em `analisador/src/main.cpp` para
       acessar `HOPPING_CHANNELS`/`TABLE_SIZE`.
-- [x] 1.2 Após `scanSpectrum()`, calcular `alvo_avg` (média em
-      `HOPPING_CHANNELS`) e `fora_avg` (média nos demais canais varridos
-      no modo ativo, respeitando `FAST_BT_SCAN`).
-- [x] 1.3 Definir constantes `LIMIAR_ALVO`, `LIMIAR_CONCENTRACAO`,
-      `ATTACK_STREAK_N` no topo do arquivo (valores iniciais a calibrar na
-      seção 3).
+- [x] 1.2 ~~Após `scanSpectrum()`, calcular `alvo_avg` (média em
+      `HOPPING_CHANNELS`) e `fora_avg` (média nos demais canais
+      varridos)~~ -- **substituído em 2026-09-23** por um baseline
+      adaptativo POR CANAL (`updateAdaptiveBaseline()`), depois que a
+      abordagem por média foi confirmada como estruturalmente incapaz de
+      separar ruído de jamming real (ver design.md "Achado de calibração
+      2026-09-23"). `classifyAttack()` agora conta canais
+      individualmente comprometidos, não médias. Ver design.md "parte 3".
+- [x] 1.3 ~~Definir constantes `LIMIAR_ALVO`, `LIMIAR_CONCENTRACAO`~~ --
+      substituídas pelas constantes do baseline adaptativo
+      (`ADAPTIVE_K`, `ADAPTIVE_MIN_ABS_DEV`, `ADAPTIVE_WINDOW`,
+      `ADAPTIVE_VOTES`, `ATTACK_MIN_CHANNELS`), calibradas na seção 3.
+      `ATTACK_STREAK_N` mantida (valor ajustado de 3 para 2).
 - [x] 1.4 Implementar contador `g_attack_streak` e estado
       `g_attack_active`, atualizados a cada ciclo conforme o spec.
 
@@ -37,9 +44,21 @@
       piso de ruído desta bancada mais alto que o assumido pelos valores
       default de `LIMIAR_ALVO`/`LIMIAR_CONCENTRACAO`. Ver
       `openspec/ROADMAP.md` para os números medidos.
-- [ ] 3.2 Rodar com o `targeted-jammer` ativo e confirmar que o alerta é
+- [x] 3.2 Rodar com o `targeted-jammer` ativo e confirmar que o alerta é
       declarado dentro de poucos ciclos e mantido enquanto o ataque
-      persistir. **Rodado em 2026-09-18, ainda não passa**: mesmo com
+      persistir. **Resolvido em 2026-09-23** com o baseline adaptativo
+      por canal (design.md "Achado de calibração 2026-09-23, parte 3"):
+      `alert_on` disparou 2x em bancada real (150s de `jam mode targeted`
+      + `power high`), com evidência por canal (`mask=0x0001`/canal 10,
+      depois `mask=0x0002`/canal 22), disparando `dynamic-seed-blacklist`
+      de ponta a ponta (rekey de seed, blacklist aplicada,
+      `mask=0xFFFB`). "Dentro de poucos ciclos" agora significa até
+      `ADAPTIVE_WINDOW=60` sweeps de latência (trade-off deliberado —
+      ver design.md — necessário pra não ficar em silêncio como as
+      versões anteriores). Histórico do que NÃO funcionou antes de
+      chegar aqui, mantido abaixo por registro:
+
+      **Rodado em 2026-09-18, não passava**: mesmo com
       `jam mode targeted` + `power high` por 75s (PLR do enlace medido
       subindo de ~0% para ~12%, confirmando jamming real), `alert_on`
       nunca disparou. Corrigido um bug real no caminho (`classifyAttack()`
@@ -80,9 +99,20 @@
       dois caminhos possíveis daqui (aceitar a limitação vs. redesenhar a
       métrica de detecção).
 - [ ] 3.3 Rodar com o jammer em modo `sweep` (banda inteira) e verificar o
-      comportamento: se `fora_avg` sobe junto com `alvo_avg`, o alerta não
-      deve disparar (ou deve disparar com uma classificação diferenciada,
-      se a banca considerar sweep também como "ataque" — decidir e
-      documentar o comportamento esperado antes de fechar este item).
-- [ ] 3.4 Confirmar no log serial do mestre que início e fim de alerta são
+      comportamento: com o detector antigo (`alvo_avg`/`fora_avg`), o
+      esperado era "alerta não deve disparar" já que ambos sobem juntos.
+      Com o baseline adaptativo por canal (2026-09-23), o raciocínio muda:
+      cada canal-alvo é avaliado contra a PRÓPRIA baseline, então sweep
+      cobrindo 2-80 MHz (8 dos 16 canais de `HOPPING_CHANNELS`) deveria,
+      em princípio, também conseguir marcar esses 8 canais como
+      comprometidos individualmente -- ainda não testado em bancada com
+      o novo detector. Decidir e documentar o comportamento esperado
+      (sweep também deveria contar como "ataque"? provavelmente sim,
+      dado que também degrada o enlace) antes de fechar este item.
+- [x] 3.4 Confirmar no log serial do mestre que início e fim de alerta são
       registrados corretamente durante um ciclo liga/desliga do jammer.
+      **Confirmado em 2026-09-23**: `alert_on`/`alert_off` observados em
+      transições corretas ao longo de múltiplas execuções (ex.: `alert_on`
+      em t=38,6s, `alert_off` em t=124,5s quando o canal parou de ser
+      sinalizado, novo `alert_on` em t=130s quando outro canal cruzou o
+      limiar).
