@@ -25,6 +25,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <RF24.h>
+#include <math.h>
 #include "../../shared/hopping.h"
 #include "../../shared/telemetry.h"
 
@@ -61,62 +62,124 @@
 #define BT_CH_MIN 2
 #define BT_CH_MAX 80
 
-#if FAST_BT_SCAN
-#define SCAN_MIN BT_CH_MIN
-#define SCAN_MAX BT_CH_MAX
-#else
-#define SCAN_MIN 0
-#define SCAN_MAX (NUM_CHANNELS - 1)
-#endif
-
-// Limiares da heuristica de classificacao (spectrum-attack-classification).
-// Valores iniciais a calibrar em bancada (tasks 3.1-3.3 do change).
-static const int LIMIAR_ALVO = 70;          // alvo_avg minimo (%) p/ candidato
-static const int LIMIAR_CONCENTRACAO = 30;  // alvo_avg - fora_avg minimo (p.p.)
-static const uint8_t ATTACK_STREAK_N = 3;   // ciclos candidatos consecutivos
+static const uint8_t ATTACK_STREAK_N = 2;   // ciclos candidatos consecutivos (debounce final, leve -- ver baseline adaptativo abaixo)
+static const uint8_t ATTACK_MIN_CHANNELS = 1; // canais de HOPPING_CHANNELS comprometidos simultaneamente p/ candidato
 
 static const int NUM_CHANNELS = 126;
 static const int SCAN_SAMPLES = 10;
 static const int PLL_DWELL_US = 130;
 
-// Achado de bancada (2026-09-18, validacao end-to-end com jammer real):
-// um jammer sequencial de radio unico so ocupa UM canal por vez, e cada
-// ciclo dele (~1ms/canal em sweep ou targeted, dominado pelo vTaskDelay(1)
-// da task) e muito mais rapido que um sweep completo do analisador
-// (~126 canais * ~1.4ms = ~176ms). Isso faz o jammer "passar" por cada
-// canal-alvo so ocasionalmente durante a janela de 1.4ms em que o
-// analisador amostra ESSE canal especifico -- medido em bancada: so ~1
-// dos 16 canais de HOPPING_CHANNELS aparecia com atividade em cada
-// scanSpectrum() individual, os outros 15 zerados. Com alvo_avg somando
-// os 16 de UM UNICO sweep (classifyAttack() original), isso nunca
-// ultrapassava ~6% de media -- LIMIAR_ALVO=70% nunca disparava, mesmo com
-// o jammer realmente ativo e mirando exatamente esses canais (targeted).
+// Achado de bancada (2026-09-18): LIMIAR_ALVO/LIMIAR_CONCENTRACAO (media
+// de channelData[]/channelHeat[] sobre os 16 canais de HOPPING_CHANNELS
+// vs. o resto do espectro) nunca disparava contra um jammer real --
+// diagnosticado em duas causas. (1) um jammer sequencial de radio unico
+// so ocupa 1-4 dos 16 canais-alvo por vez, mesmo em modo targeted
+// (confirmado canal-a-canal, nao so na media); (2) o piso de ruido desta
+// bancada recai sobre metade dos 16 canais de HOPPING_CHANNELS mesmo com
+// o jammer desligado. Combinado, ruido ambiente e jamming real produzem
+// a MESMA ordem de grandeza quando resumidos numa media/contagem sobre
+// os 16 -- nenhum LIMIAR_CONCENTRACAO separa as duas classes (varredura
+// de grade completa, 2026-09-23, documentada em
+// openspec/changes/spectrum-attack-classification/design.md "Achado de
+// calibração 2026-09-23").
 //
-// Fix: channelHeat[] acumula um "calor" por canal que sobe pra 100 a
-// cada hit real e decai devagar entre sweeps (HEAT_DECAY_PER_CYCLE por
-// ciclo) em vez de resetar a cada scanSpectrum(). Assim, hits raros e
-// espalhados ao longo de varios sweeps em canais DIFERENTES ainda somam
-// uma media alta quando avaliados juntos, porque o calor de um hit
-// antigo ainda nao decaiu totalmente quando um canal diferente e
-// atingido. classifyAttack() agora usa channelHeat[], nao channelData[]
-// bruto -- channelData[] continua intacto (leitura instantanea) porque
-// e o que sendCSV() manda pro heatmap do tools/spectrum/.
-static const int HEAT_HIT_THRESHOLD = 20;      // channelData[] acima disso conta como hit
-static const int HEAT_ON_HIT = 100;            // calor atribuido a um hit
-// Decaimento lento de propósito: medido em bancada que um jammer
-// sequencial de rádio único (targeted, 16 canais) só re-visita um canal
-// específico a cada ~15-20s nesta cadência -- com decaimento rápido
-// (ensaiado em 5/ciclo, ~17s pra zerar) o calor de um canal já sumia
-// antes do jammer sequer terminar de passar pelos outros 15, e a media
-// dos 16 nunca chegava perto de LIMIAR_ALVO. 1/ciclo (~150s pra zerar,
-// SCAN_SAMPLES*NUM_CHANNELS ciclos de ~... ver medição real em bancada)
-// dá margem suficiente pra cobrir uma rodada completa dos 16 canais.
-static const int HEAT_DECAY_PER_CYCLE = 1;
+// Fix (2026-09-23): baseline adaptativo POR CANAL em vez de comparar
+// contra a média dos outros 15. Cada canal aprende seu próprio "normal"
+// (EWMA lenta, `g_baseline`) e sua própria variabilidade típica (desvio
+// absoluto médio, `g_mad`) — um canal com WiFi/BT presente o tempo todo
+// simplesmente tem baseline mais alta, sem contar como suspeito. Só
+// conta como candidato a comprometido quando o valor ATUAL desvia da
+// PRÓPRIA baseline por vários `g_mad` (ADAPTIVE_K) E por uma margem
+// absoluta mínima (ADAPTIVE_MIN_ABS_DEV, evita falso alarme em canal
+// naturalmente muito estável onde g_mad é minúsculo). Equivalente a um
+// detector CFAR (comum em radar, para o mesmo problema de limiar fixo
+// contra piso de ruído variável), aplicado no tempo em vez de entre
+// canais vizinhos.
+//
+// Persistência por JANELA DESLIZANTE (votos M-de-W), não por sweeps
+// consecutivos: medido que o sinal real do jammer por canal TAMBÉM é
+// intermitente (ele visita os outros 15 canais entre uma passagem e
+// outra por este) -- exigir sweeps consecutivos descartava o sinal real
+// junto com rajadas isoladas de ruído (ex.: um dispositivo ligando por
+// ~3s). Um buffer circular de `ADAPTIVE_WINDOW` booleans por canal
+// (`g_vote_history`) + contagem corrente (`g_vote_count`, mantida em
+// O(1) por ciclo) implementam literalmente "M candidatos dentre os
+// últimos W sweeps" -- separa rajada isolada (poucos votos, some antes
+// de acumular) de ataque real (votos recorrentes ao longo de toda a
+// janela de ataque). Custo de memória (126 canais * ADAPTIVE_WINDOW
+// bytes) é irrelevante nos 320KB de RAM do ESP32 -- ver nota abaixo
+// sobre por que isso importa.
+//
+// A baseline só se adapta enquanto o canal NÃO está marcado como
+// comprometido -- senão um ataque sustentado seria lentamente "aprendido"
+// como o novo normal.
+//
+// Achado de processo (2026-09-23, parte 1): a primeira versão testada
+// aqui trocou este buffer circular por uma aproximação EWMA "pra
+// economizar memória", sem revalidar a aproximação -- rodado em bancada
+// real, a máscara nunca saiu de zero a sessão inteira. Só foi pego
+// porque tools/validation/adaptive_baseline_sim.py foi atualizado pra
+// simular a MESMA aproximação EWMA e reproduziu exatamente o mesmo
+// resultado (zero detecções) offline, confirmando que a EWMA não era
+// equivalente à janela literal já validada. Lição: nunca trocar um
+// mecanismo já validado por uma aproximação não testada quando o
+// recurso que ela economiza (aqui, ~1,9KB de RAM) não é escasso.
+//
+// Achado de processo (2026-09-23, parte 2): com o buffer literal
+// corrigido, ADAPTIVE_WINDOW=15/ADAPTIVE_VOTES=4 (validado contra as
+// primeiras 5 sessões) ainda ficou SILENCIOSO (mask sempre 0x0000) em
+// duas sessões novas rodadas na sequência, mesmo com jamming real
+// confirmado (PLR subindo). Causa: o jammer só visita cada canal-alvo
+// raramente (ver "Achado de calibração 2026-09-23" em
+// spectrum-attack-classification/design.md) -- em quantas dessas
+// visitas o analisador realmente amostra aquele canal específico
+// depende da fase relativa entre dois ciclos periódicos não
+// sincronizados (varredura do analisador vs. rodízio do jammer), que
+// varia por sessão. Com janela de 15 sweeps, o número esperado de
+// coincidências pode cair abaixo de 1 dependendo dessa fase -- exigir 4
+// delas simplesmente nunca acontecia em sessões com fase desfavorável.
+// Recalibrado contra as 7 sessões (as 5 originais + as 2 que
+// silenciaram): janela bem maior (60 sweeps) com exigência de voto
+// proporcionalmente modesta (5) dá tempo suficiente pra coincidências
+// raras se acumularem independente da fase -- zero falsos positivos e
+// detecção real em TODAS as 7 sessões (antes: só 4 de 5, e olhe lá).
+// Custo: mais latência até o primeiro disparo possível (até ~60 sweeps
+// de histórico, dezenas de segundos a poucos minutos dependendo do
+// ciclo real de scanSpectrum()) -- aceitável, já que o alternativa
+// (janela curta) simplesmente não funcionava de forma confiável.
+//
+// Parâmetros validados offline contra CSV bruto real de 7 sessões de
+// bancada (tools/validation/adaptive_baseline_sim.py, buffer circular
+// literal) -- zero falsos positivos em baseline nas 7, detecção real
+// confirmada nas 7 (55-93% das leituras da fase de jamming com pelo
+// menos 1 canal sinalizado, a depender da sessão); valores no centro da
+// região robusta da varredura de grade (não um pico isolado).
+static const float ADAPTIVE_ALPHA = 0.1f;         // velocidade de adaptação da baseline/mad
+static const float ADAPTIVE_K = 3.0f;             // desvios (em unidades de mad) acima da baseline p/ candidato
+static const float ADAPTIVE_MIN_ABS_DEV = 10.0f;  // margem absoluta minima (pontos percentuais) p/ candidato
+static const float ADAPTIVE_MIN_DEV_FLOOR = 3.0f; // piso de g_mad -- evita explosão do score em canal parado
+static const uint8_t ADAPTIVE_WINDOW = 60;        // tamanho da janela deslizante (em sweeps)
+static const uint8_t ADAPTIVE_VOTES = 5;          // votos exigidos dentro da janela p/ declarar comprometido
 
 static SPIClass analisador_hspi(HSPI);
 static RF24 analisador_radio(PIN_CE, PIN_CSN);
 static int channelData[NUM_CHANNELS];
-static int channelHeat[NUM_CHANNELS];
+
+// Estado do baseline adaptativo por canal -- ver comentário acima
+// (ADAPTIVE_*). float é seguro aqui: nada disto é tocado por interrupção
+// nem compartilhado com outra task diretamente (só o boolean agregado de
+// classifyAttack() cruza pra fora via setAlertPin()/tlm_printf).
+static float g_baseline[NUM_CHANNELS];
+static float g_mad[NUM_CHANNELS];
+static bool g_primed[NUM_CHANNELS];
+static bool g_channel_compromised[NUM_CHANNELS];
+// Janela deslizante de votos (candidato sim/não) por canal, buffer
+// circular + contagem corrente mantida em O(1) por ciclo -- ver nota
+// "Achado de processo" acima sobre por que isto é um buffer literal e
+// não uma aproximação EWMA.
+static bool g_vote_history[NUM_CHANNELS][ADAPTIVE_WINDOW];
+static uint8_t g_vote_write_idx[NUM_CHANNELS];
+static uint8_t g_vote_count[NUM_CHANNELS];
 
 static uint8_t g_attack_streak = 0;
 static bool g_attack_active = false;
@@ -166,12 +229,48 @@ static int measureChannel(uint8_t ch)
     return (hits * 100) / SCAN_SAMPLES;
 }
 
-static inline void updateHeat(int ch)
+// Atualiza o baseline adaptativo de UM canal com a leitura atual --
+// ver o bloco de comentário em ADAPTIVE_* para a lógica completa.
+static inline void updateAdaptiveBaseline(int ch, int reading)
 {
-    if (channelData[ch] > HEAT_HIT_THRESHOLD)
-        channelHeat[ch] = HEAT_ON_HIT;
-    else if (channelHeat[ch] > 0)
-        channelHeat[ch] = (channelHeat[ch] > HEAT_DECAY_PER_CYCLE) ? channelHeat[ch] - HEAT_DECAY_PER_CYCLE : 0;
+    float v = (float)reading;
+
+    if (!g_primed[ch])
+    {
+        g_baseline[ch] = v;
+        g_mad[ch] = ADAPTIVE_MIN_DEV_FLOOR;
+        g_primed[ch] = true;
+        return;
+    }
+
+    float dev = v - g_baseline[ch];
+    float score = dev / g_mad[ch];
+    bool candidate = (score > ADAPTIVE_K) && (dev > ADAPTIVE_MIN_ABS_DEV);
+
+    // Janela deslizante literal (buffer circular + contagem em O(1)):
+    // substitui o voto mais antigo pelo atual e ajusta g_vote_count sem
+    // precisar re-somar o buffer inteiro a cada ciclo.
+    uint8_t idx = g_vote_write_idx[ch];
+    bool evicted = g_vote_history[ch][idx];
+    g_vote_history[ch][idx] = candidate;
+    g_vote_write_idx[ch] = (uint8_t)((idx + 1) % ADAPTIVE_WINDOW);
+    if (evicted && !candidate)
+        g_vote_count[ch]--;
+    else if (!evicted && candidate)
+        g_vote_count[ch]++;
+    g_channel_compromised[ch] = g_vote_count[ch] >= ADAPTIVE_VOTES;
+
+    // Só deixa a baseline se adaptar quando o canal NÃO está marcado
+    // como comprometido -- senão um ataque sustentado seria lentamente
+    // "aprendido" como o novo normal.
+    if (!g_channel_compromised[ch])
+    {
+        g_baseline[ch] += ADAPTIVE_ALPHA * (v - g_baseline[ch]);
+        float abs_dev = fabsf(v - g_baseline[ch]);
+        g_mad[ch] += ADAPTIVE_ALPHA * (abs_dev - g_mad[ch]);
+        if (g_mad[ch] < ADAPTIVE_MIN_DEV_FLOOR)
+            g_mad[ch] = ADAPTIVE_MIN_DEV_FLOOR;
+    }
 }
 
 static void scanSpectrum()
@@ -183,25 +282,15 @@ static void scanSpectrum()
     for (int ch = BT_CH_MIN; ch <= BT_CH_MAX; ch++)
     {
         channelData[ch] = measureChannel((uint8_t)ch);
-        updateHeat(ch);
+        updateAdaptiveBaseline(ch, channelData[ch]);
     }
 #else
     for (int ch = 0; ch < NUM_CHANNELS; ch++)
     {
         channelData[ch] = measureChannel((uint8_t)ch);
-        updateHeat(ch);
+        updateAdaptiveBaseline(ch, channelData[ch]);
     }
 #endif
-}
-
-static bool isHoppingChannel(uint8_t ch)
-{
-    for (uint8_t i = 0; i < TABLE_SIZE; i++)
-    {
-        if (HOPPING_CHANNELS[i] == ch)
-            return true;
-    }
-    return false;
 }
 
 // Compara a atividade media nos 16 canais de HOPPING_CHANNELS (alvo_avg)
@@ -210,31 +299,44 @@ static bool isHoppingChannel(uint8_t ch)
 // consecutivos antes de declarar "ataque ativo", e reflete o estado via
 // setAlertPin() (HIGH/flag enquanto ativo, LOW/flag assim que um ciclo
 // deixa de ser candidato).
-static void classifyAttack()
+// Conta quantos dos 16 canais de HOPPING_CHANNELS o baseline adaptativo
+// (updateAdaptiveBaseline(), chamado por scanSpectrum() a cada canal)
+// marcou como comprometido neste ciclo, e monta a máscara correspondente
+// (bit i = 1 -> HOPPING_CHANNELS[i] comprometido) -- mesma convenção de
+// bit usada em g_channel_mask (dynamic-seed-blacklist), só que aqui é
+// evidência de RF local do analisador, não de falha de ACK do mestre.
+static uint16_t computeCompromisedMask(uint8_t *out_count)
 {
-    long alvo_sum = 0;
-    int alvo_n = 0;
-    long fora_sum = 0;
-    int fora_n = 0;
-
-    for (int ch = SCAN_MIN; ch <= SCAN_MAX; ch++)
+    uint16_t mask = 0;
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
     {
-        if (isHoppingChannel((uint8_t)ch))
+        if (g_channel_compromised[HOPPING_CHANNELS[i]])
         {
-            alvo_sum += channelHeat[ch];
-            alvo_n++;
-        }
-        else
-        {
-            fora_sum += channelHeat[ch];
-            fora_n++;
+            mask |= (uint16_t)(1u << i);
+            count++;
         }
     }
+    *out_count = count;
+    return mask;
+}
 
-    int alvo_avg = (alvo_n > 0) ? (int)(alvo_sum / alvo_n) : 0;
-    int fora_avg = (fora_n > 0) ? (int)(fora_sum / fora_n) : 0;
+// Declara "ataque ativo" quando pelo menos ATTACK_MIN_CHANNELS canais de
+// HOPPING_CHANNELS estão simultaneamente marcados como comprometidos
+// pelo baseline adaptativo (updateAdaptiveBaseline(), por canal -- ver
+// bloco ADAPTIVE_* acima), por ATTACK_STREAK_N ciclos seguidos. Reflete
+// o estado agregado via setAlertPin() (HIGH/flag enquanto ativo, LOW/flag
+// assim que um ciclo deixa de ser candidato) e emite o mapa completo de
+// canais comprometidos via telemetria (`chmap`) a cada ciclo, para
+// observabilidade/depuração independente do alerta agregado.
+static void classifyAttack()
+{
+    uint8_t compromised_count = 0;
+    uint16_t mask = computeCompromisedMask(&compromised_count);
 
-    bool candidate = (alvo_avg >= LIMIAR_ALVO) && (alvo_avg - fora_avg >= LIMIAR_CONCENTRACAO);
+    tlm_printf("analisador", "chmap", "mask=0x%04X;count=%u", mask, compromised_count);
+
+    bool candidate = compromised_count >= ATTACK_MIN_CHANNELS;
 
     if (candidate)
     {
@@ -243,8 +345,8 @@ static void classifyAttack()
         {
             g_attack_active = true;
             setAlertPin(true);
-            guarded_printf("[ALERTA] Ataque direcionado detectado. alvo_avg=%d fora_avg=%d\n", alvo_avg, fora_avg);
-            tlm_printf("analisador", "alert_on", "alvo_avg=%d;fora_avg=%d", alvo_avg, fora_avg);
+            guarded_printf("[ALERTA] Ataque detectado. canais comprometidos=%u mask=0x%04X\n", compromised_count, mask);
+            tlm_printf("analisador", "alert_on", "count=%u;mask=0x%04X", compromised_count, mask);
         }
     }
     else
