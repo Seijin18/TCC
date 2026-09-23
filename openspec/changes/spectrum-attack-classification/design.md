@@ -137,3 +137,97 @@ calibração deste change (tasks 3.1-3.3), sem exigir mudança de design:
 Nenhuma dessas referências altera as decisões já tomadas neste `design.md`;
 servem como material de apoio para a calibração empírica (tasks 3.1-3.3) e,
 opcionalmente, como citação na monografia do TCC.
+
+## Achado de calibração (2026-09-23): média sobre os 16 canais não separa as classes
+
+Tentativa de fechar a task 3.2 recalibrando `LIMIAR_ALVO`/
+`LIMIAR_CONCENTRACAO` (ou os parâmetros do acumulador de calor,
+`HEAT_HIT_THRESHOLD`/`HEAT_DECAY_PER_CYCLE`) contra o piso de ruído real
+desta bancada, usando `tools/validation/calibrate_thresholds.py` (novo) —
+uma varredura de grade que simula `channelHeat[]` exatamente como
+`analisador/src/node.h` sobre o CSV bruto de 7 execuções reais em
+bancada (2026-09-18 e 2026-09-23, 5 delas em modo `targeted`).
+
+**Resultado**: nenhuma das 20 combinações de `(HEAT_HIT_THRESHOLD,
+HEAT_DECAY_PER_CYCLE)` testadas produz uma margem positiva entre "pior
+concentração vista em baseline" e "pior concentração vista sob jamming
+real" — a pior leitura de baseline sempre supera a pior leitura de
+jamming (melhor caso encontrado: baseline chegou a concentração 13,0
+contra apenas 0,7 do jamming real). Ou seja, **não existe nenhum valor
+de `LIMIAR_CONCENTRACAO` que classifique corretamente nas duas
+direções** com os dados coletados — isto deixou de ser um problema de
+"escolher o número certo".
+
+Uma segunda estatística foi testada como alternativa à média de 16
+canais — contar quantos dos 16 canais de `HOPPING_CHANNELS` estão
+simultaneamente "quentes" (`channelHeat[ch] >= 100`) num dado instante,
+em vez de tirar a média entre eles. Mesmo resultado: baseline chega a 3
+canais quentes simultâneos só por ruído ambiente, jamming real não
+ultrapassa 3-4 — margem de separação de no máximo 1 canal, não confiável
+como critério binário.
+
+### Causa raiz (duas, compostas)
+
+1. **O piso de ruído desta bancada recai justamente sobre metade da
+   tabela de hopping.** Já documentado em 2026-09-18
+   (`openspec/ROADMAP.md`): 8 dos 16 canais de `HOPPING_CHANNELS` ficam
+   na faixa onde este bench mostra 40-60% de atividade mesmo com o
+   jammer desligado (provável Wi-Fi/BT do ambiente). Isso eleva
+   `alvo_avg`/a contagem de canais "quentes" já na baseline, sem nenhum
+   jammer envolvido.
+2. **Um jammer de rádio único ilumina poucos canais-alvo por vez, mesmo
+   em modo targeted.** Comparando `channelData[ch]` canal-a-canal entre
+   baseline e jamming nas 7 sessões (não só a média), o padrão é
+   consistente: em qualquer janela de tempo, só 1-4 dos 16 canais de
+   `HOPPING_CHANNELS` mostram elevação clara sobre a própria baseline —
+   nunca "a maioria dos 16 ao mesmo tempo". Isso é o mesmo limite físico
+   já registrado na correção de 2026-09-18 (um rádio só pode estar em um
+   canal por vez) — aumentar o dwell por canal (`JAM_TARGETED_HOLD_MS`)
+   ajudou a detecção pontual de canal individual, mas não muda quantos
+   canais ficam elevados *ao mesmo tempo*, que é exatamente o que uma
+   média/contagem sobre os 16 precisa para se destacar do ruído de
+   fundo que já atinge metade deles.
+
+Combinado, o efeito é que "ruído ambiente concentrado em 8 canais" e
+"jammer real concentrado em 1-4 canais por vez" produzem sinais da
+**mesma ordem de grandeza** quando resumidos numa média/contagem sobre
+os 16 — não há como uma reescala linear (ajustar um limiar) separar
+distribuições que se sobrepõem desse jeito.
+
+### Dois caminhos daqui, nenhum aplicado ainda
+
+**Opção A — aceitar como limitação documentada.** O artigo do IC
+referenciado acima já documenta explicitamente que o RPD do NRF24L01 é
+um indicador binário de limiar, não uma leitura calibrada em dBm — esta
+descoberta é consistente com essa limitação de hardware, não um defeito
+de implementação. Reportar isso com os dados coletados (as 7 sessões,
+o resultado da varredura de grade) é conteúdo válido para a seção de
+limitações da monografia. `dynamic-seed-blacklist`/`blacklist-decay`
+continuariam sem o gatilho de `alert_on` funcional nesta bancada
+específica, mas o mecanismo de mitigação em si (troca de seed,
+blacklist por evidência própria de `g_channel_fail`) já foi validado
+independentemente do alerta.
+
+**Opção B — redesenhar a métrica de detecção.** A comparação "média/
+contagem sobre os 16 canais, num único instante" é o que não separa as
+classes; a informação que SEPARA (achado desta sessão) é que canais
+legítimos de ruído tendem a ser os *mesmos* canais ao longo do tempo
+(um AP de Wi-Fi não muda de canal), enquanto o jammer ilumina canais
+*diferentes* em sequência (ver também a observação do artigo do IC:
+"dispositivos legítimos produzem bandas estáveis... jammer produz
+pontos de saturação dispersos sem banda estável", citada acima). Uma
+métrica que aprendesse, por canal, um piso de ruído individual ao longo
+de uma janela de observação (em vez de um limiar global fixo) e
+disparasse com base em desvio *daquele canal específico* em relação à
+própria história — não em relação à média dos outros 15 — teria chance
+de separar as classes onde a média não separa. Isto seria um change
+novo (baseline adaptativo por canal), não apenas uma recalibração de
+constantes, e não foi implementado nem prototipado — fica registrado
+aqui como a direção mais promissora se a Opção A não for aceitável para
+a banca.
+
+Nenhuma mudança de código foi aplicada a `LIMIAR_ALVO`/
+`LIMIAR_CONCENTRACAO`/`HEAT_HIT_THRESHOLD`/`HEAT_DECAY_PER_CYCLE` a
+partir deste achado — os valores atuais (herdados, nunca calibrados)
+permanecem, porque nenhum valor testado é defensável como melhoria real
+sobre o comportamento atual.

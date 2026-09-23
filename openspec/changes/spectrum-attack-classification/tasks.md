@@ -47,10 +47,38 @@
       rádio único quase nunca preenchia nos 16 canais simultaneamente;
       trocado por acúmulo de calor entre sweeps, `channelHeat[]`), mas o
       piso de ruído de 3.1 ainda mantém `fora_avg` alto o bastante pra
-      `alvo_avg - fora_avg` nunca cruzar `LIMIAR_CONCENTRACAO=30`. Falta:
-      recalibrar `LIMIAR_ALVO`/`LIMIAR_CONCENTRACAO` (ou o próprio esquema
-      de calor -- `HEAT_HIT_THRESHOLD`/decaimento) contra o piso de ruído
-      real medido em 3.1, não os valores default herdados sem calibração.
+      `alvo_avg - fora_avg` nunca cruzar `LIMIAR_CONCENTRACAO=30`.
+
+      **Tentativa de recalibração em 2026-09-23** (`tools/validation/calibrate_thresholds.py`,
+      novo -- simula `channelHeat[]` sobre o CSV bruto de 7 execuções
+      reais, 5 delas em modo targeted): **não existe nenhum par
+      (`HEAT_HIT_THRESHOLD`, `HEAT_DECAY_PER_CYCLE`) testado em que a
+      pior concentração vista em baseline fique abaixo da pior
+      concentração vista sob jamming real** -- a margem é negativa em
+      todas as 20 combinações varridas (ex.: no melhor caso, baseline
+      chegou a concentração 13,0 enquanto jamming real só chegou a 0,7).
+      Ou seja, isto não é mais "escolher o número certo" -- nenhum número
+      separa as duas classes com os dados coletados até agora. Causa raiz
+      identificada: (a) o piso de ruído desta bancada já documentado em
+      3.1 recai justamente sobre metade dos 16 canais de
+      `HOPPING_CHANNELS` (achado de 2026-09-18, `ROADMAP.md`); (b) o
+      jammer de rádio único, mesmo em targeted, só ilumina 1-4 dos 16
+      canais-alvo por vez (confirmado comparando `channelData[ch]`
+      canal-a-canal, baseline vs. jamming, nas 7 sessões) -- longe do "a
+      maioria dos 16 elevados ao mesmo tempo" que uma média de 16 canais
+      precisaria para se destacar do ruído de fundo. Tentado também
+      "contar quantos dos 16 canais estão simultaneamente 'quentes'" como
+      estatística alternativa à média — mesmo resultado (baseline chega a
+      3 canais quentes por acaso, jamming real não ultrapassa 3-4).
+
+      **Não aplicada nenhuma mudança de `LIMIAR_ALVO`/`LIMIAR_CONCENTRACAO`
+      a partir desta tentativa** — um número escolhido arbitrariamente
+      dentro da faixa sobreposta erraria mais para um lado (falso
+      positivo) ou outro (falso negativo) sem nenhuma garantia real, o
+      que seria pior que documentar a limitação. Ver `design.md`
+      ("Achado de calibração 2026-09-23") para a análise completa e os
+      dois caminhos possíveis daqui (aceitar a limitação vs. redesenhar a
+      métrica de detecção).
 - [ ] 3.3 Rodar com o jammer em modo `sweep` (banda inteira) e verificar o
       comportamento: se `fora_avg` sobe junto com `alvo_avg`, o alerta não
       deve disparar (ou deve disparar com uma classificação diferenciada,

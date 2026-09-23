@@ -34,20 +34,39 @@ foram encontrados em `spectrum-attack-classification`:
    mostra vários canais com 40–60% de atividade **mesmo com o jammer
    desligado** — ruído ambiente (Wi-Fi/BT do ambiente) mantém `fora_avg`
    alto o bastante pra `alvo_avg - fora_avg` nunca cruzar
-   `LIMIAR_CONCENTRACAO=30`. Essa é exatamente a tarefa de calibração já
-   registrada e nunca executada
-   (`openspec/changes/spectrum-attack-classification/tasks.md` seção 3) —
-   agora com dados reais medidos pra calibrar contra, em vez dos valores
-   default herdados sem calibração.
+   `LIMIAR_CONCENTRACAO=30`.
+
+**Atualização (2026-09-23) — tentativa de recalibração: não é só uma
+questão de escolher o número certo.** Construído
+`tools/validation/calibrate_thresholds.py`, que varre uma grade de
+`(HEAT_HIT_THRESHOLD, HEAT_DECAY_PER_CYCLE)` simulando `channelHeat[]`
+sobre o CSV bruto real de 7 execuções (2026-09-18 + 2026-09-23, 5 em modo
+targeted). **Resultado: nenhuma combinação testada separa as duas
+classes** — em todos os 20 pares testados, a pior concentração vista em
+baseline supera a pior concentração vista sob jamming real (melhor caso:
+13,0 vs. 0,7). Uma segunda estatística (contar canais simultaneamente
+"quentes" em vez de tirar média) teve o mesmo resultado. Causa raiz:
+o piso de ruído recai sobre metade dos 16 canais da tabela (achado do
+item 3 acima) *e* o jammer de rádio único só ilumina 1-4 dos 16 canais
+por vez mesmo em targeted — ruído e ataque real ficam na mesma ordem de
+grandeza quando resumidos numa média/contagem sobre os 16. Análise
+completa, incluindo os dois caminhos possíveis daqui (aceitar como
+limitação documentada vs. redesenhar a métrica para um baseline
+adaptativo por canal — nenhum dos dois ainda decidido), em
+`openspec/changes/spectrum-attack-classification/design.md` ("Achado de
+calibração 2026-09-23"). **Nenhuma mudança foi aplicada aos limiares** —
+os valores herdados permanecem, porque nenhum valor testado é defensável
+como melhoria real.
 
 **Consequência para `dynamic-seed-blacklist`**: como `maybe_enqueue_control()`
 (`mestre/src/node.h`) só enfileira rekey de seed/blacklist quando
 `g_alert_active`/`g_reseed_needed` estão ligados pelo analisador, a
-mitigação inteira fica bloqueada até os limiares serem recalibrados
-contra o piso de ruído real. `tools/validation/plot_scenario.py` já está
-pronto pra mostrar `rekey_tx`/`rekey_apply`/`blacklist` assim que o
-alerta passar a disparar — não precisa de mais nenhum código, só a
-recalibração.
+mitigação inteira fica bloqueada — não mais até uma recalibração simples
+executar, mas até uma das duas opções acima (aceitar a limitação, ou
+redesenhar a métrica de detecção) ser decidida e, se for o caso,
+implementada. `tools/validation/plot_scenario.py` já está pronto pra
+mostrar `rekey_tx`/`rekey_apply`/`blacklist` assim que o alerta passar a
+disparar, de qualquer forma que isso venha a acontecer.
 
 ## Estado em 2026-09-18: hardware validado, pareamento funciona, hopping ativo resolvido (trocado por evento) — falta soak longo e sob jammer
 
