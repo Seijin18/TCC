@@ -6,8 +6,10 @@
 #include <RF24.h>
 #include <printf.h> // Necessário para o printDetails()
 #include <string.h>
+#include <ctype.h>
 #include "../../shared/hopping.h"
 #include "../../shared/protocol.h"
+#include "../../shared/pairing.h"
 #include "../../shared/telemetry.h"
 #include "../../shared/radio_diag.h"
 
@@ -80,8 +82,28 @@ static void mestre_set_alert_source(bool (*source)())
  */
 static uint16_t g_seed = 0;
 static bool g_seed_initialized = false;
-static bool g_seed_confirmed = false;
 static unsigned long g_seed_send_time = 0;
+
+// pairing-handshake-hardening: declarada aqui (em vez de junto do resto do
+// "Estado de pareamento" mais abaixo) porque handle_mestre_command()
+// ("seed <n>") já precisa dela antes desse ponto do arquivo.
+static bool g_link_established = false;
+
+// Forward decl -- wait_for_seed_window() (abaixo) repassa linhas
+// nao-numericas pro mesmo tratador de comandos usado depois do boot (ver
+// comentario no "else" abaixo); handle_mestre_command() só é definida mais
+// adiante no arquivo.
+static void handle_mestre_command(char *line);
+
+static bool is_all_digits(const char *s)
+{
+    if (!s || *s == '\0')
+        return false;
+    for (const char *p = s; *p; p++)
+        if (!isdigit((unsigned char)*p))
+            return false;
+    return true;
+}
 
 static void wait_for_seed_window()
 {
@@ -97,15 +119,36 @@ static void wait_for_seed_window()
             String input = Serial.readStringUntil('\n');
             input.trim();
 
-            int value = input.toInt();
-            if (value >= 0 && value <= 100)
+            if (input.length() == 0)
             {
-                g_seed = (uint16_t)value;
-                g_seed_initialized = true;
-                guarded_printf("[MESTRE] Seed configurada: %u\n", g_seed);
-                return;
+                // linha vazia -- nada a fazer.
             }
-            guarded_printf("[MESTRE] Valor inválido: %d. Digite um valor entre 0 e 100.\n", value);
+            else if (is_all_digits(input.c_str()))
+            {
+                int value = input.toInt();
+                if (value >= 0 && value <= 100)
+                {
+                    g_seed = (uint16_t)value;
+                    g_seed_initialized = true;
+                    guarded_printf("[MESTRE] Seed configurada: %u\n", g_seed);
+                    return;
+                }
+                guarded_printf("[MESTRE] Valor inválido: %d. Digite um valor entre 0 e 100.\n", value);
+            }
+            else
+            {
+                // pairing-handshake-hardening: uma linha nao-numerica aqui
+                // (ex. "regs") NAO pode virar seed 0 -- String::toInt() da
+                // libc do Arduino retorna 0 pra entrada invalida, e 0 é um
+                // valor de seed valido, entao o bug era silencioso (a seed
+                // virava 0 sem nenhum aviso). Repassa pro tratador de
+                // comandos normal (handle_mestre_command(), mesma logica de
+                // "regs"/"mode fixed"/etc. usada depois do boot) em vez de
+                // descartar ou interpretar como seed.
+                char buf[32];
+                input.toCharArray(buf, sizeof(buf));
+                handle_mestre_command(buf);
+            }
         }
         delay(10);
     }
@@ -134,9 +177,12 @@ static bool g_mitigation_enabled = true;
 // g_channel_blacklisted_since, força re-pareamento).
 static void reset_to_pairing();
 
-// Comando runtime "seed <n>" -- só tem efeito antes da seed ser confirmada
-// pelo escravo (adaptive-rendezvous, tarefa 4.3). Depois disso a sessão já
-// está em andamento; reiniciar a placa para trocar de seed manualmente.
+// Comando runtime "seed <n>" -- só tem efeito antes do enlace fechar
+// (pairing-handshake-hardening, D3: a seed vai dentro da propria sonda, e
+// uma vez aceita pelo ack ela já está em uso no hopping -- trocar depois
+// disso dessincronizaria o calculo de canal entre os dois lados). Vale
+// pra próxima tentativa de pareamento; reiniciar a placa para trocar de
+// seed no meio de uma sessão já ativa.
 static char g_cmd_buf[32];
 static uint8_t g_cmd_len = 0;
 
@@ -147,9 +193,9 @@ static void handle_mestre_command(char *line)
 
     if (strncmp(line, "seed ", 5) == 0)
     {
-        if (g_seed_confirmed)
+        if (g_link_established)
         {
-            guarded_println("[MESTRE] Seed já confirmada nesta sessão; reinicie para trocar.");
+            guarded_println("[MESTRE] Enlace já estabelecido nesta sessão; reinicie para trocar a seed.");
             return;
         }
         int value = atoi(line + 5);
@@ -229,11 +275,21 @@ static void process_mestre_serial()
 }
 
 // ---- Estado de pareamento (adaptive-rendezvous) ----
-static bool g_link_established = false;
+// g_link_established é declarada mais acima (perto de g_seed/wait_for_seed_window())
+// -- handle_mestre_command() (comando "seed <n>") precisa dela antes deste
+// ponto do arquivo.
 static uint8_t g_pair_channel = PAIRING_CANDIDATES[0];
 static bool g_camping = false;
 static unsigned long g_pair_camp_start = 0;
 static unsigned long g_last_link_try = 0;
+
+// pairing-handshake-hardening (D3, tarefa 3.4): nonce de sessão da
+// tentativa de pareamento corrente -- novo a cada acampamento
+// (esp_random(), gerado em pick_new_pair_channel()), carregado em toda
+// LinkProbeV2 desta janela. Só um LinkAckV2 que ecoe este nonce (junto com
+// a seed corrente e PAIRING_PROTO_VER) é aceito como fechamento do
+// handshake -- ver pair_accept_ack_mestre() em shared/pairing.h.
+static uint16_t g_pair_nonce = 0;
 
 // adaptive-rendezvous (2026-09-24): "blacklist de pareamento" -- mesma
 // lógica de update_channel_mask() (blacklist-decay), aplicada aos 8
@@ -248,6 +304,17 @@ static uint32_t g_candidate_quarantined_since[PAIRING_CANDIDATE_COUNT] = {0};
 static uint32_t g_pair_round = 0;
 static uint8_t g_camped_idx = 0; // índice (em PAIRING_CANDIDATES) do candidato atual, p/ penalizar/confirmar
 
+// pairing-handshake-hardening (D5, tarefa 4.3): evidência da tentativa de
+// pareamento CORRENTE no candidato acampado -- usadas por
+// reset_to_pairing() pra decidir se o candidato deve ser penalizado (ver
+// note_candidate_result()). Regra: só conta falha quando houve ack válido
+// (evidência de presença do escravo) E o enlace não chegou a confirmar
+// dado real antes de cair; um acampamento sem nenhuma resposta não
+// penaliza (ver design.md D5). Zeradas a cada novo acampamento
+// (pick_new_pair_channel()).
+static bool g_pair_link_ack_received = false; // ack válido aceito nesta tentativa
+static bool g_pair_data_confirmed = false;    // primeiro FragmentAck já confirmou dado real
+
 // pairing-handshake-hardening (tarefa 1.3): contadores da janela de
 // acampamento corrente -- zerados a cada novo acampamento
 // (pick_new_pair_channel()), emitidos como "e=pair_stats" quando a janela
@@ -259,6 +326,12 @@ static uint16_t g_pair_probes_fail = 0;
 static uint16_t g_pair_rx_total = 0;
 static uint16_t g_pair_rx_link_ack = 0;
 static uint16_t g_pair_rx_other = 0;
+// pairing-handshake-hardening (D3, tarefa 3.6): LinkAckV2 bem formado (tipo
+// e tamanho certos) mas com nonce/seed/ver que não batem com a tentativa
+// corrente -- FIFO antiga, ack de uma sessão anterior, ou escravo em outra
+// sessão (ver pair_accept_ack_mestre() em shared/pairing.h e o Scenario
+// "Resposta que não pertence à tentativa corrente" na spec).
+static uint16_t g_pair_stale_ack = 0;
 // pairing-handshake-hardening (tarefa 2.3): quantas vezes o flush_rx() do
 // início do acampamento (pick_new_pair_channel()) encontrou a FIFO
 // não-vazia -- mede H1 (design.md): FIFO velha atravessando a troca de
@@ -273,9 +346,9 @@ static bool g_pair_probe_fail_reported = false;
 static void tlm_pair_stats(uint8_t ch, unsigned long window_ms)
 {
     tlm_printf("mestre", "pair_stats",
-               "ch=%u;probes_ok=%u;probes_fail=%u;rx_total=%u;rx_link_ack=%u;rx_other=%u;flushed=%u;ms=%lu",
+               "ch=%u;probes_ok=%u;probes_fail=%u;rx_total=%u;rx_link_ack=%u;rx_other=%u;stale_ack=%u;flushed=%u;ms=%lu",
                ch, g_pair_probes_ok, g_pair_probes_fail, g_pair_rx_total, g_pair_rx_link_ack,
-               g_pair_rx_other, g_pair_flushed, window_ms);
+               g_pair_rx_other, g_pair_stale_ack, g_pair_flushed, window_ms);
 }
 
 // ---- Estado de hopping / mensagem ----
@@ -376,10 +449,13 @@ static uint8_t measure_and_pick_candidate()
 // adaptive-rendezvous (2026-09-24): registra o resultado (sucesso/falha) da
 // última tentativa de pareamento no candidato atual e reavalia
 // g_candidate_mask -- mesma função pura de blacklist-decay
-// (update_channel_mask()), agora sobre PAIRING_CANDIDATES. Chamado nos dois
-// pontos onde uma tentativa de fato termina: falha em conseguir link dentro
-// da janela de camping, ou falha/sucesso no handshake de seed (ver
-// mestre_loop()).
+// (update_channel_mask()), agora sobre PAIRING_CANDIDATES. Pairing-
+// handshake-hardening (D5, tarefa 4.3) mudou QUANDO isto é chamado (ver
+// reset_to_pairing() e o ramo `ack_ok` em mestre_loop()): sucesso é o
+// primeiro FragmentAck depois do pareamento, falha é um ack válido aceito
+// seguido de reset_to_pairing() sem nenhum FragmentAck em LOSS_HOPS hops --
+// um acampamento sem nenhuma resposta NÃO chama esta função (não é mais
+// evidência de canal ruim, só de escravo ausente).
 static void note_candidate_result(bool success)
 {
     uint8_t idx = g_camped_idx;
@@ -413,7 +489,21 @@ static void pick_new_pair_channel()
     g_pair_rx_total = 0;
     g_pair_rx_link_ack = 0;
     g_pair_rx_other = 0;
+    g_pair_stale_ack = 0;
     g_pair_probe_fail_reported = false;
+
+    // D5 (tarefa 4.3): nova tentativa de candidato -- nenhuma evidência
+    // ainda de presença do escravo nem de dado confirmado (ver
+    // reset_to_pairing()/note_candidate_result()).
+    g_pair_link_ack_received = false;
+    g_pair_data_confirmed = false;
+
+    // D3 (tarefa 3.4): nonce novo por acampamento -- identifica esta
+    // tentativa perante o escravo (ver shared/pairing.h). esp_random() (HW
+    // RNG do ESP32) em vez de random()/rand() -- não precisa ser
+    // criptograficamente seguro (não-goal do change, ver design.md), só
+    // não repetir por coincidência entre tentativas consecutivas.
+    g_pair_nonce = (uint16_t)esp_random();
 
     // pairing-handshake-hardening (tarefa 2.3): measure_and_pick_candidate()
     // liga o receptor (startListening()) em cada candidato avaliado -- um
@@ -426,9 +516,20 @@ static void pick_new_pair_channel()
     tlm_printf("mestre", "pair_scan", "ch=%u", g_pair_channel);
 }
 
+// pairing-handshake-hardening (D3, tarefa 3.4): handshake de 2 mensagens --
+// a sonda já carrega g_pair_nonce e g_seed; só um LinkAckV2 que ecoe os
+// dois (mais PAIRING_PROTO_VER) fecha o handshake (pair_accept_ack_mestre(),
+// shared/pairing.h). Não existe mais uma troca de seed separada:
+// send_seed_to_slave() foi removida (era código morto assim que a seed
+// passou a viajar na própria sonda/ack) e quem chama try_establish_link()
+// agenda o início do salto direto no sucesso.
 static bool try_establish_link()
 {
-    LinkPacket probe = {MSG_LINK_PROBE};
+    LinkProbeV2 probe;
+    probe.type = MSG_LINK_PROBE;
+    probe.ver = PAIRING_PROTO_VER;
+    probe.nonce = g_pair_nonce;
+    probe.seed = g_seed;
 
     mestre_radio.setChannel(g_pair_channel);
     mestre_radio.stopListening();
@@ -462,7 +563,7 @@ static bool try_establish_link()
 
         g_pair_rx_total++;
         uint8_t size = mestre_radio.getDynamicPayloadSize();
-        if (size != sizeof(LinkPacket))
+        if (size != sizeof(LinkAckV2))
         {
             uint8_t dump[32];
             mestre_radio.read(dump, size);
@@ -470,62 +571,26 @@ static bool try_establish_link()
             continue;
         }
 
-        LinkPacket ack;
+        LinkAckV2 ack;
         mestre_radio.read(&ack, sizeof(ack));
-        if (ack.type == MSG_LINK_ACK)
+        if (ack.type != MSG_LINK_ACK)
         {
-            g_pair_rx_link_ack++;
-            return true;
-        }
-        g_pair_rx_other++;
-    }
-
-    return false;
-}
-
-static bool send_seed_to_slave()
-{
-    SeedPacket seed_pkt;
-    seed_pkt.type = MSG_SEED_INIT;
-    seed_pkt.seed = g_seed;
-
-    mestre_radio.setChannel(g_pair_channel);
-    mestre_radio.stopListening();
-    bool sent = radio_send(mestre_radio, &seed_pkt, sizeof(seed_pkt));
-    if (!sent)
-    {
-        guarded_println("[MESTRE] Transmissão de seed falhou.");
-        mestre_radio.startListening();
-        return false;
-    }
-
-    guarded_printf("[MESTRE] Seed %u transmitida. Aguardando confirmação...\n", g_seed);
-
-    mestre_radio.startListening();
-    unsigned long start_wait = millis();
-    while (millis() - start_wait < SEED_ACK_WAIT_MS)
-    {
-        if (!mestre_radio.available())
-            continue;
-
-        uint8_t size = mestre_radio.getDynamicPayloadSize();
-        if (size != sizeof(SeedAckPacket))
-        {
-            uint8_t dump[32];
-            mestre_radio.read(dump, size);
+            g_pair_rx_other++;
             continue;
         }
+        g_pair_rx_link_ack++;
 
-        SeedAckPacket ack;
-        mestre_radio.read(&ack, sizeof(ack));
-        if (ack.type == MSG_SEED_ACK && ack.seed == g_seed)
-        {
-            guarded_println("[MESTRE] Confirmação de seed recebida do escravo.");
+        if (pair_accept_ack_mestre(g_pair_nonce, g_seed, ack.ver, ack.nonce, ack.seed))
             return true;
-        }
+
+        // Scenario "Resposta que não pertence à tentativa corrente" da spec:
+        // ver/nonce/seed não batem -- FIFO antiga, ack de uma tentativa
+        // anterior, ou escravo em outra sessão. Descarta e continua
+        // sondando (não retorna false aqui -- ainda há tempo dentro de
+        // LINK_ACK_WAIT_MS pra um ack válido chegar).
+        g_pair_stale_ack++;
     }
 
-    guarded_println("[MESTRE] Timeout esperando confirmação de seed.");
     return false;
 }
 
@@ -837,8 +902,19 @@ static void radio_reinit()
 
 static void reset_to_pairing()
 {
+    // D5 (tarefa 4.3): avalia o candidato ANTES de zerar as flags da
+    // tentativa -- só conta falha quando houve ack válido aceito (evidência
+    // de presença do escravo) e o enlace não chegou a confirmar dado real
+    // (FragmentAck) antes de cair. reset_to_pairing() só é chamado depois
+    // de LOSS_HOPS sem ack (ou por comando "reset" manual), nunca por um
+    // acampamento sem resposta nenhuma -- esse caso nem chega a chamar
+    // esta função (ver o bloco `if (!g_link_established)` em mestre_loop()).
+    if (g_pair_link_ack_received && !g_pair_data_confirmed)
+        note_candidate_result(false);
+    g_pair_link_ack_received = false;
+    g_pair_data_confirmed = false;
+
     g_link_established = false;
-    g_seed_confirmed = false;
     g_camping = false;
     g_hop_counter = 0;
     g_hops_since_ack = 0;
@@ -953,10 +1029,13 @@ static void mestre_loop()
 
     if (!g_link_established)
     {
-        // adaptive-rendezvous: janela de camping esgotou sem nunca
-        // conseguir link neste candidato -- conta como falha antes de
-        // trocar (ver note_candidate_result()). Não penaliza a
-        // primeiríssima seleção (!g_camping), que não é uma falha real.
+        // pairing-handshake-hardening (D5, tarefa 4.3): um acampamento que
+        // esgota sem NENHUMA resposta válida não é mais evidência de canal
+        // ruim (ver design.md D5 e o Scenario "Escravo ausente não esvazia
+        // a lista de candidatos") -- nao chama note_candidate_result() aqui.
+        // A avaliação do candidato agora acontece só depois de um ack
+        // válido ter sido aceito (ver o `if (try_establish_link())` abaixo
+        // e reset_to_pairing()).
         bool camp_expired = g_camping && (millis() - g_pair_camp_start >= PAIR_CAMP_MS);
         if (camp_expired)
         {
@@ -964,7 +1043,6 @@ static void mestre_loop()
             // esgotar -- emitir ANTES de pick_new_pair_channel() zerar os
             // contadores e trocar g_pair_channel.
             tlm_pair_stats(g_pair_channel, (unsigned long)(millis() - g_pair_camp_start));
-            note_candidate_result(false);
         }
         if (!g_camping || camp_expired)
             pick_new_pair_channel();
@@ -974,53 +1052,23 @@ static void mestre_loop()
             g_last_link_try = millis();
             if (try_establish_link())
             {
+                // D3 (tarefa 3.4): a seed já foi confirmada pelo próprio
+                // ack (ela veio ecoada nele, ver pair_accept_ack_mestre())
+                // -- não existe mais uma troca de seed separada depois
+                // disto; agenda o início do salto direto (mesma semântica
+                // do antigo g_seed_confirmed).
                 g_link_established = true;
+                g_pair_link_ack_received = true; // D5: evidência de presença do escravo nesta tentativa
                 g_hop_counter = 0;
                 g_hops_since_ack = 0;
                 g_hop_start_at = millis() + HOP_START_DELAY_MS;
-                guarded_printf("[MESTRE] Pareamento confirmado em ch=%u. Iniciando envio de seed...\n", g_pair_channel);
+                guarded_printf("[MESTRE] Pareamento confirmado em ch=%u nonce=%u. Iniciando salto...\n", g_pair_channel, g_pair_nonce);
                 // tarefa 1.3: pareamento também fecha a janela corrente
                 // (sucesso, não timeout) -- mesmos contadores acumulados
                 // desde pick_new_pair_channel().
                 tlm_pair_stats(g_pair_channel, (unsigned long)(millis() - g_pair_camp_start));
-                tlm_printf("mestre", "pair_ok", "ch=%u", g_pair_channel);
+                tlm_printf("mestre", "pair_ok", "ch=%u;nonce=%u", g_pair_channel, g_pair_nonce);
             }
-        }
-        return;
-    }
-
-    if (!g_seed_confirmed)
-    {
-        if (send_seed_to_slave())
-        {
-            g_seed_confirmed = true;
-            g_hop_start_at = millis() + HOP_START_DELAY_MS;
-            tlm_printf("mestre", "seed", "seed=%u", g_seed);
-            // adaptive-rendezvous: só agora o candidato provou que
-            // suporta troca de pacote real, não só RPD quieto -- reseta
-            // o histórico de falha dele.
-            note_candidate_result(true);
-        }
-        else
-        {
-            // Achado de bancada 2026-09-24: um candidato pode conseguir
-            // pair_ok (LINK_ACK) e mesmo assim falhar aqui repetidamente
-            // -- RPD quieto não garante que um pacote de verdade
-            // atravessa. Conta como falha do candidato, não só reverte
-            // o link.
-            note_candidate_result(false);
-            g_link_established = false;
-            // tarefa 1.2: volta a "entrar em pareamento" (mesmo sem passar
-            // por reset_to_pairing() -- só a seed que falhou, o resto do
-            // estado de sessão continua) -- dump de registradores aqui
-            // também, já que é exatamente o caminho de falha do E1
-            // (handshake meio-aberto) em design.md.
-            // pairing-handshake-hardening (tarefa 2.2): dump pré-reinit
-            // (why=seed_timeout_pre) antes do radio_reinit() -- mesmo
-            // racional do reset_to_pairing() acima.
-            tlm_radio_regs("mestre", mestre_radio, "seed_timeout_pre");
-            radio_reinit();
-            tlm_radio_regs("mestre", mestre_radio, "seed_timeout");
         }
         return;
     }
@@ -1152,6 +1200,17 @@ static void mestre_loop()
         g_hops_since_ack = 0;
         if (g_channel_fail[idx] > 0)
             g_channel_fail[idx]--;
+
+        // D5 (tarefa 4.3): primeiro FragmentAck depois do pareamento
+        // confirma que o candidato sustenta dado de verdade, não só o
+        // handshake -- ver note_candidate_result()/design.md D5. Só a
+        // PRIMEIRA vez nesta tentativa (as seguintes já são enlace
+        // confirmado, não uma nova evidência).
+        if (!g_pair_data_confirmed)
+        {
+            g_pair_data_confirmed = true;
+            note_candidate_result(true);
+        }
 
         tlm_printf("mestre", "ack", "ch=%u;frag=%u", channel, g_current_fragment);
         guarded_printf("[MESTRE] ACK recebido para frag=%u\n", g_current_fragment + 1);

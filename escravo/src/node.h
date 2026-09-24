@@ -8,6 +8,7 @@
 #include <string.h>
 #include "../../shared/hopping.h"
 #include "../../shared/protocol.h"
+#include "../../shared/pairing.h"
 #include "../../shared/telemetry.h"
 #include "../../shared/radio_diag.h"
 
@@ -50,14 +51,48 @@ static uint16_t current_msg_id = 0;
 static uint8_t received_count = 0;
 static bool completion_logged = false;
 
-// ---- Estado de pareamento (adaptive-rendezvous) ----
-static bool link_established = false;
+// ---- Estado de pareamento (pairing-handshake-hardening, D3) ----
+// Substitui os bools link_established/g_seed_initialized do
+// adaptive-rendezvous por uma maquina de estados explicita -- o handshake
+// v2 (2 mensagens, sessao por nonce) tem uma fase a mais que um bool não
+// descreve bem (pareado-provisorio, que pode durar varias sondas
+// re-ackadas antes de confirmar dado de verdade):
+//
+//   SCANNING    -- varrendo PAIRING_CANDIDATES, nenhuma sessao adotada.
+//   PROVISIONAL -- adotou {nonce, seed} de uma sonda valida, respondeu
+//                  LinkAckV2, e esta esperando: (a) enquanto ainda nao
+//                  chegou a hop_start_at, permanece no MESMO canal de
+//                  pareamento respondendo re-sondas idempotentemente
+//                  (mesmo nonce -> re-ack + rearma hop_start_at; nonce
+//                  diferente -> adota nova sessao); (b) depois de
+//                  hop_start_at, já está no loop de hopping (como
+//                  CONFIRMED), só que ainda sem ter recebido nenhum
+//                  FragmentPacket valido -- SEED_WAIT_TIMEOUT_MS contado
+//                  a partir de hop_start_at e o prazo pra isso acontecer.
+//   CONFIRMED   -- primeiro FragmentPacket valido recebido depois do
+//                  inicio do salto -- enlace confirmado (notify_ready(true)
+//                  já disparado); dali em diante e o loop de hopping normal,
+//                  com LOSS_HOPS/reset_to_scanning() de sempre.
+enum EscravoLinkState : uint8_t
+{
+    ESCRAVO_SCANNING = 0,
+    ESCRAVO_PROVISIONAL = 1,
+    ESCRAVO_CONFIRMED = 2,
+};
+static EscravoLinkState g_link_state = ESCRAVO_SCANNING;
 static uint8_t g_pair_idx = 0;
 static unsigned long g_pair_dwell_start = 0;
-// Achado de bancada 2026-09-24 (ver SEED_WAIT_TIMEOUT_MS em
-// shared/protocol.h): instante em que link_established virou true,
-// usado só pra medir o timeout de espera pela seed.
-static unsigned long g_seed_wait_start = 0;
+// Nonce da sessao de pareamento adotada (da ultima LinkProbeV2 valida
+// aceita) -- usado por pair_decide_escravo() (shared/pairing.h) pra
+// distinguir re-sonda da MESMA tentativa (re-ack) de uma sonda de uma
+// tentativa NOVA do mestre (adota outra sessao).
+static uint16_t g_session_nonce = 0;
+// pairing-handshake-hardening (tarefa 3.7): comando de teste "drop_next_ack"
+// -- descarta (nao transmite) o proximo LinkAckV2 que seria enviado, em vez
+// de enviar, pra validar deterministicamente o caminho de re-ack por perda
+// (tasks.md 5.2). Consumido (voltando a false) no primeiro ack que
+// encontrar, adotado ou nao.
+static bool g_drop_next_ack = false;
 
 // pairing-handshake-hardening (tarefa 1.4): contadores do ciclo de
 // varredura corrente (um ciclo = PAIRING_CANDIDATE_COUNT trocas de dwell),
@@ -100,8 +135,11 @@ static uint8_t current_channel = PAIRING_CANDIDATES[0];
 static uint32_t g_hops_since_rx = 0;
 
 // ---- Seed ----
+// pairing-handshake-hardening: g_seed agora é adotado diretamente do campo
+// `seed` da LinkProbeV2 aceita (ver g_link_state acima) -- o antigo
+// g_seed_initialized (gate de "aguardando SeedPacket") foi removido junto
+// com a troca de seed separada (D3, design.md).
 static uint16_t g_seed = 0;
-static bool g_seed_initialized = false;
 
 // ---- dynamic-seed-blacklist: máscara de canais ativos ----
 static uint16_t g_channel_mask = 0xFFFF;
@@ -262,8 +300,7 @@ static void radio_reinit()
 
 static void reset_to_scanning()
 {
-    link_established = false;
-    g_seed_initialized = false;
+    g_link_state = ESCRAVO_SCANNING;
     hop_counter = 0;
     g_hops_since_rx = 0;
     g_seed_apply_scheduled = false;
@@ -362,6 +399,9 @@ static volatile bool g_escravo_pending_reset = false;
 static volatile bool g_escravo_pending_regs = false;
 static volatile bool g_escravo_pending_mode_change = false;
 static volatile bool g_escravo_pending_mode_value = false; // true=fixed, false=hopping
+// pairing-handshake-hardening (tarefa 3.7): comando de teste "drop_next_ack"
+// -- mesmo padrão de pedido pendente das flags acima.
+static volatile bool g_escravo_pending_drop_next_ack = false;
 
 // Retorna true se o comando foi reconhecido -- usado tanto por
 // process_escravo_serial() (escravo standalone, lê a própria Serial)
@@ -406,6 +446,14 @@ static bool handle_escravo_command(const char *raw_line)
         g_escravo_pending_regs = true;
         return true;
     }
+    if (strcmp(line, "drop_next_ack") == 0)
+    {
+        // pairing-handshake-hardening (tarefa 3.7): arma o descarte do
+        // próximo LinkAckV2 (validação determinística de 5.2 -- re-ack por
+        // perda de resposta).
+        g_escravo_pending_drop_next_ack = true;
+        return true;
+    }
     return false;
 }
 
@@ -436,6 +484,12 @@ static void process_escravo_pending_requests()
         g_escravo_pending_reset = false;
         guarded_println("[ESCRAVO] Reset solicitado via comando -- voltando ao escaneamento.");
         reset_to_scanning();
+    }
+    if (g_escravo_pending_drop_next_ack)
+    {
+        g_escravo_pending_drop_next_ack = false;
+        g_drop_next_ack = true;
+        guarded_println("[ESCRAVO] drop_next_ack armado -- proximo LinkAckV2 sera descartado.");
     }
     if (g_escravo_pending_regs)
     {
@@ -521,6 +575,38 @@ static void escravo_advance_hop()
     apply_scheduled_changes();
 }
 
+// pairing-handshake-hardening (D3, tarefa 3.5): monta e envia o LinkAckV2
+// que ecoa {nonce, seed} da sonda recebida -- usado tanto na primeira sonda
+// válida (SCANNING -> PROVISIONAL) quanto no re-ack idempotente (mesmo
+// nonce, ainda PROVISIONAL). H6 (achado de bancada, tasks.md 1.8): o ack
+// sai daqui SEM nenhum print/telemetria no meio -- só depois de chamar isto
+// o chamador pode logar (guarded_printf/tlm_printf competem pelo mutex de
+// telemetria com o CSV do analisador na placa combinada e podem atrasar o
+// suficiente pra perder a janela de espera do mestre).
+static bool escravo_send_ack_for(const LinkProbeV2 &probe, bool &dropped_for_test)
+{
+    dropped_for_test = false;
+
+    // tarefa 3.7: comando de teste "drop_next_ack" -- descarta em vez de
+    // transmitir, consumido de uma vez só.
+    if (g_drop_next_ack)
+    {
+        g_drop_next_ack = false;
+        dropped_for_test = true;
+        return false;
+    }
+
+    LinkAckV2 ack = {MSG_LINK_ACK, PAIRING_PROTO_VER, probe.nonce, probe.seed};
+    escravo_radio.stopListening();
+    // radio_send() em vez de write(): ver shared/protocol.h (bug de
+    // retry-forever em RF24::write() nesta versao da lib) -- o mestre pode
+    // nao estar pronto pra auto-ack no exato instante, e a confirmacao real
+    // vem do LinkAckV2 que o mestre le, nao do ack de hardware.
+    bool sent = radio_send(escravo_radio, &ack, sizeof(ack));
+    escravo_radio.startListening();
+    return sent;
+}
+
 static void escravo_loop()
 {
     process_escravo_serial();
@@ -537,7 +623,7 @@ static void escravo_loop()
         }
     }
 
-    if (!link_established)
+    if (g_link_state == ESCRAVO_SCANNING)
     {
         if (millis() - g_pair_dwell_start >= PAIR_DWELL_MS)
         {
@@ -574,42 +660,34 @@ static void escravo_loop()
         {
             g_pair_rx_total++;
             uint8_t size = escravo_radio.getDynamicPayloadSize();
-            if (size == sizeof(LinkPacket))
+            if (size == sizeof(LinkProbeV2))
             {
-                LinkPacket p;
-                escravo_radio.read(&p, sizeof(p));
-                if (p.type == MSG_LINK_PROBE)
+                LinkProbeV2 probe;
+                escravo_radio.read(&probe, sizeof(probe));
+                if (probe.type == MSG_LINK_PROBE)
                 {
                     g_pair_rx_probe++;
-                    LinkPacket ack = {MSG_LINK_ACK};
-                    escravo_radio.stopListening();
-                    // radio_send() em vez de write(): ver shared/protocol.h
-                    // (bug de retry-forever em RF24::write() nesta versao
-                    // da lib) -- o mestre pode nao estar pronto pra
-                    // auto-ack no exato instante, e a confirmacao real vem
-                    // do MSG_LINK_ACK que o mestre le, nao do ack de
-                    // hardware.
-                    bool wrote = radio_send(escravo_radio, &ack, sizeof(ack));
-                    escravo_radio.startListening();
-
-                    if (!wrote)
+                    // provisional=false: escravo ainda escaneando -- toda
+                    // sonda válida (ver PAIRING_PROTO_VER) inicia uma sessão
+                    // nova (pair_decide_escravo() nunca devolve REACK aqui,
+                    // ver shared/pairing.h).
+                    PairDecision decision = pair_decide_escravo(false, 0, probe.ver, probe.nonce);
+                    if (decision == PAIR_IGNORE)
                     {
-                        // tarefa 1.5: falha de radio_send() no LINK_ACK
-                        // deixa de ser silenciosa -- contada em pair_stats,
-                        // linha humana só na primeira desta ciclo.
-                        g_pair_acks_fail++;
-                        if (!g_pair_ack_fail_reported)
-                        {
-                            g_pair_ack_fail_reported = true;
-                            guarded_printf("[ESCRAVO] Falha ao enviar LINK_ACK em ch=%u (radio_send).\n", PAIRING_CANDIDATES[g_pair_idx]);
-                        }
+                        // D3: versão de protocolo diferente -- não responde,
+                        // só loga (ver spec "Handshake identificado por
+                        // sessão").
+                        tlm_printf("escravo", "pair_ver_mismatch", "ver=%u;esperado=%u", probe.ver, PAIRING_PROTO_VER);
                     }
-
-                    if (wrote)
+                    else
                     {
-                        g_pair_acks_ok++;
-                        link_established = true;
-                        g_seed_wait_start = millis();
+                        g_session_nonce = probe.nonce;
+                        g_seed = probe.seed;
+
+                        bool dropped_for_test = false;
+                        bool sent = escravo_send_ack_for(probe, dropped_for_test);
+
+                        g_link_state = ESCRAVO_PROVISIONAL;
                         hop_counter = 0;
                         g_hops_since_rx = 0;
                         hop_start_at = millis() + HOP_START_DELAY_MS;
@@ -622,13 +700,31 @@ static void escravo_loop()
                         // primeira vez que passar do gate abaixo e avançaria
                         // de canal antes mesmo de escutar current_channel.
                         channel_deadline_start = hop_start_at;
-                        guarded_printf("[ESCRAVO] Pareamento confirmado em ch=%u. Aguardando seed...\n", PAIRING_CANDIDATES[g_pair_idx]);
-                        tlm_printf("escravo", "pair_ok", "ch=%u", PAIRING_CANDIDATES[g_pair_idx]);
+
+                        if (!sent)
+                        {
+                            g_pair_acks_fail++;
+                            if (dropped_for_test)
+                                guarded_printf("[ESCRAVO] drop_next_ack: LinkAckV2 descartado de proposito (nonce=%u).\n", probe.nonce);
+                            else if (!g_pair_ack_fail_reported)
+                            {
+                                g_pair_ack_fail_reported = true;
+                                guarded_printf("[ESCRAVO] Falha ao enviar LinkAckV2 em ch=%u (radio_send).\n", PAIRING_CANDIDATES[g_pair_idx]);
+                            }
+                        }
+                        else
+                        {
+                            g_pair_acks_ok++;
+                        }
+
+                        guarded_printf("[ESCRAVO] Pareamento confirmado em ch=%u nonce=%u. Aguardando dado...\n",
+                                      PAIRING_CANDIDATES[g_pair_idx], probe.nonce);
+                        tlm_printf("escravo", "pair_ok", "ch=%u;nonce=%u", PAIRING_CANDIDATES[g_pair_idx], probe.nonce);
                     }
                 }
                 else
                 {
-                    // Mesmo tamanho de LinkPacket, mas tipo diferente de
+                    // Mesmo tamanho de LinkProbeV2, mas tipo diferente de
                     // MSG_LINK_PROBE -- pacote "de outro assunto" (H1).
                     g_pair_rx_other++;
                 }
@@ -644,72 +740,66 @@ static void escravo_loop()
         return;
     }
 
-    if (!g_seed_initialized)
+    // D3 (design.md, "Resposta perdida é recuperada por re-ack"): enquanto
+    // pareado-provisório e AINDA no canal de pareamento (não chegou
+    // hop_start_at), o escravo só espera por re-sondas -- nenhum
+    // FragmentPacket é esperado nesta janela (o mestre só começa a saltar
+    // depois de aceitar o ack, e só aí agenda o próprio hop_start_at).
+    if (g_link_state == ESCRAVO_PROVISIONAL && millis() < hop_start_at)
     {
-        // Achado de bancada 2026-09-24 (ver SEED_WAIT_TIMEOUT_MS em
-        // shared/protocol.h): sem este timeout, um LINK_ACK que o mestre
-        // não recebeu a tempo (nunca confirmado -- radio_send() é NO_ACK)
-        // deixava o escravo aqui PARA SEMPRE: link_established=true já
-        // significa que ele não responde mais a MSG_LINK_PROBE (só ao
-        // bloco acima, guardado por "if (!link_established)"), então
-        // nenhuma sonda futura do mestre tem como reabrir o pareamento --
-        // deadlock permanente, reproduzido em bancada (escravo silencioso
-        // por >1 minuto após um "pair_ok" que o mestre nunca confirmou).
-        if (millis() - g_seed_wait_start >= SEED_WAIT_TIMEOUT_MS)
-        {
-            guarded_println("[ESCRAVO] Seed não chegou a tempo -- voltando a escanear.");
-            tlm_event("escravo", "pair_timeout");
-            link_established = false;
-            g_pair_dwell_start = millis();
-            reset_pair_cycle_counters();
-            // tarefa 1.2: dump de registradores neste caminho também --
-            // achado de bancada E1 (handshake meio-aberto) em design.md
-            // passa exatamente por aqui do lado do escravo.
-            // pairing-handshake-hardening (tarefa 2.2): dump pré-reinit
-            // (why=pair_timeout_pre) antes do radio_reinit() -- mesmo
-            // racional do reset_to_scanning() acima.
-            tlm_radio_regs("escravo", escravo_radio, "pair_timeout_pre");
-            radio_reinit();
-            tlm_radio_regs("escravo", escravo_radio, "pair_timeout");
-            return;
-        }
-
         uint8_t pipe;
         if (escravo_radio.available(&pipe))
         {
             uint8_t size = escravo_radio.getDynamicPayloadSize();
-            if (size == sizeof(SeedPacket))
+            if (size == sizeof(LinkProbeV2))
             {
-                SeedPacket seed_pkt;
-                escravo_radio.read(&seed_pkt, sizeof(seed_pkt));
-                g_seed = seed_pkt.seed;
-                g_seed_initialized = true;
-                reset_plr_counters();
-
-                guarded_printf("[ESCRAVO] Seed recebida: %u\n", g_seed);
-                tlm_printf("escravo", "seed", "seed=%u", g_seed);
-
-                SeedAckPacket seed_ack;
-                seed_ack.type = MSG_SEED_ACK;
-                seed_ack.seed = g_seed;
-                escravo_radio.stopListening();
-                bool wrote = radio_send(escravo_radio, &seed_ack, sizeof(seed_ack));
-                escravo_radio.startListening();
-
-                if (wrote)
+                LinkProbeV2 probe;
+                escravo_radio.read(&probe, sizeof(probe));
+                if (probe.type == MSG_LINK_PROBE)
                 {
-                    guarded_println("[ESCRAVO] Confirmação de seed enviada.");
-                    hop_start_at = millis() + HOP_START_DELAY_MS;
-                    channel_deadline_start = hop_start_at;
-                    notify_ready(true);
+                    PairDecision decision = pair_decide_escravo(true, g_session_nonce, probe.ver, probe.nonce);
+                    if (decision == PAIR_IGNORE)
+                    {
+                        tlm_printf("escravo", "pair_ver_mismatch", "ver=%u;esperado=%u", probe.ver, PAIRING_PROTO_VER);
+                    }
+                    else
+                    {
+                        bool is_new_session = (decision == PAIR_ADOPT_NEW);
+                        g_session_nonce = probe.nonce;
+                        g_seed = probe.seed;
+
+                        bool dropped_for_test = false;
+                        bool sent = escravo_send_ack_for(probe, dropped_for_test);
+
+                        // Riscos, design.md: "o último ack entregue define o
+                        // alinhamento" -- rearma hop_start_at a cada sonda
+                        // válida respondida (mesma sessão ou nova), pra o
+                        // mestre e o escravo começarem o salto alinhados
+                        // mesmo que um ack anterior tenha se perdido.
+                        hop_start_at = millis() + HOP_START_DELAY_MS;
+                        channel_deadline_start = hop_start_at;
+                        hop_counter = 0;
+                        g_hops_since_rx = 0;
+
+                        if (!sent)
+                        {
+                            if (dropped_for_test)
+                                guarded_printf("[ESCRAVO] drop_next_ack: LinkAckV2 descartado de proposito (nonce=%u).\n", probe.nonce);
+                            else if (!g_pair_ack_fail_reported)
+                            {
+                                g_pair_ack_fail_reported = true;
+                                guarded_printf("[ESCRAVO] Falha ao enviar LinkAckV2 em ch=%u (radio_send).\n", PAIRING_CANDIDATES[g_pair_idx]);
+                            }
+                        }
+
+                        tlm_printf("escravo", is_new_session ? "pair_ok" : "pair_reack",
+                                   "ch=%u;nonce=%u", PAIRING_CANDIDATES[g_pair_idx], probe.nonce);
+                    }
                 }
                 else
                 {
-                    // tarefa 1.5: falha de radio_send() no ack de seed
-                    // deixa de ser silenciosa -- só acontece uma vez por
-                    // tentativa de pareamento (não há janela/ciclo pra
-                    // acumular contador aqui, ao contrário do LINK_ACK).
-                    guarded_println("[ESCRAVO] Falha ao enviar confirmação de seed (radio_send).");
+                    uint8_t dump[32];
+                    escravo_radio.read(dump, size);
                 }
             }
             else
@@ -718,12 +808,34 @@ static void escravo_loop()
                 escravo_radio.read(dump, size);
             }
         }
-
         return;
     }
 
-    if (millis() < hop_start_at)
+    // A partir daqui, hop_start_at já passou (ver os dois `return` acima) --
+    // g_link_state é PROVISIONAL (aguardando o primeiro FragmentPacket
+    // válido pra confirmar) ou CONFIRMED (hopping normal).
+    if (g_link_state == ESCRAVO_PROVISIONAL && (millis() - hop_start_at) >= SEED_WAIT_TIMEOUT_MS)
+    {
+        // D3 (design.md, "Enlace provisório sem dados volta à varredura"):
+        // nenhum FragmentPacket válido chegou a tempo depois do início do
+        // salto -- mesmo caminho de volta a escanear de sempre (radio_reinit()
+        // incluso, D2).
+        guarded_println("[ESCRAVO] Nenhum fragmento valido a tempo -- voltando a escanear.");
+        tlm_event("escravo", "pair_timeout");
+        g_link_state = ESCRAVO_SCANNING;
+        g_pair_dwell_start = millis();
+        reset_pair_cycle_counters();
+        // tarefa 1.2: dump de registradores neste caminho também --
+        // achado de bancada E1 (handshake meio-aberto) em design.md
+        // passa exatamente por aqui do lado do escravo.
+        // pairing-handshake-hardening (tarefa 2.2): dump pré-reinit
+        // (why=pair_timeout_pre) antes do radio_reinit() -- mesmo
+        // racional do reset_to_scanning() acima.
+        tlm_radio_regs("escravo", escravo_radio, "pair_timeout_pre");
+        radio_reinit();
+        tlm_radio_regs("escravo", escravo_radio, "pair_timeout");
         return;
+    }
 
     // Hopping por evento, não por relógio periódico (ver "Correção" em
     // openspec/changes/adaptive-rendezvous/design.md e mestre_loop() em
@@ -822,8 +934,27 @@ static void escravo_loop()
                         // escravo_advance_hop().
                         escravo_advance_hop();
 
+                        // D3 (design.md, "primeiro FragmentPacket válido
+                        // confirma o enlace"): só agora, com dado de
+                        // verdade recebido (não só o handshake), o enlace
+                        // sai de pareado-provisório -- notify_ready(true)
+                        // (libera o jammer combinado) só dispara aqui, nunca
+                        // antes.
+                        bool just_confirmed = (g_link_state == ESCRAVO_PROVISIONAL);
+                        if (just_confirmed)
+                        {
+                            g_link_state = ESCRAVO_CONFIRMED;
+                            reset_plr_counters();
+                        }
+
                         // Prints adiados pra depois do ack (ver comentário
                         // acima) -- não afetam o timing crítico daqui em diante.
+                        if (just_confirmed)
+                        {
+                            tlm_printf("escravo", "pair_confirm", "ch=%u", current_channel);
+                            guarded_printf("[ESCRAVO] Enlace confirmado (primeiro fragmento recebido) em ch=%u.\n", current_channel);
+                            notify_ready(true);
+                        }
                         if (is_new_message)
                             guarded_printf("[ESCRAVO] Nova mensagem msg_id=%u com %u fragmentos\n", pkt.msg_id, pkt.total_fragments);
                         if (fragment_stored)

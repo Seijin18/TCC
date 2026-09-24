@@ -52,6 +52,11 @@ EVENT_RE = re.compile(r"^@(?P<src>[^;]+);t=(?P<t>\d+);e=(?P<event>[^;]*)(?P<rest
 # entram aqui de propósito -- são raros (boot/entrada em pareamento/fim de
 # janela, não por hop) e são exatamente a instrumentação que motivou este
 # change, então precisam aparecer em events.log, não só no JSONL bruto.
+# pairing-handshake-hardening (D3, tarefa 3.6): "pair_reack",
+# "pair_confirm" e "pair_ver_mismatch" (handshake v2) também NÃO entram
+# aqui, pelo mesmo motivo de "regs"/"pair_stats" -- são raros e são
+# exatamente os eventos que dizem se o re-ack idempotente e a confirmação
+# por dado estão funcionando em bancada.
 ROUTINE_EVENTS = {"hop", "ack", "miss", "pair_scan", "latency"}
 
 CSV_MIN_FIELDS = 100
@@ -111,16 +116,33 @@ class StateStore:
                 node["boot_epoch"] = epoch
             elif event == "pair_ok":
                 node["link"] = True
+                node["confirmed"] = False
                 node["pair_channel"] = fields.get("ch")
+                node["pair_nonce"] = fields.get("nonce")
+            elif event == "pair_reack":
+                # pairing-handshake-hardening (D3, tarefa 3.6): re-ack
+                # idempotente -- ainda a mesma sessão (nonce igual ao de
+                # pair_ok), só reforça que o enlace continua provisório.
+                node["pair_channel"] = fields.get("ch")
+                node["pair_nonce"] = fields.get("nonce")
+            elif event == "pair_confirm":
+                # pairing-handshake-hardening (D3, tarefa 3.6): primeiro
+                # FragmentPacket válido depois do pareamento -- só agora o
+                # enlace tem dado de verdade fluindo, não só o handshake.
+                node["confirmed"] = True
+            elif event == "pair_ver_mismatch":
+                node["last_pair_ver_mismatch"] = fields
             elif event == "loss_of_sync":
                 node["link"] = False
+                node["confirmed"] = False
             elif event == "pair_timeout":
                 # Achado de bancada 2026-09-24: LINK_ACK do escravo sem
                 # confirmacao real de entrega -- ver SEED_WAIT_TIMEOUT_MS
-                # em shared/protocol.h.
+                # em shared/protocol.h. pairing-handshake-hardening (D3):
+                # agora também dispara quando nenhum FragmentPacket válido
+                # confirma o enlace a tempo (ver escravo/src/node.h).
                 node["link"] = False
-            elif event == "seed":
-                node["seed"] = fields.get("seed")
+                node["confirmed"] = False
             elif event == "hop":
                 node["hop_counter"] = fields.get("n")
                 node["channel"] = fields.get("ch")

@@ -15,9 +15,10 @@ tools/logger/main.py, que precisa estar rodando).
 
 Cada trial:
   1. Espera o enlace ficar "estável": os dois lados pareados (pair_ok) e
-     dado fluindo de verdade (mestre emitindo ack/msg_done, escravo tendo
-     recebido seed) por pelo menos --stable-window segundos seguidos sem
-     nenhuma nova perda (loss_of_sync/pair_timeout/boot) no meio.
+     dado fluindo de verdade (mestre emitindo ack/msg_done, escravo emitindo
+     pair_confirm -- handshake v2, ver design.md D3) por pelo menos
+     --stable-window segundos seguidos sem nenhuma nova perda
+     (loss_of_sync/pair_timeout/boot) no meio.
   2. Força uma perda de enlace escrevendo "<placa> reset" em cmd.in,
      alternando entre placa_b e placa_a a cada trial -- mesmo comando
      "reset" que reset_to_pairing()/reset_to_scanning() já tratam
@@ -64,6 +65,14 @@ RESET_BOARDS = ["placa_b", "placa_a"]
 DISRUPTION_EVENTS = {"loss_of_sync", "pair_timeout", "boot"}
 # "dado fluindo" do lado do mestre, ver design.md/tasks.md 1.7.
 MESTRE_DATA_EVENTS = {"ack", "msg_done"}
+# pairing-handshake-hardening (D3, tarefa 3.6): o handshake v2 não tem mais
+# uma troca de seed separada -- o escravo não emite mais o evento "seed"
+# (removido junto com SeedPacket/SeedAckPacket, ver shared/protocol.h).
+# "dado fluindo" do lado do escravo agora é "pair_confirm" (primeiro
+# FragmentPacket válido depois do pareamento, ver escravo/src/node.h) --
+# mesma posição na sequência que "seed" ocupava antes (confirma que o
+# handshake fechou e o enlace tem dado de verdade, não só o LinkAckV2).
+ESCRAVO_CONFIRM_EVENT = "pair_confirm"
 
 
 class JsonlTailer:
@@ -131,7 +140,7 @@ class LinkTracker:
         self.mestre_pair_ok_epoch = None
         self.escravo_pair_ok_epoch = None
         self.mestre_data_epoch = None
-        self.escravo_seed_epoch = None
+        self.escravo_confirm_epoch = None
 
     def update(self, rec):
         event = rec.get("event")
@@ -146,7 +155,7 @@ class LinkTracker:
             self.mestre_pair_ok_epoch = None
             self.escravo_pair_ok_epoch = None
             self.mestre_data_epoch = None
-            self.escravo_seed_epoch = None
+            self.escravo_confirm_epoch = None
         elif event == "pair_ok":
             if src == "mestre":
                 self.mestre_pair_ok_epoch = epoch
@@ -154,13 +163,13 @@ class LinkTracker:
                 self.escravo_pair_ok_epoch = epoch
         elif event in MESTRE_DATA_EVENTS and src == "mestre":
             self.mestre_data_epoch = epoch
-        elif event == "seed" and src == "escravo":
-            self.escravo_seed_epoch = epoch
+        elif event == ESCRAVO_CONFIRM_EVENT and src == "escravo":
+            self.escravo_confirm_epoch = epoch
 
     def is_stable(self, now, window_s):
         if self.mestre_pair_ok_epoch is None or self.escravo_pair_ok_epoch is None:
             return False
-        if self.mestre_data_epoch is None or self.escravo_seed_epoch is None:
+        if self.mestre_data_epoch is None or self.escravo_confirm_epoch is None:
             return False
         return (now - self.last_disruption_epoch) >= window_s
 

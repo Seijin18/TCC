@@ -174,6 +174,44 @@ rejeitada, pois cada mensagem extra é mais um ponto de perda e o
 dos dois generais só se resolve tornando a última mensagem idempotente e
 confirmando pelo primeiro dado útil, que é o que D3 faz).
 
+**Implementado (tarefa 3.5):** o escravo usa uma máquina de estados
+explícita (`EscravoLinkState`: `SCANNING` / `PROVISIONAL` / `CONFIRMED` —
+`escravo/src/node.h`) em vez de bolar mais um bool sobre
+`link_established`/`g_seed_initialized` do adaptive-rendezvous (ambos
+removidos). Detalhe que o texto acima não deixava explícito: a checagem de
+re-sonda (mesmo nonce ⇒ re-ack; nonce diferente ⇒ adota nova sessão) só
+roda **antes** de `hop_start_at` — o escravo ainda está fisicamente no
+canal de pareamento nessa janela. Depois de `hop_start_at`, o escravo já
+entrou no loop de salto normal (mesmo raciocínio de hoje: o mestre só
+agenda `hop_start_at` depois de ele mesmo aceitar o ack, então não sobra
+sonda pra reagir depois disso) e uma `LinkProbeV2` que chegasse ali cairia
+no branch de "payload inesperado", sem efeito — não observado em bancada,
+mas é o comportamento caso aconteça. Enquanto `PROVISIONAL` e depois de
+`hop_start_at`, o timeout de confirmação (`SEED_WAIT_TIMEOUT_MS`) é
+verificado a cada iteração do loop comparando `millis() - hop_start_at`, e
+só passa a valer LOSS_HOPS/`reset_to_scanning()` de novo depois que o
+estado vira `CONFIRMED`. O comando de teste `drop_next_ack` (tarefa 3.7)
+descarta o envio mas mantém toda a adoção de sessão (nonce/seed, agenda de
+`hop_start_at`) como se o ack tivesse saído — é exatamente o cenário que
+5.2 precisa (mestre não recebe o ack, reenvia a sonda, escravo re-ackar na
+segunda tentativa).
+
+**H6 (achado de bancada 1.8) — auditoria completa:** a instância principal
+(`send_seed_to_slave()` no mestre, print entre `radio_send()` e
+`startListening()`) desaparece por remoção da função inteira, não por
+reordenar. Auditados todos os pontos de TX→aguarda-resposta em
+`mestre/src/node.h` e `escravo/src/node.h` (sondas/acks de pareamento,
+envio/espera de `FragmentPacket`/`FragmentAck`, `ControlSeedPacket`/
+`ControlBlacklistPacket`/`ControlAck`): nenhuma outra instância do padrão
+encontrada — todos já seguiam (ou passaram a seguir, no handshake novo)
+`stopListening()`→`radio_send()`→`startListening()`→só então
+`guarded_printf`/`tlm_printf`. Um caso listado mas não corrigido por não
+ser uma instância real: em `try_establish_link()`, o `guarded_printf` de
+falha de `radio_send()` da sonda roda antes do `startListening()` do ramo
+de falha — mas como o `radio_send()` já retornou falso (a sonda nunca
+saiu), não há resposta em trânsito pra perder ali; esse código é anterior
+a este change e foi deixado como estava.
+
 ### D4 — Temporização com invariantes verificadas em compilação
 
 - `LINK_ACK_WAIT_MS` 120 → **30** (o ack sai em poucos ms; 120 ms só
@@ -191,6 +229,13 @@ confirmando pelo primeiro dado útil, que é o que D3 faz).
 Os valores finais podem ser ajustados pela etapa 1 (tempo real de
 resposta do escravo na placa combinada), mantendo as invariantes.
 
+**Implementado (tarefas 4.1/4.2):** valores finais usados exatamente como
+acima (30/100/250/4500 ms), sem ajuste adicional — os dados de bancada de
+1.8/2.5 não deram motivo pra desviar. Os dois `static_assert`s ficam logo
+depois de `PAIR_DWELL_MS` em `shared/protocol.h` (antes de
+`PAIR_MEASURE_SAMPLES`), já que os dois precisam de `PAIRING_CANDIDATE_COUNT`
+(definida mais acima) e das quatro constantes de timing.
+
 ### D5 — Blacklist de candidatos só com evidência de canal ruim
 
 Hoje `note_candidate_result(false)` é chamado em (a) acampamento esgotado
@@ -203,6 +248,28 @@ naquele candidato. Acampamento sem nenhuma resposta não penaliza o canal
 (a medição de RPD em `measure_and_pick_candidate()` continua evitando
 canais ocupados). Reaproveita `update_channel_mask()`/`g_candidate_*` sem
 mudança.
+
+**Implementado (tarefa 4.3):** duas flags por tentativa em
+`mestre/src/node.h` — `g_pair_link_ack_received` (vira `true` no exato
+ponto em que `try_establish_link()` retorna sucesso, antes mesmo de
+agendar `hop_start_at`) e `g_pair_data_confirmed` (vira `true` na primeira
+vez que `ack_ok` é verdadeiro no loop de fragmentos, i.e. o primeiro
+`FragmentAck` depois do pareamento). As duas são zeradas em
+`pick_new_pair_channel()` (nova tentativa = nenhuma evidência ainda) e
+avaliadas no TOPO de `reset_to_pairing()`, antes de qualquer outro reset:
+`note_candidate_result(false)` só é chamado se `link_ack_received &&
+!data_confirmed`. Isso cobre os dois pontos onde `reset_to_pairing()` é
+chamado hoje (LOSS_HOPS sem ack, tanto no branch de fragmento quanto no de
+controle, e o comando manual `reset`) sem precisar duplicar a lógica em
+cada um. O branch de acampamento esgotado (`camp_expired`, dentro de
+`if (!g_link_established)`) não chama mais `note_candidate_result()` —
+esse caminho nunca chega a setar `g_pair_link_ack_received`, então a
+guarda já bastaria, mas a chamada foi removida de lá mesmo assim pra
+deixar explícito que aquele branch nunca penaliza, sem depender de ler as
+duas flags pra ter certeza. `note_candidate_result(true)` (sucesso) também
+mudou de lugar: era chamado na confirmação de seed (removida), agora é
+chamado inline no branch `ack_ok` do loop de hop, guardado pela mesma
+`g_pair_data_confirmed` pra só contar a primeira vez por tentativa.
 
 ## Riscos / Trade-offs
 

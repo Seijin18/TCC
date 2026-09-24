@@ -35,7 +35,7 @@ static const byte slaveAddress[6] = "SLV01";
 // checagem de ponteiro sempre-verdadeira). multicast=true (NO_ACK)
 // sempre, porque a confirmacao real de qualquer troca deste protocolo já
 // vem de um pacote de resposta explicito lido separadamente
-// (LinkAck/SeedAck/FragmentAck/ControlAck) -- nunca dependemos do ACK de
+// (LinkAckV2/FragmentAck/ControlAck) -- nunca dependemos do ACK de
 // hardware do NRF24 pra saber se algo funcionou, então write() em si só
 // precisa terminar (nao travar), nao confirmar entrega.
 static const uint32_t RADIO_WRITE_TIMEOUT_MS = 50;
@@ -58,8 +58,12 @@ enum MessageType : uint8_t
     MSG_LINK_ACK = 2,
     MSG_FRAGMENT = 3,
     MSG_FRAGMENT_ACK = 4,
-    MSG_SEED_INIT = 5,
-    MSG_SEED_ACK = 6,
+    // MSG_SEED_INIT/MSG_SEED_ACK (5, 6) existiram no handshake de 4
+    // mensagens do adaptive-rendezvous -- removidos pelo
+    // pairing-handshake-hardening (D3, tarefa 3.1): a seed agora viaja
+    // dentro da propria sonda/ack (LinkProbeV2/LinkAckV2), sem uma troca
+    // separada. Valores deixados vagos de proposito (nao reaproveitados),
+    // pra um dump antigo de rede/log nao ser reinterpretado por engano.
     // dynamic-seed-blacklist: pacotes de controle, enviados no lugar do
     // proximo fragmento quando ha uma renegociacao pendente (fila de
     // prioridade simples -- ver design.md daquele change).
@@ -67,6 +71,13 @@ enum MessageType : uint8_t
     MSG_CTRL_BLACKLIST = 8,
     MSG_CTRL_ACK = 9
 };
+
+// pairing-handshake-hardening (D3, tarefa 3.1): versao do protocolo de
+// pareamento, transportada em LinkProbeV2/LinkAckV2 -- um no gravado com o
+// handshake antigo (pre-nonce) ou uma versao futura incompativel nao deve
+// ser confundido com esta: `ver` diferente => ignora e loga
+// `pair_ver_mismatch` (ver shared/pairing.h pair_decide_escravo()).
+static const uint8_t PAIRING_PROTO_VER = 2;
 
 static const uint8_t FRAGMENT_DATA_SIZE = 20;
 
@@ -80,30 +91,60 @@ static const uint8_t FRAGMENT_DATA_SIZE = 20;
 static const uint8_t PAIRING_CANDIDATES[8] = {76, 90, 96, 101, 108, 114, 119, 124};
 static const uint8_t PAIRING_CANDIDATE_COUNT = 8;
 
-static const uint32_t LINK_RETRY_MS = 300;     // mestre: intervalo entre MSG_LINK_PROBE
-static const uint32_t LINK_ACK_WAIT_MS = 120;  // mestre: espera por MSG_LINK_ACK apos probe
-static const uint32_t PAIR_CAMP_MS = 2000;     // mestre: tempo acampado num candidato antes de rodar pro proximo
+// pairing-handshake-hardening (D4, tarefa 4.1): valores recalibrados a
+// partir do numero-base de bancada (tasks.md 1.8/2.5) -- o handshake v2
+// (D3) manda a sonda a cada LINK_RETRY_MS e só precisa aguardar o ack por
+// alguns ms (LINK_ACK_WAIT_MS), não mais o round-trip completo de uma
+// troca de seed separada. Antes desta calibragem, LINK_ACK_WAIT_MS=120
+// (>LINK_RETRY_MS=300) so atrasava a proxima sonda sem necessidade.
+static const uint32_t LINK_RETRY_MS = 100;     // mestre: intervalo entre MSG_LINK_PROBE
+static const uint32_t LINK_ACK_WAIT_MS = 30;   // mestre: espera por MSG_LINK_ACK apos probe
+static const uint32_t PAIR_CAMP_MS = 4500;     // mestre: tempo acampado num candidato antes de rodar pro proximo
 // escravo: tempo escutando cada candidato. DEVE ser maior que
 // LINK_RETRY_MS -- por pigeonhole, qualquer janela de escuta mais larga
 // que o intervalo entre sondas do mestre garante pegar pelo menos uma
 // sonda, não importa a fase relativa entre os dois relogios livres
 // (millis() de cada placa comeca em instante diferente e não se
-// realinha). Com dwell < intervalo de sonda (250 < 300, valor anterior),
-// a janela de escuta podia sistematicamente cair sempre entre duas
-// sondas consecutivas e nunca convergir -- reproduzido em bancada.
-static const uint32_t PAIR_DWELL_MS = 400;
+// realinha). Com dwell < intervalo de sonda (250 < 300, valor anterior do
+// adaptive-rendezvous), a janela de escuta podia sistematicamente cair
+// sempre entre duas sondas consecutivas e nunca convergir -- reproduzido
+// em bancada.
+//
+// pairing-handshake-hardening (D4): duas invariantes de COBERTURA TEMPORAL
+// do encontro, checadas em compilação (spec "Cobertura temporal garantida
+// do encontro") -- uma mudança futura de constante que quebre qualquer uma
+// delas não compila, em vez de silenciosamente parar de convergir (foi
+// exatamente o que aconteceu quando o dwell do adaptive-rendezvous subiu de
+// 250 para 400 ms sem reavaliar o intervalo de sonda):
+//   1) PAIR_DWELL_MS >= 2 * LINK_RETRY_MS -- cada janela de escuta do
+//      escravo contém pelo menos DUAS sondas do mestre (folga sobre o
+//      pigeonhole de 1 sonda acima, cobrindo a perda isolada de uma delas
+//      sem esperar a volta completa da varredura).
+//   2) PAIR_CAMP_MS >= 2 * PAIRING_CANDIDATE_COUNT * PAIR_DWELL_MS -- cada
+//      acampamento do mestre dura pelo menos DOIS ciclos completos de
+//      varredura do escravo pelos 8 candidatos (E6, design.md: um
+//      acampamento mais curto que um ciclo de varredura pode terminar sem o
+//      escravo sequer ter passado pelo canal).
+static const uint32_t PAIR_DWELL_MS = 250;
 static const uint32_t PAIR_MEASURE_SAMPLES = 20; // mestre: amostras de testCarrier() por candidato
+
+static_assert(PAIR_DWELL_MS >= 2 * LINK_RETRY_MS,
+              "PAIR_DWELL_MS precisa ser >= 2x LINK_RETRY_MS (cobertura de pelo menos 2 sondas por janela de escuta)");
+static_assert(PAIR_CAMP_MS >= 2 * (uint32_t)PAIRING_CANDIDATE_COUNT * PAIR_DWELL_MS,
+              "PAIR_CAMP_MS precisa ser >= 2x PAIRING_CANDIDATE_COUNT x PAIR_DWELL_MS (pelo menos 2 ciclos completos de varredura por acampamento)");
 
 // adaptive-rendezvous (2026-09-24): pareamento ganha o mesmo mecanismo de
 // evitar-canal-ruim de blacklist-decay, aplicado aos PAIRING_CANDIDATES em
 // vez de HOPPING_CHANNELS -- ver mestre/src/node.h note_candidate_result().
 // Achado de bancada: um candidato pode medir "quieto" por RPD
 // (measure_and_pick_candidate) e mesmo assim falhar repetidamente na troca
-// de pacotes real (handshake de seed) -- a métrica de energia não
-// substitui a evidência de sucesso/falha real do protocolo. Limiar mais
-// baixo que CHANNEL_FAIL_THRESHOLD porque cada falha aqui já consumiu um
-// PAIR_CAMP_MS inteiro (ou uma tentativa de seed) -- não vale a pena
-// esperar tantas quanto no hopping de dados, onde cada falha é só 1 hop.
+// de pacotes real (handshake) -- a métrica de energia não substitui a
+// evidência de sucesso/falha real do protocolo. Limiar mais baixo que
+// CHANNEL_FAIL_THRESHOLD porque cada falha aqui já consumiu um
+// PAIR_CAMP_MS inteiro (ou uma tentativa de handshake que não confirmou
+// dado -- ver D5/note_candidate_result() em mestre/src/node.h) -- não vale
+// a pena esperar tantas quanto no hopping de dados, onde cada falha é só
+// 1 hop.
 static const uint8_t PAIR_FAIL_THRESHOLD = 3;
 // Em "rounds" de seleção de candidato (não hops, que ainda não existem
 // antes de parear) -- ver g_pair_round em mestre/src/node.h.
@@ -118,21 +159,21 @@ static const uint32_t HOP_START_DELAY_MS = 900;
 // indefinidamente num canal jamado). Ver mestre_loop()/escravo_loop().
 static const uint32_t HOP_TIMEOUT_MS = 220;
 static const uint32_t ACK_TIMEOUT_MS = 120;
-static const uint32_t SEED_ACK_WAIT_MS = 500;
 static const uint32_t SEED_WAIT_WINDOW_MS = 3000; // seed nao-bloqueante: janela na serial antes do default
-// Achado de bancada (2026-09-24): o LINK_ACK do escravo (MSG_LINK_ACK, em
-// try_establish_link()) e enviado sem confirmacao real de entrega
-// (radio_send() usa NO_ACK -- a "confirmacao" seria o proprio mestre
-// completar o handshake enviando a seed). Se esse ack se perder ou chegar
-// fora da janela de LINK_ACK_WAIT_MS do mestre, o escravo mesmo assim
-// declara link_established=true (baseado so no envio local ter tido
-// sucesso) e para de responder a novas sondas -- ver o guard
-// "if (!link_established)" em escravo_loop(). Sem um timeout aqui, isso e
-// um DEADLOCK permanente: o mestre nunca recebeu o ack (continua
-// sondando), e o escravo nunca mais responde a sonda nenhuma (esta
-// esperando so por uma seed que nunca vai chegar). SEED_WAIT_TIMEOUT_MS
-// da ao escravo uma saida -- volta a escanear se nenhuma seed chegar a
-// tempo, permitindo uma tentativa de pareamento futura ter sucesso.
+// pairing-handshake-hardening (D3, tarefa 3.5): com o handshake v2 a seed
+// nao viaja mais separada (vai na propria LinkProbeV2/LinkAckV2 -- ver
+// shared/pairing.h), entao este timeout deixou de ser "espera pela seed" e
+// virou "espera pela CONFIRMACAO do enlace": o escravo entra
+// pareado-provisorio ao responder uma sonda valida (ver
+// PAIR_ESCRAVO_ADOPT_NEW/REACK em pairing.h) e só sai desse estado quando
+// (a) o primeiro FragmentPacket valido chega depois do inicio do salto
+// (confirma o enlace, pair_confirm) ou (b) este timeout esgota contado a
+// partir do hop_start_at corrente (que e rearmado a cada re-ack recebido
+// enquanto ainda provisorio) -- nesse caso volta a escanear. Mesmo
+// raciocinio de DEADLOCK do achado original permanece valido: sem este
+// timeout, um escravo que respondeu mas cujo ack nunca chegou ao mestre
+// (ou cujo mestre desistiu do candidato) ficaria preso pra sempre
+// esperando dado que nunca vai chegar.
 static const uint32_t SEED_WAIT_TIMEOUT_MS = 3000;
 static const uint16_t SEED_DEFAULT = 42;
 
@@ -152,20 +193,28 @@ static const uint32_t RECOVERY_COOLDOWN_HOPS = 200;
 static const uint8_t CONTROL_RETRY_HOPS = 6;     // hops repetindo o pacote de controle ate confirmar
 static const uint8_t CONTROL_APPLY_MARGIN = 2;   // folga de hops entre confirmacao e troca efetiva
 
-struct __attribute__((packed)) LinkPacket
+// pairing-handshake-hardening (D3, tarefa 3.1): handshake de pareamento v2
+// -- substitui o LinkPacket de 1 byte (sem identificacao de sessao) e as
+// mensagens separadas de seed (SeedPacket/SeedAckPacket, removidas do
+// enum acima) por 2 mensagens que carregam nonce de sessao E seed juntos.
+// `ver` (PAIRING_PROTO_VER) protege contra confundir um no com firmware
+// antigo; `nonce` identifica a tentativa (novo a cada acampamento do
+// mestre, ver esp_random() em mestre/src/node.h); `seed` viaja na propria
+// sonda/ack em vez de uma troca a parte -- a decisao de aceitar/re-ackar/
+// adotar nova sessao/ignorar e logica pura em shared/pairing.h.
+struct __attribute__((packed)) LinkProbeV2
 {
-    uint8_t type;
-};
-
-struct __attribute__((packed)) SeedPacket
-{
-    uint8_t type; // MSG_SEED_INIT
+    uint8_t type; // MSG_LINK_PROBE
+    uint8_t ver;
+    uint16_t nonce;
     uint16_t seed;
 };
 
-struct __attribute__((packed)) SeedAckPacket
+struct __attribute__((packed)) LinkAckV2
 {
-    uint8_t type; // MSG_SEED_ACK
+    uint8_t type; // MSG_LINK_ACK
+    uint8_t ver;
+    uint16_t nonce;
     uint16_t seed;
 };
 
@@ -211,9 +260,8 @@ struct __attribute__((packed)) ControlAck
     uint32_t apply_at_hop;
 };
 
-static_assert(sizeof(LinkPacket) <= 32, "LinkPacket excede 32 bytes do NRF24");
-static_assert(sizeof(SeedPacket) <= 32, "SeedPacket excede 32 bytes do NRF24");
-static_assert(sizeof(SeedAckPacket) <= 32, "SeedAckPacket excede 32 bytes do NRF24");
+static_assert(sizeof(LinkProbeV2) <= 32, "LinkProbeV2 excede 32 bytes do NRF24");
+static_assert(sizeof(LinkAckV2) <= 32, "LinkAckV2 excede 32 bytes do NRF24");
 static_assert(sizeof(FragmentPacket) <= 32, "FragmentPacket excede 32 bytes do NRF24");
 static_assert(sizeof(FragmentAck) <= 32, "FragmentAck excede 32 bytes do NRF24");
 static_assert(sizeof(ControlSeedPacket) <= 32, "ControlSeedPacket excede 32 bytes do NRF24");

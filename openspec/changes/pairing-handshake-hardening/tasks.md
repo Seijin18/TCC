@@ -87,49 +87,59 @@
 
 ## 3. Handshake v2 (design.md D3)
 
-- [ ] 3.1 `shared/protocol.h`: `PAIRING_PROTO_VER`, `LinkProbeV2`,
+- [x] 3.1 `shared/protocol.h`: `PAIRING_PROTO_VER`, `LinkProbeV2`,
       `LinkAckV2` (+ `static_assert` de tamanho); `SeedPacket`/
       `SeedAckPacket` saem do fluxo de pareamento.
-- [ ] 3.2 `shared/pairing.h` (novo, puro): `pair_decide_escravo(state,
+- [x] 3.2 `shared/pairing.h` (novo, puro): `pair_decide_escravo(state,
       cur_nonce, pkt) -> {ADOPT_NEW, REACK, IGNORE}` e
       `pair_accept_ack_mestre(cur_nonce, seed, ack) -> bool`.
-- [ ] 3.3 Testes em `test/` (native): sessão nova, re-ack com mesmo nonce,
+- [x] 3.3 Testes em `test/` (native): sessão nova, re-ack com mesmo nonce,
       nonce diferente ⇒ nova sessão, ack antigo/versão errada rejeitados,
       ack com seed divergente rejeitado.
-- [ ] 3.4 Mestre: nonce por acampamento (`esp_random()`), sonda v2, aceita
+- [x] 3.4 Mestre: nonce por acampamento (`esp_random()`), sonda v2, aceita
       só ack válido; remove `send_seed_to_slave()` do caminho de pareamento;
       conta `stale_ack` em `pair_stats`; `seed <n>` vale para a próxima
       tentativa.
-- [ ] 3.5 Escravo: estado pareado-provisório (permanece no canal de
+- [x] 3.5 Escravo: estado pareado-provisório (permanece no canal de
       pareamento até `hop_start_at`, re-ack idempotente com re-arme de
       `hop_start_at`, adota nova sessão em nonce diferente); confirma o
       enlace e chama `notify_ready(true)` só no primeiro `FragmentPacket`
       válido; timeout ⇒ volta a varrer.
-- [ ] 3.6 Telemetria: `pair_ok` ganha `nonce=`; novos `pair_reack`,
+- [x] 3.6 Telemetria: `pair_ok` ganha `nonce=`; novos `pair_reack`,
       `pair_confirm`, `pair_ver_mismatch`; logger atualizado.
-- [ ] 3.7 Comando de teste `drop_next_ack` no escravo (descarta o próximo
+- [x] 3.7 Comando de teste `drop_next_ack` no escravo (descarta o próximo
       `LinkAckV2` em vez de enviar) para validar 5.2 de forma determinística.
 
 ## 4. Temporização e blacklist de candidatos (design.md D4, D5)
 
-- [ ] 4.1 Constantes: `LINK_ACK_WAIT_MS=30`, `LINK_RETRY_MS=100`,
+- [x] 4.1 Constantes: `LINK_ACK_WAIT_MS=30`, `LINK_RETRY_MS=100`,
       `PAIR_DWELL_MS=250`, `PAIR_CAMP_MS=4500` (ajustáveis pelos dados de
       1.8, mantendo as invariantes).
-- [ ] 4.2 `static_assert`s das duas invariantes em `shared/protocol.h`.
-- [ ] 4.3 `note_candidate_result(false)` só quando houve ack válido naquele
+- [x] 4.2 `static_assert`s das duas invariantes em `shared/protocol.h`.
+- [x] 4.3 `note_candidate_result(false)` só quando houve ack válido naquele
       candidato e o enlace não confirmou dados em `LOSS_HOPS` hops;
       acampamento sem nenhuma resposta não penaliza.
-- [ ] 4.4 Atualizar os testes de `test_hopping` que dependam da semântica
+- [x] 4.4 Atualizar os testes de `test_hopping` que dependam da semântica
       antiga (se houver) e `pio test -e native_test` verde.
-- [ ] 4.5 `pio run` (10 envs) limpo.
+- [x] 4.5 `pio run` (10 envs) limpo.
 - [ ] 4.6 *(opcional, só se 5.1 não atingir a meta)* experimento com ack de
       hardware (ESB) apenas nos pacotes de pareamento:
       `writeFast(..., false)` + `txStandBy(timeout)` + `setRetries()`.
 
 ## 5. Validação em bancada
 
-- [ ] 5.1 `repair_trials.py -n 20`, jammer off: **≥ 19/20 re-pareamentos
+- [x] 5.1 `repair_trials.py -n 20`, jammer off: **≥ 19/20 re-pareamentos
       em ≤ 10 s**; registrar mediana e p95 contra 1.8 e 2.5.
+      **Resultado (2026-09-24 15:25-15:31, `logs/repair-20260924-182542.json`)**:
+      **20/20 recuperados**, 19/20 em ≤ 10 s — mediana 7,88 s, p95 9,03 s
+      (número-base 1.8: 0/6). Decomposição: ~5,3-5,5 s é a *detecção* da
+      perda pelo lado que não foi resetado (`LOSS_HOPS` × timeout de hop),
+      0,3-1,8 s é o handshake v2 em si, ~1,1 s até `pair_confirm`. O único
+      trial acima de 10 s (#3, 13,0 s): `pair_ok` dos dois lados mas o
+      escravo não recebeu o primeiro fragmento → `pair_timeout` → novo
+      pareamento automático, confirmado em seguida. Se for preciso baixar
+      o tempo total, o próximo alvo é a detecção (`LOSS_HOPS`), não o
+      handshake.
 - [ ] 5.2 Perda injetada (`drop_next_ack`): pareamento conclui pelo re-ack
       em ≤ 2 × `LINK_RETRY_MS` a mais que o normal; primeiro fragmento com
       ack sem `loss_of_sync`.
