@@ -154,6 +154,16 @@ def main():
     print(f"[battery] Sessão ativa: {current_session_path()}")
     print(f"[battery] Bateria: {scenarios}, jammer mode={args.jammer_mode} power={args.jammer_power}")
 
+    # pairing-handshake-hardening (tarefa 0.2): jam off é o PRIMEIRO comando
+    # da execução inteira, antes de qualquer "reset" (que configure_scenario()
+    # manda logo no início de cada cenário) -- um "jam on"+"mode adaptive" de
+    # um teste anterior deixado armado (ver openspec/changes/
+    # pairing-handshake-hardening/tasks.md 0.1) não deve sobreviver nem um
+    # instante na sessão seguinte.
+    print("[battery] Garantindo jammer desligado antes de qualquer reset...")
+    send_cmd(args.jammer_board, "jam off")
+    time.sleep(1)
+
     t0 = time.time()
     all_phases = []
     try:

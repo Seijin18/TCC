@@ -9,6 +9,7 @@
 #include "../../shared/hopping.h"
 #include "../../shared/protocol.h"
 #include "../../shared/telemetry.h"
+#include "../../shared/radio_diag.h"
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 2
@@ -40,7 +41,10 @@
 // mestre_set_alert_source() (ver two-board-topology). Ver docs/pinout.md.
 #define PIN_ALERT_IN 4
 
-static RF24 mestre_radio(PIN_CE, PIN_CSN);
+// pairing-handshake-hardening: RF24Diag (shared/radio_diag.h) em vez de
+// RF24 puro -- so acrescenta um leitor publico de registrador sobre o
+// mesmo objeto, nenhuma mudanca de comportamento (ver comentario lá).
+static RF24Diag mestre_radio(PIN_CE, PIN_CSN);
 
 // Achado de bancada (2026-09-24): igual ao motivo de HOP_TIMEOUT_MS/o
 // delayMicroseconds(500) em mestre_loop() (ver comentário lá) -- 130us
@@ -188,6 +192,14 @@ static void handle_mestre_command(char *line)
         guarded_println("[MESTRE] Reset solicitado via comando -- voltando ao pareamento.");
         reset_to_pairing();
     }
+    else if (strcmp(line, "regs") == 0)
+    {
+        // pairing-handshake-hardening (tarefa 1.2): dump de registradores
+        // sob demanda, sem mudar nenhum estado -- útil pra comparar contra
+        // o dump automático de boot/entrada em pareamento em bancada.
+        tlm_radio_regs("mestre", mestre_radio, "cmd");
+        guarded_println("[MESTRE] Registradores do radio despejados (e=regs;why=cmd).");
+    }
     else
     {
         guarded_printf("[MESTRE] Comando desconhecido: %s\n", line);
@@ -235,6 +247,31 @@ static uint8_t g_candidate_fail[PAIRING_CANDIDATE_COUNT] = {0};
 static uint32_t g_candidate_quarantined_since[PAIRING_CANDIDATE_COUNT] = {0};
 static uint32_t g_pair_round = 0;
 static uint8_t g_camped_idx = 0; // índice (em PAIRING_CANDIDATES) do candidato atual, p/ penalizar/confirmar
+
+// pairing-handshake-hardening (tarefa 1.3): contadores da janela de
+// acampamento corrente -- zerados a cada novo acampamento
+// (pick_new_pair_channel()), emitidos como "e=pair_stats" quando a janela
+// termina (por timeout ou por sucesso) -- ver design.md H1/H4: distinguir
+// "nenhum pacote chegou" (rx_total=0) de "chegou algo que não era o ack
+// esperado" (rx_other>0) é o que discrimina as duas hipóteses.
+static uint16_t g_pair_probes_ok = 0;
+static uint16_t g_pair_probes_fail = 0;
+static uint16_t g_pair_rx_total = 0;
+static uint16_t g_pair_rx_link_ack = 0;
+static uint16_t g_pair_rx_other = 0;
+// tarefa 1.5: só imprime a linha humana na primeira falha de envio de
+// sonda de CADA janela, pra não inundar a serial numa janela ruim inteira
+// -- a contagem completa (probes_fail) já vai pro pair_stats de qualquer
+// forma.
+static bool g_pair_probe_fail_reported = false;
+
+static void tlm_pair_stats(uint8_t ch, unsigned long window_ms)
+{
+    tlm_printf("mestre", "pair_stats",
+               "ch=%u;probes_ok=%u;probes_fail=%u;rx_total=%u;rx_link_ack=%u;rx_other=%u;ms=%lu",
+               ch, g_pair_probes_ok, g_pair_probes_fail, g_pair_rx_total, g_pair_rx_link_ack,
+               g_pair_rx_other, window_ms);
+}
 
 // ---- Estado de hopping / mensagem ----
 static uint16_t g_msg_id = 1;
@@ -364,6 +401,14 @@ static void pick_new_pair_channel()
     g_pair_channel = PAIRING_CANDIDATES[idx];
     g_pair_camp_start = millis();
     g_camping = true;
+    // tarefa 1.3: nova janela de acampamento -- zera os contadores da
+    // anterior (já emitidos via tlm_pair_stats() por quem chamou isto).
+    g_pair_probes_ok = 0;
+    g_pair_probes_fail = 0;
+    g_pair_rx_total = 0;
+    g_pair_rx_link_ack = 0;
+    g_pair_rx_other = 0;
+    g_pair_probe_fail_reported = false;
     tlm_printf("mestre", "pair_scan", "ch=%u", g_pair_channel);
 }
 
@@ -380,9 +425,19 @@ static bool try_establish_link()
     bool sent = radio_send(mestre_radio, &probe, sizeof(probe));
     if (!sent)
     {
+        // tarefa 1.5: falha de radio_send() na sonda deixa de ser
+        // silenciosa -- contada em pair_stats, com linha humana só na
+        // primeira ocorrência desta janela.
+        g_pair_probes_fail++;
+        if (!g_pair_probe_fail_reported)
+        {
+            g_pair_probe_fail_reported = true;
+            guarded_printf("[MESTRE] Falha ao enviar sonda de pareamento em ch=%u (radio_send).\n", g_pair_channel);
+        }
         mestre_radio.startListening();
         return false;
     }
+    g_pair_probes_ok++;
 
     mestre_radio.startListening();
     unsigned long start_wait = millis();
@@ -391,18 +446,24 @@ static bool try_establish_link()
         if (!mestre_radio.available())
             continue;
 
+        g_pair_rx_total++;
         uint8_t size = mestre_radio.getDynamicPayloadSize();
         if (size != sizeof(LinkPacket))
         {
             uint8_t dump[32];
             mestre_radio.read(dump, size);
+            g_pair_rx_other++;
             continue;
         }
 
         LinkPacket ack;
         mestre_radio.read(&ack, sizeof(ack));
         if (ack.type == MSG_LINK_ACK)
+        {
+            g_pair_rx_link_ack++;
             return true;
+        }
+        g_pair_rx_other++;
     }
 
     return false;
@@ -725,6 +786,10 @@ static void reset_to_pairing()
     memset(g_channel_blacklisted_since, 0, sizeof(g_channel_blacklisted_since));
     reset_throughput_window();
     tlm_event("mestre", "loss_of_sync");
+    // tarefa 1.2: dump de registradores toda vez que o mestre entra (ou
+    // volta a entrar) no estado de pareamento -- compara contra o dump do
+    // boot pra confirmar/descartar H4 (design.md).
+    tlm_radio_regs("mestre", mestre_radio, "loss");
 }
 
 static void mestre_setup()
@@ -793,6 +858,9 @@ static void mestre_setup()
     wait_for_seed_window();
 
     tlm_event("mestre", "boot");
+    // tarefa 1.2: número-base de registradores no boot, pra comparar
+    // contra os dumps de entrada em pareamento por perda (design.md H4).
+    tlm_radio_regs("mestre", mestre_radio, "boot");
 }
 
 static void mestre_loop()
@@ -840,7 +908,13 @@ static void mestre_loop()
         // primeiríssima seleção (!g_camping), que não é uma falha real.
         bool camp_expired = g_camping && (millis() - g_pair_camp_start >= PAIR_CAMP_MS);
         if (camp_expired)
+        {
+            // tarefa 1.3: fecha a janela de acampamento que acabou de
+            // esgotar -- emitir ANTES de pick_new_pair_channel() zerar os
+            // contadores e trocar g_pair_channel.
+            tlm_pair_stats(g_pair_channel, (unsigned long)(millis() - g_pair_camp_start));
             note_candidate_result(false);
+        }
         if (!g_camping || camp_expired)
             pick_new_pair_channel();
 
@@ -854,6 +928,10 @@ static void mestre_loop()
                 g_hops_since_ack = 0;
                 g_hop_start_at = millis() + HOP_START_DELAY_MS;
                 guarded_printf("[MESTRE] Pareamento confirmado em ch=%u. Iniciando envio de seed...\n", g_pair_channel);
+                // tarefa 1.3: pareamento também fecha a janela corrente
+                // (sucesso, não timeout) -- mesmos contadores acumulados
+                // desde pick_new_pair_channel().
+                tlm_pair_stats(g_pair_channel, (unsigned long)(millis() - g_pair_camp_start));
                 tlm_printf("mestre", "pair_ok", "ch=%u", g_pair_channel);
             }
         }
@@ -881,6 +959,12 @@ static void mestre_loop()
             // o link.
             note_candidate_result(false);
             g_link_established = false;
+            // tarefa 1.2: volta a "entrar em pareamento" (mesmo sem passar
+            // por reset_to_pairing() -- só a seed que falhou, o resto do
+            // estado de sessão continua) -- dump de registradores aqui
+            // também, já que é exatamente o caminho de falha do E1
+            // (handshake meio-aberto) em design.md.
+            tlm_radio_regs("mestre", mestre_radio, "seed_timeout");
         }
         return;
     }

@@ -2,33 +2,33 @@
 
 - [x] 0.1 Desarmar o jammer deixado em `jam on` + `mode adaptive` por um
       teste anterior (`placa_b jam off`, 2026-09-24).
-- [ ] 0.2 `tools/validation/run_scenario.py` e `run_battery.py`: enviar
+- [x] 0.2 `tools/validation/run_scenario.py` e `run_battery.py`: enviar
       `jam off` como primeiro comando (antes do `reset`), para nenhuma
       sessão herdar estado de jammer de uma sessão anterior.
 
 ## 1. Instrumentação (sem mudança de comportamento — ver design.md D1)
 
-- [ ] 1.1 `shared/radio_diag.h` (novo): `tlm_radio_regs(src, radio, reason)`
+- [x] 1.1 `shared/radio_diag.h` (novo): `tlm_radio_regs(src, radio, reason)`
       emite `@<src>;e=regs;why=<boot|loss|pair_timeout|seed_timeout|cmd>;
       config=..;en_aa=..;en_rxaddr=..;rf_ch=..;rf_setup=..;status=..;
       fifo=..;feature=..;dynpd=..;rx_p1=..` (hex), lendo registradores via
       API pública do RF24 (`read_register` é protegido — usar
       `printPrettyDetails`/`sprintfPrettyDetails` ou subclasse fina).
-- [ ] 1.2 Mestre e escravo: `regs` no boot, em toda entrada no estado de
+- [x] 1.2 Mestre e escravo: `regs` no boot, em toda entrada no estado de
       pareamento, e sob comando `regs`.
-- [ ] 1.3 Mestre: `@mestre;e=pair_stats` ao fim de cada acampamento —
+- [x] 1.3 Mestre: `@mestre;e=pair_stats` ao fim de cada acampamento —
       `ch`, `probes_ok`, `probes_fail`, `rx_total`, `rx_link_ack`,
       `rx_other` (tamanho/tipo inesperado), `ms`.
-- [ ] 1.4 Escravo: `@escravo;e=pair_stats` a cada ciclo completo de
+- [x] 1.4 Escravo: `@escravo;e=pair_stats` a cada ciclo completo de
       varredura — `rx_total`, `rx_probe`, `rx_other`, `acks_ok`,
       `acks_fail`.
-- [ ] 1.5 Falhas de `radio_send()` no pareamento deixam de ser silenciosas
+- [x] 1.5 Falhas de `radio_send()` no pareamento deixam de ser silenciosas
       (contadas em `pair_stats`; linha humana no primeiro caso de cada
       janela).
-- [ ] 1.6 `tools/logger/main.py`: últimos `regs`/`pair_stats` por nó no
+- [x] 1.6 `tools/logger/main.py`: últimos `regs`/`pair_stats` por nó no
       `state.json`; `pair_stats` fora de `ROUTINE_EVENTS` (vai pro
       `events.log`).
-- [ ] 1.7 `tools/validation/repair_trials.py` (novo): N ciclos de "enlace
+- [x] 1.7 `tools/validation/repair_trials.py` (novo): N ciclos de "enlace
       estável ≥ 5 s → força perda (`placa_b reset` / `placa_a reset`,
       alternando) → mede tempo até `pair_ok` + primeiro `hop` com ack dos
       dois lados", timeout por tentativa 60 s; grava

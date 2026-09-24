@@ -48,6 +48,10 @@ EVENT_RE = re.compile(r"^@(?P<src>[^;]+);t=(?P<t>\d+);e=(?P<event>[^;]*)(?P<rest
 # Eventos de rotina, omitidos de events.log (ainda vão para o JSONL bruto).
 # scenario-automation: "latency" é por fragmento confirmado, mesma
 # frequência de "ack" -- tratado como rotina pelo mesmo motivo.
+# pairing-handshake-hardening (tarefa 1.6): "regs" e "pair_stats" NÃO
+# entram aqui de propósito -- são raros (boot/entrada em pareamento/fim de
+# janela, não por hop) e são exatamente a instrumentação que motivou este
+# change, então precisam aparecer em events.log, não só no JSONL bruto.
 ROUTINE_EVENTS = {"hop", "ack", "miss", "pair_scan", "latency"}
 
 CSV_MIN_FIELDS = 100
@@ -145,6 +149,17 @@ class StateStore:
             elif event in ("rekey_tx", "rekey_ack", "rekey_apply", "rekey_failed"):
                 node.setdefault("last_rekey", {})
                 node["last_rekey"] = {"phase": event, **fields}
+            elif event == "regs":
+                # pairing-handshake-hardening (tarefa 1.6): guarda o último
+                # dump de registradores por nó -- inclui "why" (boot/loss/
+                # pair_timeout/seed_timeout/cmd) já que vem em fields.
+                node["last_regs"] = fields
+            elif event == "pair_stats":
+                # pairing-handshake-hardening (tarefa 1.6): último fechamento
+                # de janela de acampamento (mestre) ou ciclo de varredura
+                # (escravo) -- campos diferem entre os dois lados (ver
+                # shared/radio_diag.h / mestre e escravo node.h).
+                node["last_pair_stats"] = fields
 
             self.dirty = True
 

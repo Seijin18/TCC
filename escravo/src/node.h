@@ -9,6 +9,7 @@
 #include "../../shared/hopping.h"
 #include "../../shared/protocol.h"
 #include "../../shared/telemetry.h"
+#include "../../shared/radio_diag.h"
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 2
@@ -34,7 +35,10 @@
 #define PIN_MISO 19
 #define PIN_MOSI 23
 
-static RF24 escravo_radio(PIN_CE, PIN_CSN);
+// pairing-handshake-hardening: RF24Diag (shared/radio_diag.h) em vez de
+// RF24 puro -- so acrescenta um leitor publico de registrador sobre o
+// mesmo objeto, nenhuma mudanca de comportamento (ver comentario lá).
+static RF24Diag escravo_radio(PIN_CE, PIN_CSN);
 
 static const uint8_t MAX_FRAGMENTS = 16;
 static const uint16_t MAX_MESSAGE_SIZE = FRAGMENT_DATA_SIZE * MAX_FRAGMENTS;
@@ -54,6 +58,32 @@ static unsigned long g_pair_dwell_start = 0;
 // shared/protocol.h): instante em que link_established virou true,
 // usado só pra medir o timeout de espera pela seed.
 static unsigned long g_seed_wait_start = 0;
+
+// pairing-handshake-hardening (tarefa 1.4): contadores do ciclo de
+// varredura corrente (um ciclo = PAIRING_CANDIDATE_COUNT trocas de dwell),
+// zerados a cada ciclo fechado -- ver escravo_loop(). Mesmo raciocínio do
+// mestre (design.md H1/H4): rx_total=0 com o mestre relatando probes_ok>0
+// no mesmo intervalo aponta pra rádio surdo (H4); rx_other>0 aponta pra
+// pacote de formato/tipo inesperado chegando (H1, FIFO velha).
+static uint8_t g_pair_cycle_dwells = 0;
+static uint16_t g_pair_rx_total = 0;
+static uint16_t g_pair_rx_probe = 0;
+static uint16_t g_pair_rx_other = 0;
+static uint16_t g_pair_acks_ok = 0;
+static uint16_t g_pair_acks_fail = 0;
+// tarefa 1.5: linha humana só na primeira falha de LINK_ACK de cada ciclo.
+static bool g_pair_ack_fail_reported = false;
+
+static void reset_pair_cycle_counters()
+{
+    g_pair_cycle_dwells = 0;
+    g_pair_rx_total = 0;
+    g_pair_rx_probe = 0;
+    g_pair_rx_other = 0;
+    g_pair_acks_ok = 0;
+    g_pair_acks_fail = 0;
+    g_pair_ack_fail_reported = false;
+}
 
 // ---- Estado de hopping ----
 static uint32_t hop_counter = 0;
@@ -180,8 +210,13 @@ static void reset_to_scanning()
     g_seed_apply_scheduled = false;
     g_mask_apply_scheduled = false;
     g_channel_mask = 0xFFFF;
+    reset_pair_cycle_counters();
     notify_ready(false);
     tlm_event("escravo", "loss_of_sync");
+    // tarefa 1.2: dump de registradores toda vez que o escravo volta a
+    // escanear -- compara contra o dump do boot pra confirmar/descartar
+    // H4 (design.md).
+    tlm_radio_regs("escravo", escravo_radio, "loss");
 }
 
 static void escravo_setup()
@@ -246,6 +281,9 @@ static void escravo_setup()
     g_pair_dwell_start = millis();
     guarded_printf("[ESCRAVO] Varrendo %u candidatos de pareamento...\n", PAIRING_CANDIDATE_COUNT);
     tlm_event("escravo", "boot");
+    // tarefa 1.2: número-base de registradores no boot, pra comparar
+    // contra os dumps de entrada em pareamento por perda (design.md H4).
+    tlm_radio_regs("escravo", escravo_radio, "boot");
 }
 
 // Hopping por evento: chamado sempre que um "round" de escuta em
@@ -290,6 +328,16 @@ static bool handle_escravo_command(const char *raw_line)
     {
         guarded_println("[ESCRAVO] Reset solicitado via comando -- voltando ao escaneamento.");
         reset_to_scanning();
+        return true;
+    }
+    if (strcmp(line, "regs") == 0)
+    {
+        // pairing-handshake-hardening (tarefa 1.2): dump de registradores
+        // sob demanda, sem mudar nenhum estado. Na placa combinada
+        // (placa_b), chega aqui via jammer_set_unknown_cmd_sink() -- ver
+        // comentário acima em handle_escravo_command().
+        tlm_radio_regs("escravo", escravo_radio, "cmd");
+        guarded_println("[ESCRAVO] Registradores do radio despejados (e=regs;why=cmd).");
         return true;
     }
     return false;
@@ -394,11 +442,24 @@ static void escravo_loop()
             g_pair_dwell_start = millis();
             escravo_radio.setChannel(PAIRING_CANDIDATES[g_pair_idx]);
             tlm_printf("escravo", "pair_scan", "ch=%u", PAIRING_CANDIDATES[g_pair_idx]);
+
+            // tarefa 1.4: um ciclo completo de varredura = passar pelos
+            // PAIRING_CANDIDATE_COUNT candidatos uma vez -- emite e zera os
+            // contadores a cada ciclo fechado.
+            g_pair_cycle_dwells++;
+            if (g_pair_cycle_dwells >= PAIRING_CANDIDATE_COUNT)
+            {
+                tlm_printf("escravo", "pair_stats",
+                           "rx_total=%u;rx_probe=%u;rx_other=%u;acks_ok=%u;acks_fail=%u",
+                           g_pair_rx_total, g_pair_rx_probe, g_pair_rx_other, g_pair_acks_ok, g_pair_acks_fail);
+                reset_pair_cycle_counters();
+            }
         }
 
         uint8_t pipe;
         if (escravo_radio.available(&pipe))
         {
+            g_pair_rx_total++;
             uint8_t size = escravo_radio.getDynamicPayloadSize();
             if (size == sizeof(LinkPacket))
             {
@@ -406,6 +467,7 @@ static void escravo_loop()
                 escravo_radio.read(&p, sizeof(p));
                 if (p.type == MSG_LINK_PROBE)
                 {
+                    g_pair_rx_probe++;
                     LinkPacket ack = {MSG_LINK_ACK};
                     escravo_radio.stopListening();
                     // radio_send() em vez de write(): ver shared/protocol.h
@@ -417,8 +479,22 @@ static void escravo_loop()
                     bool wrote = radio_send(escravo_radio, &ack, sizeof(ack));
                     escravo_radio.startListening();
 
+                    if (!wrote)
+                    {
+                        // tarefa 1.5: falha de radio_send() no LINK_ACK
+                        // deixa de ser silenciosa -- contada em pair_stats,
+                        // linha humana só na primeira desta ciclo.
+                        g_pair_acks_fail++;
+                        if (!g_pair_ack_fail_reported)
+                        {
+                            g_pair_ack_fail_reported = true;
+                            guarded_printf("[ESCRAVO] Falha ao enviar LINK_ACK em ch=%u (radio_send).\n", PAIRING_CANDIDATES[g_pair_idx]);
+                        }
+                    }
+
                     if (wrote)
                     {
+                        g_pair_acks_ok++;
                         link_established = true;
                         g_seed_wait_start = millis();
                         hop_counter = 0;
@@ -437,11 +513,18 @@ static void escravo_loop()
                         tlm_printf("escravo", "pair_ok", "ch=%u", PAIRING_CANDIDATES[g_pair_idx]);
                     }
                 }
+                else
+                {
+                    // Mesmo tamanho de LinkPacket, mas tipo diferente de
+                    // MSG_LINK_PROBE -- pacote "de outro assunto" (H1).
+                    g_pair_rx_other++;
+                }
             }
             else
             {
                 uint8_t dump[32];
                 escravo_radio.read(dump, size);
+                g_pair_rx_other++;
             }
         }
 
@@ -465,6 +548,11 @@ static void escravo_loop()
             tlm_event("escravo", "pair_timeout");
             link_established = false;
             g_pair_dwell_start = millis();
+            reset_pair_cycle_counters();
+            // tarefa 1.2: dump de registradores neste caminho também --
+            // achado de bancada E1 (handshake meio-aberto) em design.md
+            // passa exatamente por aqui do lado do escravo.
+            tlm_radio_regs("escravo", escravo_radio, "pair_timeout");
             return;
         }
 
@@ -496,6 +584,14 @@ static void escravo_loop()
                     hop_start_at = millis() + HOP_START_DELAY_MS;
                     channel_deadline_start = hop_start_at;
                     notify_ready(true);
+                }
+                else
+                {
+                    // tarefa 1.5: falha de radio_send() no ack de seed
+                    // deixa de ser silenciosa -- só acontece uma vez por
+                    // tentativa de pareamento (não há janela/ciclo pra
+                    // acumular contador aqui, ao contrário do LINK_ACK).
+                    guarded_println("[ESCRAVO] Falha ao enviar confirmação de seed (radio_send).");
                 }
             }
             else
