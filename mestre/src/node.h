@@ -259,6 +259,11 @@ static uint16_t g_pair_probes_fail = 0;
 static uint16_t g_pair_rx_total = 0;
 static uint16_t g_pair_rx_link_ack = 0;
 static uint16_t g_pair_rx_other = 0;
+// pairing-handshake-hardening (tarefa 2.3): quantas vezes o flush_rx() do
+// início do acampamento (pick_new_pair_channel()) encontrou a FIFO
+// não-vazia -- mede H1 (design.md): FIFO velha atravessando a troca de
+// canal/estado de pareamento.
+static uint16_t g_pair_flushed = 0;
 // tarefa 1.5: só imprime a linha humana na primeira falha de envio de
 // sonda de CADA janela, pra não inundar a serial numa janela ruim inteira
 // -- a contagem completa (probes_fail) já vai pro pair_stats de qualquer
@@ -268,9 +273,9 @@ static bool g_pair_probe_fail_reported = false;
 static void tlm_pair_stats(uint8_t ch, unsigned long window_ms)
 {
     tlm_printf("mestre", "pair_stats",
-               "ch=%u;probes_ok=%u;probes_fail=%u;rx_total=%u;rx_link_ack=%u;rx_other=%u;ms=%lu",
+               "ch=%u;probes_ok=%u;probes_fail=%u;rx_total=%u;rx_link_ack=%u;rx_other=%u;flushed=%u;ms=%lu",
                ch, g_pair_probes_ok, g_pair_probes_fail, g_pair_rx_total, g_pair_rx_link_ack,
-               g_pair_rx_other, window_ms);
+               g_pair_rx_other, g_pair_flushed, window_ms);
 }
 
 // ---- Estado de hopping / mensagem ----
@@ -409,6 +414,15 @@ static void pick_new_pair_channel()
     g_pair_rx_link_ack = 0;
     g_pair_rx_other = 0;
     g_pair_probe_fail_reported = false;
+
+    // pairing-handshake-hardening (tarefa 2.3): measure_and_pick_candidate()
+    // liga o receptor (startListening()) em cada candidato avaliado -- um
+    // pacote real pode ter caído na FIFO durante a medição. Descarta antes
+    // da primeira sonda deste acampamento (D2, design.md) e conta se havia
+    // algo pra descartar (mede H1: FIFO velha atravessando troca de canal).
+    g_pair_flushed = mestre_radio.available() ? 1 : 0;
+    mestre_radio.flush_rx();
+
     tlm_printf("mestre", "pair_scan", "ch=%u", g_pair_channel);
 }
 
@@ -766,57 +780,25 @@ static bool send_pending_control_if_any(bool &acked_out)
     return true;
 }
 
-static void reset_to_pairing()
+// pairing-handshake-hardening (tarefa 2.1): sequência de configuração do
+// rádio extraída de mestre_setup() (D2, design.md) -- fonte única de
+// verdade: setup() e toda (re)entrada no estado de pareamento chamam
+// exatamente este código, na mesma ordem. Ordem de registrador importa
+// nestes clones de NRF24 -- dois bugs reais já vieram de configuração de
+// feature/ack fora de ordem (ver comentário do enableAckPayload() abaixo),
+// então isto só MOVE o que já existia em mestre_setup(), sem reordenar.
+// Não inclui Serial/SPI.begin()/radio.begin()/pinMode/printDetails/boot --
+// isso continua só em mestre_setup() (não faz sentido repetir a cada
+// reentrada em pareamento).
+static void radio_reinit()
 {
-    g_link_established = false;
-    g_seed_confirmed = false;
-    g_camping = false;
-    g_hop_counter = 0;
-    g_hops_since_ack = 0;
-    g_current_fragment = 0;
-    g_control_pending = 0;
-    g_seed_apply_scheduled = false;
-    g_mask_apply_scheduled = false;
-    g_channel_mask = 0xFFFF;
-    memset(g_channel_fail, 0, sizeof(g_channel_fail));
-    // blacklist-decay: g_hop_counter volta a 0 acima -- sem isto,
-    // hop_counter - blacklisted_since[i] usaria valores da sessão anterior
-    // e faria wraparound (unsigned), tornando todos os canais "elegíveis"
-    // pra reinclusão instantaneamente (ver design.md, risco de underflow).
-    memset(g_channel_blacklisted_since, 0, sizeof(g_channel_blacklisted_since));
-    reset_throughput_window();
-    tlm_event("mestre", "loss_of_sync");
-    // tarefa 1.2: dump de registradores toda vez que o mestre entra (ou
-    // volta a entrar) no estado de pareamento -- compara contra o dump do
-    // boot pra confirmar/descartar H4 (design.md).
-    tlm_radio_regs("mestre", mestre_radio, "loss");
-}
-
-static void mestre_setup()
-{
-    Serial.begin(115200);
-    delay(1000); // Aguarda o monitor serial abrir
-
-    pinMode(LED_BUILTIN, OUTPUT);
-    if (!g_mestre_alert_source)
-        pinMode(PIN_ALERT_IN, INPUT_PULLDOWN);
-
-    guarded_println("\n[MESTRE] Iniciando transmissor (FIXO)...");
-
-    delay(2000);
-
-    printf_begin();
-
-    pinMode(PIN_CSN, OUTPUT);
-    digitalWrite(PIN_CSN, HIGH);
-    delay(10);
-
-    SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CSN);
-
-    if (!mestre_radio.begin())
-    {
-        guarded_println(F("[ERRO MESTRE] Falha fatal! O Módulo NRF24 não respondeu no SPI. Verifique a fiação."));
-    }
+    // D2: power-cycle lógico -- força o rádio pra um estado conhecido
+    // antes de reconfigurar. powerUp() (RF24 1.6.2, RF24.cpp) já espera
+    // RF24_POWERUP_DELAY (5000us) internamente antes de retornar -- dentro
+    // da janela de 1.5-5ms do datasheet (Tpd2stby) -- então nenhuma espera
+    // adicional é necessária aqui.
+    mestre_radio.powerDown();
+    mestre_radio.powerUp();
 
     mestre_radio.setPALevel(RF24_PA_LOW);
     mestre_radio.setDataRate(RF24_1MBPS);
@@ -846,7 +828,76 @@ static void mestre_setup()
 
     mestre_radio.flush_tx();
     mestre_radio.setAutoAck(true);
+    // D2: limpa os bits de IRQ de STATUS explicitamente -- o estado final
+    // abaixo é stopListening(), que (ao contrário de startListening(), ver
+    // radio_reinit() do escravo) não escreve STATUS sozinho.
+    mestre_radio.clearStatusFlags();
     mestre_radio.stopListening();
+}
+
+static void reset_to_pairing()
+{
+    g_link_established = false;
+    g_seed_confirmed = false;
+    g_camping = false;
+    g_hop_counter = 0;
+    g_hops_since_ack = 0;
+    g_current_fragment = 0;
+    g_control_pending = 0;
+    g_seed_apply_scheduled = false;
+    g_mask_apply_scheduled = false;
+    g_channel_mask = 0xFFFF;
+    memset(g_channel_fail, 0, sizeof(g_channel_fail));
+    // blacklist-decay: g_hop_counter volta a 0 acima -- sem isto,
+    // hop_counter - blacklisted_since[i] usaria valores da sessão anterior
+    // e faria wraparound (unsigned), tornando todos os canais "elegíveis"
+    // pra reinclusão instantaneamente (ver design.md, risco de underflow).
+    memset(g_channel_blacklisted_since, 0, sizeof(g_channel_blacklisted_since));
+    reset_throughput_window();
+    tlm_event("mestre", "loss_of_sync");
+    // tarefa 1.2: dump de registradores toda vez que o mestre entra (ou
+    // volta a entrar) no estado de pareamento -- compara contra o dump do
+    // boot pra confirmar/descartar H4 (design.md).
+    // pairing-handshake-hardening (tarefa 2.2): dump ANTES do
+    // radio_reinit() (why=loss_pre) -- sem isto o reinit apagaria o exato
+    // estado de rádio que motivou o reset antes de registrá-lo, e é
+    // justamente esse estado que discrimina H4 (design.md).
+    tlm_radio_regs("mestre", mestre_radio, "loss_pre");
+    radio_reinit();
+    tlm_radio_regs("mestre", mestre_radio, "loss");
+}
+
+static void mestre_setup()
+{
+    Serial.begin(115200);
+    delay(1000); // Aguarda o monitor serial abrir
+
+    pinMode(LED_BUILTIN, OUTPUT);
+    if (!g_mestre_alert_source)
+        pinMode(PIN_ALERT_IN, INPUT_PULLDOWN);
+
+    guarded_println("\n[MESTRE] Iniciando transmissor (FIXO)...");
+
+    delay(2000);
+
+    printf_begin();
+
+    pinMode(PIN_CSN, OUTPUT);
+    digitalWrite(PIN_CSN, HIGH);
+    delay(10);
+
+    SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CSN);
+
+    if (!mestre_radio.begin())
+    {
+        guarded_println(F("[ERRO MESTRE] Falha fatal! O Módulo NRF24 não respondeu no SPI. Verifique a fiação."));
+    }
+
+    // pairing-handshake-hardening (tarefa 2.1): configuração do rádio
+    // extraída para radio_reinit() (definida acima) -- setup() e toda
+    // (re)entrada em pareamento usam exatamente a mesma sequência, na
+    // mesma ordem (fonte única de verdade, D2 em design.md).
+    radio_reinit();
 
     guarded_println("\n--- STATUS DO RÁDIO MESTRE (REGISTRADORES) ---");
     mestre_radio.printDetails();
@@ -964,6 +1015,11 @@ static void mestre_loop()
             // estado de sessão continua) -- dump de registradores aqui
             // também, já que é exatamente o caminho de falha do E1
             // (handshake meio-aberto) em design.md.
+            // pairing-handshake-hardening (tarefa 2.2): dump pré-reinit
+            // (why=seed_timeout_pre) antes do radio_reinit() -- mesmo
+            // racional do reset_to_pairing() acima.
+            tlm_radio_regs("mestre", mestre_radio, "seed_timeout_pre");
+            radio_reinit();
             tlm_radio_regs("mestre", mestre_radio, "seed_timeout");
         }
         return;

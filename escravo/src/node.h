@@ -71,6 +71,10 @@ static uint16_t g_pair_rx_probe = 0;
 static uint16_t g_pair_rx_other = 0;
 static uint16_t g_pair_acks_ok = 0;
 static uint16_t g_pair_acks_fail = 0;
+// pairing-handshake-hardening (tarefa 2.3): quantas trocas de dwell deste
+// ciclo encontraram a FIFO de RX não-vazia antes do flush_rx() -- mede H1
+// (design.md): FIFO velha atravessando a troca de canal de pareamento.
+static uint16_t g_pair_flushed = 0;
 // tarefa 1.5: linha humana só na primeira falha de LINK_ACK de cada ciclo.
 static bool g_pair_ack_fail_reported = false;
 
@@ -82,6 +86,7 @@ static void reset_pair_cycle_counters()
     g_pair_rx_other = 0;
     g_pair_acks_ok = 0;
     g_pair_acks_fail = 0;
+    g_pair_flushed = 0;
     g_pair_ack_fail_reported = false;
 }
 
@@ -201,6 +206,60 @@ static void apply_scheduled_changes()
     }
 }
 
+// pairing-handshake-hardening (tarefa 2.1): sequência de configuração do
+// rádio extraída de escravo_setup() (D2, design.md) -- fonte única de
+// verdade: setup() e toda (re)entrada no estado de escaneamento chamam
+// exatamente este código, na mesma ordem. Ordem de registrador importa
+// nestes clones de NRF24 -- dois bugs reais já vieram de configuração de
+// feature/ack fora de ordem (ver comentário do enableAckPayload() abaixo),
+// então isto só MOVE o que já existia em escravo_setup(), sem reordenar.
+// Não inclui Serial/SPI.begin()/radio.begin()/pinMode/printDetails/boot --
+// isso continua só em escravo_setup() (não faz sentido repetir a cada
+// reentrada em escaneamento).
+static void radio_reinit()
+{
+    // D2: power-cycle lógico -- força o rádio pra um estado conhecido
+    // antes de reconfigurar. powerUp() (RF24 1.6.2, RF24.cpp) já espera
+    // RF24_POWERUP_DELAY (5000us) internamente antes de retornar -- dentro
+    // da janela de 1.5-5ms do datasheet (Tpd2stby) -- então nenhuma espera
+    // adicional é necessária aqui.
+    escravo_radio.powerDown();
+    escravo_radio.powerUp();
+
+    escravo_radio.setPALevel(RF24_PA_LOW);
+    escravo_radio.setDataRate(RF24_1MBPS);
+    escravo_radio.setChannel(PAIRING_CANDIDATES[g_pair_idx]);
+
+    escravo_radio.enableDynamicPayloads();
+    // NAO chamar enableAckPayload(): achado de bancada -- ver comentario
+    // em mestre/src/node.h (mesmo ponto). Com ack payload habilitado, o
+    // receptor descarta silenciosamente pacotes enviados como NO_ACK
+    // (radio_send(), usado em todo write() deste projeto) -- reproduzido
+    // isolado e 100% repetível com Tests/AntennaCross.
+    //
+    // adaptive-rendezvous: necessario para radio_send()/writeFast(...,
+    // multicast=true) -- ver shared/protocol.h.
+    escravo_radio.enableDynamicAck();
+
+    escravo_radio.setCRCLength(RF24_CRC_16);
+    escravo_radio.closeReadingPipe(0);
+    escravo_radio.flush_rx();
+    escravo_radio.setAutoAck(true);
+
+    escravo_radio.openReadingPipe(1, slaveAddress);
+    escravo_radio.openWritingPipe(masterAddress);
+    // D2: limpa os bits de IRQ de STATUS explicitamente antes de voltar a
+    // escutar -- startListening() logo abaixo já faz isso sozinho (RF24
+    // 1.6.2, RF24.cpp escreve STATUS antes de erguer CE), mas deixamos
+    // explícito aqui pra não depender silenciosamente desse efeito
+    // colateral se a lib mudar.
+    escravo_radio.clearStatusFlags();
+    escravo_radio.startListening();
+
+    escravo_radio.flush_rx();
+    escravo_radio.flush_tx();
+}
+
 static void reset_to_scanning()
 {
     link_established = false;
@@ -216,6 +275,12 @@ static void reset_to_scanning()
     // tarefa 1.2: dump de registradores toda vez que o escravo volta a
     // escanear -- compara contra o dump do boot pra confirmar/descartar
     // H4 (design.md).
+    // pairing-handshake-hardening (tarefa 2.2): dump ANTES do
+    // radio_reinit() (why=loss_pre) -- mesmo racional do lado do mestre
+    // (ver reset_to_pairing() em mestre/src/node.h): sem isto o reinit
+    // apagaria o estado de rádio que motivou o reset antes de registrá-lo.
+    tlm_radio_regs("escravo", escravo_radio, "loss_pre");
+    radio_reinit();
     tlm_radio_regs("escravo", escravo_radio, "loss");
 }
 
@@ -247,32 +312,11 @@ static void escravo_setup()
         guarded_println(F("[ERRO ESCRAVO] Falha fatal! O Módulo NRF24 não respondeu no SPI. Verifique a fiação."));
     }
 
-    escravo_radio.setPALevel(RF24_PA_LOW);
-    escravo_radio.setDataRate(RF24_1MBPS);
-    escravo_radio.setChannel(PAIRING_CANDIDATES[g_pair_idx]);
-
-    escravo_radio.enableDynamicPayloads();
-    // NAO chamar enableAckPayload(): achado de bancada -- ver comentario
-    // em mestre/src/node.h (mesmo ponto). Com ack payload habilitado, o
-    // receptor descarta silenciosamente pacotes enviados como NO_ACK
-    // (radio_send(), usado em todo write() deste projeto) -- reproduzido
-    // isolado e 100% repetível com Tests/AntennaCross.
-    //
-    // adaptive-rendezvous: necessario para radio_send()/writeFast(...,
-    // multicast=true) -- ver shared/protocol.h.
-    escravo_radio.enableDynamicAck();
-
-    escravo_radio.setCRCLength(RF24_CRC_16);
-    escravo_radio.closeReadingPipe(0);
-    escravo_radio.flush_rx();
-    escravo_radio.setAutoAck(true);
-
-    escravo_radio.openReadingPipe(1, slaveAddress);
-    escravo_radio.openWritingPipe(masterAddress);
-    escravo_radio.startListening();
-
-    escravo_radio.flush_rx();
-    escravo_radio.flush_tx();
+    // pairing-handshake-hardening (tarefa 2.1): configuração do rádio
+    // extraída para radio_reinit() (definida acima) -- setup() e toda
+    // (re)entrada em escaneamento usam exatamente a mesma sequência, na
+    // mesma ordem (fonte única de verdade, D2 em design.md).
+    radio_reinit();
 
     guarded_println("\n--- STATUS DO RÁDIO ESCRAVO (REGISTRADORES) ---");
     escravo_radio.printDetails();
@@ -299,11 +343,37 @@ static void escravo_setup()
 static char g_escravo_cmd_buf[32];
 static uint8_t g_escravo_cmd_len = 0;
 
+// pairing-handshake-hardening: pedidos pendentes gravados por
+// handle_escravo_command() para serem executados de fato dentro de
+// escravo_loop() (ver process_escravo_pending_requests() e comentário na
+// declaração de handle_escravo_command() logo abaixo) -- nunca inline
+// dentro do próprio handle_escravo_command(). Na Placa B combinada,
+// handle_escravo_command() roda na task do jammer (core 0) via
+// jammer_set_unknown_cmd_sink(), enquanto escravo_loop() roda em loop()
+// (core 1, Arduino): reset_to_scanning()/radio_reinit() e tlm_radio_regs()
+// fazem leitura/escrita SPI sobre escravo_radio, e "mode fixed|hopping"
+// mexe em g_fixed_channel_mode -- executar isso inline correria com
+// escravo_loop() (barramento SPI e estado do escravo lidos/escritos por
+// duas tasks ao mesmo tempo). Escrita de um único byte volatile é atômica
+// no ESP32, então o padrão "produtor escreve, consumidor lê-e-limpa"
+// dispensa mutex; quando mais de um campo precisa ficar consistente (valor
+// do modo + flag), o valor é escrito ANTES da flag que o publica.
+static volatile bool g_escravo_pending_reset = false;
+static volatile bool g_escravo_pending_regs = false;
+static volatile bool g_escravo_pending_mode_change = false;
+static volatile bool g_escravo_pending_mode_value = false; // true=fixed, false=hopping
+
 // Retorna true se o comando foi reconhecido -- usado tanto por
 // process_escravo_serial() (escravo standalone, lê a própria Serial)
 // quanto como sink de jammer_set_unknown_cmd_sink() na placa combinada
 // (ver comentário em g_fixed_channel_mode acima e em jammer/src/node.h:
 // só o jammer lê Serial fisicamente ali, pra não correr com este leitor).
+//
+// pairing-handshake-hardening: só GRAVA o pedido (flags acima) e retorna --
+// a ação de fato (reset_to_scanning(), tlm_radio_regs(), troca de modo)
+// acontece em process_escravo_pending_requests(), chamada do início de
+// escravo_loop(), sempre na task do escravo. Ver comentário nas
+// declarações das flags acima sobre por quê.
 static bool handle_escravo_command(const char *raw_line)
 {
     const char *line = raw_line;
@@ -312,22 +382,19 @@ static bool handle_escravo_command(const char *raw_line)
 
     if (strcmp(line, "mode fixed") == 0)
     {
-        g_fixed_channel_mode = true;
-        tlm_event("escravo", "mode_fixed");
-        guarded_printf("[ESCRAVO] Modo fixo: canal travado em %u\n", TEST_FIXED_CHANNEL);
+        g_escravo_pending_mode_value = true;
+        g_escravo_pending_mode_change = true;
         return true;
     }
     if (strcmp(line, "mode hopping") == 0)
     {
-        g_fixed_channel_mode = false;
-        tlm_event("escravo", "mode_hopping");
-        guarded_println("[ESCRAVO] Modo hopping normal restaurado.");
+        g_escravo_pending_mode_value = false;
+        g_escravo_pending_mode_change = true;
         return true;
     }
     if (strcmp(line, "reset") == 0)
     {
-        guarded_println("[ESCRAVO] Reset solicitado via comando -- voltando ao escaneamento.");
-        reset_to_scanning();
+        g_escravo_pending_reset = true;
         return true;
     }
     if (strcmp(line, "regs") == 0)
@@ -336,11 +403,46 @@ static bool handle_escravo_command(const char *raw_line)
         // sob demanda, sem mudar nenhum estado. Na placa combinada
         // (placa_b), chega aqui via jammer_set_unknown_cmd_sink() -- ver
         // comentário acima em handle_escravo_command().
-        tlm_radio_regs("escravo", escravo_radio, "cmd");
-        guarded_println("[ESCRAVO] Registradores do radio despejados (e=regs;why=cmd).");
+        g_escravo_pending_regs = true;
         return true;
     }
     return false;
+}
+
+// pairing-handshake-hardening: consome as flags gravadas por
+// handle_escravo_command() (possivelmente de outra task -- ver comentário
+// acima) e executa a ação de verdade aqui, sempre dentro da task do
+// escravo. Chamada do início de escravo_loop(), logo após
+// process_escravo_serial().
+static void process_escravo_pending_requests()
+{
+    if (g_escravo_pending_mode_change)
+    {
+        g_escravo_pending_mode_change = false;
+        g_fixed_channel_mode = g_escravo_pending_mode_value;
+        if (g_fixed_channel_mode)
+        {
+            tlm_event("escravo", "mode_fixed");
+            guarded_printf("[ESCRAVO] Modo fixo: canal travado em %u\n", TEST_FIXED_CHANNEL);
+        }
+        else
+        {
+            tlm_event("escravo", "mode_hopping");
+            guarded_println("[ESCRAVO] Modo hopping normal restaurado.");
+        }
+    }
+    if (g_escravo_pending_reset)
+    {
+        g_escravo_pending_reset = false;
+        guarded_println("[ESCRAVO] Reset solicitado via comando -- voltando ao escaneamento.");
+        reset_to_scanning();
+    }
+    if (g_escravo_pending_regs)
+    {
+        g_escravo_pending_regs = false;
+        tlm_radio_regs("escravo", escravo_radio, "cmd");
+        guarded_println("[ESCRAVO] Registradores do radio despejados (e=regs;why=cmd).");
+    }
 }
 
 static void process_escravo_serial()
@@ -422,6 +524,7 @@ static void escravo_advance_hop()
 static void escravo_loop()
 {
     process_escravo_serial();
+    process_escravo_pending_requests();
 
     // ---- BLINK NÃO-BLOQUEANTE (HEARTBEAT) ----
     if (!g_escravo_ready_sink)
@@ -441,6 +544,15 @@ static void escravo_loop()
             g_pair_idx = (uint8_t)((g_pair_idx + 1) % PAIRING_CANDIDATE_COUNT);
             g_pair_dwell_start = millis();
             escravo_radio.setChannel(PAIRING_CANDIDATES[g_pair_idx]);
+            // pairing-handshake-hardening (tarefa 2.3): descarta qualquer
+            // pacote que tenha caído na FIFO enquanto escutava o canal
+            // anterior, antes de escutar o novo (D2, design.md) -- mesmo
+            // racional do lado do mestre (ver pick_new_pair_channel() em
+            // mestre/src/node.h); conta se havia algo pra descartar (mede
+            // H1: FIFO velha atravessando troca de canal).
+            if (escravo_radio.available())
+                g_pair_flushed++;
+            escravo_radio.flush_rx();
             tlm_printf("escravo", "pair_scan", "ch=%u", PAIRING_CANDIDATES[g_pair_idx]);
 
             // tarefa 1.4: um ciclo completo de varredura = passar pelos
@@ -450,8 +562,9 @@ static void escravo_loop()
             if (g_pair_cycle_dwells >= PAIRING_CANDIDATE_COUNT)
             {
                 tlm_printf("escravo", "pair_stats",
-                           "rx_total=%u;rx_probe=%u;rx_other=%u;acks_ok=%u;acks_fail=%u",
-                           g_pair_rx_total, g_pair_rx_probe, g_pair_rx_other, g_pair_acks_ok, g_pair_acks_fail);
+                           "rx_total=%u;rx_probe=%u;rx_other=%u;acks_ok=%u;acks_fail=%u;flushed=%u",
+                           g_pair_rx_total, g_pair_rx_probe, g_pair_rx_other, g_pair_acks_ok, g_pair_acks_fail,
+                           g_pair_flushed);
                 reset_pair_cycle_counters();
             }
         }
@@ -552,6 +665,11 @@ static void escravo_loop()
             // tarefa 1.2: dump de registradores neste caminho também --
             // achado de bancada E1 (handshake meio-aberto) em design.md
             // passa exatamente por aqui do lado do escravo.
+            // pairing-handshake-hardening (tarefa 2.2): dump pré-reinit
+            // (why=pair_timeout_pre) antes do radio_reinit() -- mesmo
+            // racional do reset_to_scanning() acima.
+            tlm_radio_regs("escravo", escravo_radio, "pair_timeout_pre");
+            radio_reinit();
             tlm_radio_regs("escravo", escravo_radio, "pair_timeout");
             return;
         }

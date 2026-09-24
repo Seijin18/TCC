@@ -34,23 +34,56 @@
       dois lados", timeout por tentativa 60 s; grava
       `logs/repair-<ts>.json` com tempos, sucessos e os `regs`/`pair_stats`
       de cada tentativa.
-- [ ] 1.8 `pio run` (todos os envs) + gravar A e B + `repair_trials.py -n 20`
+- [x] 1.8 `pio run` (todos os envs) + gravar A e B + `repair_trials.py -n 20`
       com jammer off ⇒ **número-base**. Diagnóstico registrado aqui: qual
       de H1/H4 (design.md) os dados sustentam.
+      **Resultado (2026-09-24, 14:44-14:53)**: **0/6** re-pareamentos
+      (interrompido após 6 timeouts de 60 s — mais tentativas não mudariam
+      o número). Em todas: mestre `probes_ok=7` por acampamento, escravo
+      `rx_total=0` em todo ciclo. **H1 refutada** (`rx_other=0`,
+      `fifo=11`/vazia em todos os dumps). **H4 confirmada numa forma mais
+      forte que a prevista**: os registradores do escravo pós-perda são
+      *idênticos* aos do boot (`config=7F en_rxaddr=02 feature=05 dynpd=3F
+      rx_p1=SLV01`, canal de pareamento correto, conferido também com
+      `regs` sob comando no meio da falha) e mesmo assim ele não recebe
+      nada — estado interno do rádio (clone NRF24) invisível nos
+      registradores. Bisseção: reiniciar **só a placa B** (pulso de RTS,
+      mestre intacto) ⇒ pareou em ~7 s; logo a falha é do lado do escravo.
+      **Achado novo (H6)**: `send_seed_to_slave()` faz `guarded_printf()`
+      *entre* `radio_send()` e `startListening()`; na placa A essa linha
+      disputa o mutex da UART com o CSV de ~400 B do analisador (dezenas
+      de ms a 115200), então o `SeedAck` do escravo chega com o mestre
+      ainda em TX — `seed_timeout` em praticamente todo pareamento
+      observado (é a causa do E1). Regra que vale pro protocolo inteiro:
+      nenhum print/telemetria entre transmitir e voltar a escutar quando
+      se espera resposta.
 
 ## 2. Higiene do rádio (design.md D2)
 
-- [ ] 2.1 `radio_reinit()` no mestre e no escravo (mesma sequência do
+- [x] 2.1 `radio_reinit()` no mestre e no escravo (mesma sequência do
       `setup()`, incluindo `powerDown()/powerUp()`, flushes e limpeza de
       `STATUS`), extraída do `setup()` para os dois usarem o mesmo código.
-- [ ] 2.2 Chamar `radio_reinit()` em `reset_to_pairing()` (mestre),
+- [x] 2.2 Chamar `radio_reinit()` em `reset_to_pairing()` (mestre),
       `reset_to_scanning()` e timeout de seed (escravo).
-- [ ] 2.3 `flush_rx()` a cada troca de canal no pareamento (mestre: início
+- [x] 2.3 `flush_rx()` a cada troca de canal no pareamento (mestre: início
       de acampamento; escravo: cada janela).
 - [ ] 2.4 Confirmar na placa B que reinicializar o rádio do escravo não
       afeta o jammer (HSPI) — `jam_state` contínuo durante um
       `reset_to_scanning`.
-- [ ] 2.5 `repair_trials.py -n 20` ⇒ comparar com 1.8 e registrar.
+- [x] 2.5 `repair_trials.py -n 20` ⇒ comparar com 1.8 e registrar.
+      **Resultado (14:57)**: com `radio_reinit()` o escravo **volta a ouvir
+      em ~1 s** após `loss_of_sync` (antes: nunca) — `powerDown()/powerUp()`
+      limpa o estado preso do H4. Mas o enlace não fecha: todo re-pareamento
+      cai no H6 (`seed_timeout` no mestre) → escravo meio-aberto → perda →
+      reinit → re-pareia → H6 de novo, em ciclo de ~7 s. Rodar os 20 trials
+      nesse estado só mediria o H6; o critério de sucesso do script (dado
+      fluindo) fica para depois da etapa 3, que elimina o `SeedAck`.
+- [x] 2.6 *(achado em bancada)* Comandos `reset`/`regs`/`mode` da placa B
+      chegam pela task do jammer (core 0) via `jammer_set_unknown_cmd_sink`
+      e mexiam no rádio/estado do escravo em paralelo com `escravo_loop()`
+      (core 1) — corrida de SPI. Corrigido: `handle_escravo_command()` só
+      marca pedido pendente, consumido no próprio `escravo_loop()`. Placa
+      A não tem o problema (serial lida pela task do mestre).
 
 ## 3. Handshake v2 (design.md D3)
 
