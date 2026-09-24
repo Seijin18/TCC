@@ -282,6 +282,12 @@ static bool handle_escravo_command(const char *raw_line)
         guarded_println("[ESCRAVO] Modo hopping normal restaurado.");
         return true;
     }
+    if (strcmp(line, "reset") == 0)
+    {
+        guarded_println("[ESCRAVO] Reset solicitado via comando -- voltando ao escaneamento.");
+        reset_to_scanning();
+        return true;
+    }
     return false;
 }
 

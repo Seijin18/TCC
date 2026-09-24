@@ -112,6 +112,42 @@ nomeados pelo guia — a primeira lacuna já foi fechada por
   por pacote de controle) no numerador/denominador da janela — pacotes de
   controle não são "dado útil" pra fins de throughput.
 
+## Implementado (2026-09-24) — seções 2-4
+
+- **Orquestrador é CLI** (`tools/validation/run_battery.py`), não
+  `ScenarioTab` na GUI — mesma decisão já tomada por `run_scenario.py`
+  para os mesmos motivos (bancada não assistida, sem depender de clique
+  manual).
+- **Cenário B precisa de um terceiro estado, não previsto originalmente**:
+  o design falava só em "sem hopping" (A) vs. "sistema completo" (C), mas
+  o guia (`openspec/ROADMAP.md`, tabela T8) pede um Cenário B intermediário
+  — hopping FHSS normal, mas SEM a reação de `dynamic-seed-blacklist`
+  (self-healing desligado), pra isolar o quanto o hopping sozinho já
+  ajuda, separado do ganho adicional da mitigação ativa. Implementado como
+  `mitigation on|off` no mestre, ortogonal a `mode fixed|hopping` (ver
+  `mestre/src/node.h`).
+- **Corrigido antes de chegar em bancada**: escravo e jammer compartilham
+  a mesma UART física na placa combinada (`placa_b`) — dar a cada um sua
+  própria leitura de `Serial.available()` (como uma primeira versão desta
+  implementação fez) corromperia os comandos dos dois por uma corrida real
+  entre as duas tasks/cores lendo o mesmo buffer. Fix: jammer continua
+  sendo o único leitor físico (não mudou); comandos que ele não reconhece
+  são repassados a `handle_escravo_command()` via um sink registrado em
+  `placa_b/src/main.cpp` (`jammer_set_unknown_cmd_sink`), e
+  `process_escravo_serial()` se desliga sozinho quando roda combinado
+  (mesmo sinal de `g_escravo_ready_sink` já usado pro guard do
+  `LED_BUILTIN`).
+- **Comando `reset` adicionado** (mestre e escravo, não estava no escopo
+  original) — necessário pra fronteira limpa entre cenários da mesma
+  bateria: sem ele, a máscara de blacklist e o estado de pareamento de um
+  cenário vazariam pro próximo dentro da mesma sessão contínua.
+- **Sem CSV consolidado separado**: o rótulo de cenário vive nos metadados
+  de fase de `logs/battery-<ts>.json` (`"scenario": "A"/"B"/"C"` por fase),
+  não numa coluna de CSV como o design original imaginava (que pressupunha
+  a arquitetura de `tools/spectrum/main.py`/`pandas`, não mais a base real
+  — ver nota no "Context"). `plot_battery.py` recorta o `session-<ts>.jsonl`
+  por essas janelas de tempo diretamente.
+
 ## Risks / Trade-offs
 
 - Sincronização entre 3 placas físicas (mestre, escravo, validacao) e o PC

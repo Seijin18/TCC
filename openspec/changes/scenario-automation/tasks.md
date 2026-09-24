@@ -35,25 +35,42 @@
 
 ## 3. Orquestração dos cenários
 
-- [ ] 3.1 Implementar a sequência dos 3 cenários (A/B/C) com duração
-      configurável cada, decidindo GUI (`ScenarioTab`) vs. script CLI
-      dedicado conforme praticidade de uso em bancada.
-- [ ] 3.2 Para cada cenário, emitir os comandos necessários: modo
-      hopping/fixed no mestre/escravo (via porta serial correspondente,
-      requer também comando serial equivalente já suportado por
-      mestre/escravo), modo/estado do jammer (via `mode` +
-      `jammer on|off`, de `targeted-jammer`).
-- [ ] 3.3 Rotular cada linha gravada com o nome do cenário ativo no
-      momento e salvar um único CSV consolidado por execução completa.
+- [x] 3.1 Implementado como script CLI dedicado,
+      `tools/validation/run_battery.py` (decisão: CLI, não `ScenarioTab` —
+      mesmo caminho já usado por `run_scenario.py`, sem depender de GUI
+      pra bancada não assistida). Sequencia A→B→C com duração
+      baseline/jam/recovery configurável (`--baseline`/`--jam`/
+      `--recovery`), mesmo modo/potência de jammer nos 3 (ver design.md,
+      decisão de comparabilidade).
+- [x] 3.2 Cada cenário envia `reset` (mestre e escravo, fronteira limpa) +
+      `mode fixed|hopping` (+ `mitigation on|off` no mestre, pra distinguir
+      B de C) via `logs/cmd.in`, e os comandos de jammer já existentes
+      (`mode`/`power`/`jam on|off`) — tudo reaproveitando o mecanismo de
+      `send_cmd()` de `run_scenario.py` (importado, não duplicado).
+- [x] 3.3 Cada fase de cada cenário é registrada com o campo `"scenario":
+      "A"/"B"/"C"` em `logs/battery-<ts>.json` — não um CSV separado por
+      linha (não há CSV consolidado nesta arquitetura, ver seção 2: o
+      rótulo vive nos metadados de fase, e `plot_battery.py` recorta o
+      `session-<ts>.jsonl` por essas janelas de tempo).
 
 ## 4. Relatórios e validação final
 
-- [ ] 4.1 Implementar os gráficos de throughput × tempo e latência ×
-      tempo, com os 3 cenários distinguíveis, reaproveitando a
-      infraestrutura de plot de `ViewTab`.
-- [ ] 4.2 Rodar a bateria completa uma vez de ponta a ponta e revisar
-      manualmente se os números batem com o esperado pelo guia (Cenário
-      A: erro ~100%; B: erro médio/alto; C: erro baixo/recuperação
-      rápida) antes de considerar os dados prontos para a monografia.
-- [ ] 4.3 Exportar os gráficos finais para uso na monografia (reaproveitar
-      `_save_image` já existente em `ViewTab`).
+- [x] 4.1 `tools/validation/plot_battery.py`: gráficos de throughput ×
+      tempo e latência × tempo com os 3 cenários sobrepostos (cores
+      distintas, eixo relativo ao início da baseline de cada cenário),
+      mais um resumo textual (PLR/throughput/latência médios sob jamming
+      por cenário). Testado com dados sintéticos (sem hardware) — ver
+      commit; um bug real de fronteira encontrado e corrigido nesse teste
+      (janela de tempo por cenário era inclusiva nos dois limites,
+      deixando a primeira amostra do próximo cenário vazar pro anterior
+      quando não há gap real entre eles).
+- [ ] 4.2 Rodar a bateria completa uma vez de ponta a ponta em bancada real
+      e revisar manualmente se os números batem com o esperado pelo guia
+      (throughput/PLR/latência degradando de C -> B -> A sob o mesmo
+      jamming) antes de considerar os dados prontos para a monografia.
+      **Bloqueado**: precisa de placa_b (escravo+jammer) conectada — não
+      disponível nesta sessão (só placa_a aparece em
+      `/dev/serial/by-id`).
+- [ ] 4.3 Exportar os gráficos finais (`logs/battery-<ts>.png`, já gerado
+      por `plot_battery.py`) para uso na monografia. Depende de 4.2 rodar
+      com dados reais primeiro.

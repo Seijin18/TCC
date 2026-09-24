@@ -115,6 +115,12 @@ static bool g_fixed_channel_mode = false;
 // off (B) · hopping+mitigation on (C, default).
 static bool g_mitigation_enabled = true;
 
+// scenario-automation: comando "reset" força reset_to_pairing() (definida
+// mais abaixo) por serial -- fronteira limpa entre cenários da bateria
+// A/B/C sem precisar reiniciar a placa (zera g_channel_mask/g_channel_fail/
+// g_channel_blacklisted_since, força re-pareamento).
+static void reset_to_pairing();
+
 // Comando runtime "seed <n>" -- só tem efeito antes da seed ser confirmada
 // pelo escravo (adaptive-rendezvous, tarefa 4.3). Depois disso a sessão já
 // está em andamento; reiniciar a placa para trocar de seed manualmente.
@@ -167,6 +173,11 @@ static void handle_mestre_command(char *line)
         g_mitigation_enabled = true;
         tlm_event("mestre", "mitigation_on");
         guarded_println("[MESTRE] Mitigação (reseed/blacklist) reativada (Cenário C, default).");
+    }
+    else if (strcmp(line, "reset") == 0)
+    {
+        guarded_println("[MESTRE] Reset solicitado via comando -- voltando ao pareamento.");
+        reset_to_pairing();
     }
     else
     {
