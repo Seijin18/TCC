@@ -9,3 +9,6 @@ __pycache__/
 *.pyc
 logs/*
 !logs/.gitkeep
+!logs/working/
+logs/working/*
+!logs/working/README.md
