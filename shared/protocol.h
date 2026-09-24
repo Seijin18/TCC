@@ -114,6 +114,12 @@ static const uint32_t LOSS_HOPS = 25;
 
 // dynamic-seed-blacklist
 static const uint8_t CHANNEL_FAIL_THRESHOLD = 5; // g_channel_fail >= isso -> candidato a blacklist
+// blacklist-decay: hops que um canal precisa passar excluído antes de ser
+// reincluído às cegas (ver shared/hopping.h update_channel_mask() e
+// design.md "Cooldown por hop_counter"). Ordem de grandeza inicial, a
+// calibrar em bancada (openspec/changes/blacklist-decay/tasks.md 4.2) --
+// bem maior que CHANNEL_FAIL_THRESHOLD para não flappar.
+static const uint32_t RECOVERY_COOLDOWN_HOPS = 200;
 static const uint8_t CONTROL_RETRY_HOPS = 6;     // hops repetindo o pacote de controle ate confirmar
 static const uint8_t CONTROL_APPLY_MARGIN = 2;   // folga de hops entre confirmacao e troca efetiva
 

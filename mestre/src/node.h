@@ -178,6 +178,12 @@ static uint32_t g_hops_since_ack = 0;
 // ---- dynamic-seed-blacklist: máscara de canais ativos e evidência própria ----
 static uint16_t g_channel_mask = 0xFFFF;
 static uint8_t g_channel_fail[TABLE_SIZE] = {0};
+// blacklist-decay: hop_counter em que cada canal foi excluído pela última
+// vez -- só usado enquanto o bit correspondente está em 0 em g_channel_mask
+// (ver update_channel_mask() em shared/hopping.h). Zerado em
+// reset_to_pairing() junto com g_channel_fail/g_channel_mask (evita
+// underflow com g_hop_counter reiniciado -- ver design.md do change).
+static uint32_t g_channel_blacklisted_since[TABLE_SIZE] = {0};
 static bool g_alert_active = false;
 static bool g_reseed_needed = false;
 
@@ -411,20 +417,16 @@ static bool wait_control_ack(uint32_t expected_apply_at)
 }
 
 // -------------------------------------------------------------
-// dynamic-seed-blacklist: gatilho de reseed (borda do alerta) e avaliação
-// contínua de blacklist (enquanto o alerta persistir)
+// dynamic-seed-blacklist / blacklist-decay: gatilho de reseed (borda do
+// alerta) e avaliação contínua de blacklist -- exclusão E reinclusão, sem
+// depender do alerta estar ativo (ver design.md de blacklist-decay: o
+// alerta continua sendo o único gatilho de reseed, uma ação mais
+// disruptiva, mas blacklist virou uma correção contínua de baixo custo).
 // -------------------------------------------------------------
 static uint16_t compute_candidate_mask()
 {
-    uint16_t candidate = g_channel_mask;
-    for (uint8_t i = 0; i < TABLE_SIZE; i++)
-    {
-        if (g_channel_fail[i] >= CHANNEL_FAIL_THRESHOLD)
-            candidate &= (uint16_t)~(1u << i);
-    }
-    if (candidate == 0)
-        return g_channel_mask; // guarda: nunca esvaziar todos os canais
-    return candidate;
+    return update_channel_mask(g_channel_mask, g_channel_fail, g_channel_blacklisted_since,
+                                g_hop_counter, CHANNEL_FAIL_THRESHOLD, RECOVERY_COOLDOWN_HOPS);
 }
 
 static void maybe_enqueue_control()
@@ -443,17 +445,14 @@ static void maybe_enqueue_control()
         return;
     }
 
-    if (g_alert_active)
+    uint16_t candidate = compute_candidate_mask();
+    if (candidate != g_channel_mask)
     {
-        uint16_t candidate = compute_candidate_mask();
-        if (candidate != g_channel_mask)
-        {
-            g_control_pending = MSG_CTRL_BLACKLIST;
-            g_control_mask_value = candidate;
-            g_control_apply_at = g_hop_counter + CONTROL_RETRY_HOPS + CONTROL_APPLY_MARGIN;
-            g_control_retries_left = CONTROL_RETRY_HOPS;
-            tlm_printf("mestre", "rekey_tx", "kind=blacklist;mask=0x%04X;apply=%lu", g_control_mask_value, g_control_apply_at);
-        }
+        g_control_pending = MSG_CTRL_BLACKLIST;
+        g_control_mask_value = candidate;
+        g_control_apply_at = g_hop_counter + CONTROL_RETRY_HOPS + CONTROL_APPLY_MARGIN;
+        g_control_retries_left = CONTROL_RETRY_HOPS;
+        tlm_printf("mestre", "rekey_tx", "kind=blacklist;mask=0x%04X;apply=%lu", g_control_mask_value, g_control_apply_at);
     }
 }
 
@@ -467,9 +466,13 @@ static void apply_scheduled_changes()
     }
     if (g_mask_apply_scheduled && g_hop_counter >= g_mask_apply_at)
     {
+        uint16_t prev_mask = g_channel_mask;
         g_channel_mask = g_mask_apply_value;
         g_mask_apply_scheduled = false;
-        tlm_printf("mestre", "blacklist", "mask=0x%04X;hop=%lu", g_channel_mask, g_hop_counter);
+        // blacklist-decay: prev= permite tools/logger e plot_scenario.py
+        // distinguirem visualmente exclusão (bits somem) de reinclusão
+        // (bits voltam) sem precisar rastrear estado próprio.
+        tlm_printf("mestre", "blacklist", "mask=0x%04X;prev=0x%04X;hop=%lu", g_channel_mask, prev_mask, g_hop_counter);
     }
 }
 
@@ -554,6 +557,11 @@ static void reset_to_pairing()
     g_mask_apply_scheduled = false;
     g_channel_mask = 0xFFFF;
     memset(g_channel_fail, 0, sizeof(g_channel_fail));
+    // blacklist-decay: g_hop_counter volta a 0 acima -- sem isto,
+    // hop_counter - blacklisted_since[i] usaria valores da sessão anterior
+    // e faria wraparound (unsigned), tornando todos os canais "elegíveis"
+    // pra reinclusão instantaneamente (ver design.md, risco de underflow).
+    memset(g_channel_blacklisted_since, 0, sizeof(g_channel_blacklisted_since));
     tlm_event("mestre", "loss_of_sync");
 }
 

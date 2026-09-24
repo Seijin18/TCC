@@ -284,14 +284,31 @@ def main():
         ax_ch.axvline(rel(e["epoch"]), color="orange", linestyle="-.", linewidth=1.5)
     for e in rekey_apply:
         ax_ch.axvline(rel(e["epoch"]), color="purple", linestyle="-", linewidth=2)
+    # blacklist-decay: "prev" (se presente -- sessões antigas não têm)
+    # distingue exclusão (bits somem, magenta) de reinclusão por cooldown
+    # (bits voltam, verde) sem precisar de estado próprio aqui.
+    saw_exclusion = False
+    saw_recovery = False
     for e in blacklist:
-        ax_ch.axvline(rel(e["epoch"]), color="magenta", linestyle="-", linewidth=2)
+        prev_raw = e["fields"].get("prev")
+        mask_raw = e["fields"].get("mask")
+        is_recovery = False
+        if prev_raw is not None and mask_raw is not None:
+            try:
+                is_recovery = bin(int(mask_raw, 16)).count("1") > bin(int(prev_raw, 16)).count("1")
+            except ValueError:
+                pass
+        saw_recovery = saw_recovery or is_recovery
+        saw_exclusion = saw_exclusion or not is_recovery
+        ax_ch.axvline(rel(e["epoch"]), color="seagreen" if is_recovery else "magenta", linestyle="-", linewidth=2)
     if rekey_tx:
         ax_ch.plot([], [], color="orange", linestyle="-.", linewidth=1.5, label="rekey_tx (seed/mask proposto)")
     if rekey_apply:
         ax_ch.plot([], [], color="purple", linestyle="-", linewidth=2, label="rekey_apply (seed trocada)")
-    if blacklist:
-        ax_ch.plot([], [], color="magenta", linestyle="-", linewidth=2, label="blacklist (máscara trocada)")
+    if saw_exclusion:
+        ax_ch.plot([], [], color="magenta", linestyle="-", linewidth=2, label="blacklist (canal excluído)")
+    if saw_recovery:
+        ax_ch.plot([], [], color="seagreen", linestyle="-", linewidth=2, label="blacklist (canal reincluído)")
     ax_ch.axhspan(2, 80, color="steelblue", alpha=0.06, zorder=0)
     t_span = (t_end - t0) or 1.0
     ax_ch.text(

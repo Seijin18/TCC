@@ -159,6 +159,129 @@ static void test_get_next_active_channel_zero_mask_falls_back_to_full_table(void
     }
 }
 
+// --- update_channel_mask (blacklist-decay) --------------------------------
+
+static const uint8_t FAIL_THRESHOLD = 5;
+static const uint32_t COOLDOWN = 200;
+
+static void reset_state(uint8_t fail_count[], uint32_t blacklisted_since[])
+{
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+    {
+        fail_count[i] = 0;
+        blacklisted_since[i] = 0;
+    }
+}
+
+static void test_update_channel_mask_basic_exclusion(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    fail_count[3] = FAIL_THRESHOLD;
+
+    uint16_t result = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN);
+
+    TEST_ASSERT_FALSE_MESSAGE(result & (1u << 3), "canal com falha no limiar deveria ser excluido");
+    TEST_ASSERT_EQUAL_UINT32(1000, blacklisted_since[3]);
+}
+
+static void test_update_channel_mask_no_reinclusion_before_cooldown(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    fail_count[3] = FAIL_THRESHOLD;
+
+    uint16_t excluded = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN);
+    // ainda dentro do cooldown -- fail_count[3] permanece >= limiar, entao a
+    // chamada tambem nao deveria "empurrar" blacklisted_since pra frente.
+    uint16_t result = update_channel_mask(excluded, fail_count, blacklisted_since, 1000 + COOLDOWN - 1, FAIL_THRESHOLD, COOLDOWN);
+
+    TEST_ASSERT_FALSE_MESSAGE(result & (1u << 3), "canal nao deveria ser reincluido antes do cooldown vencer");
+    TEST_ASSERT_EQUAL_UINT32(1000, blacklisted_since[3]);
+}
+
+static void test_update_channel_mask_reinclusion_after_cooldown(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    fail_count[3] = FAIL_THRESHOLD;
+
+    uint16_t excluded = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN);
+    TEST_ASSERT_FALSE(excluded & (1u << 3));
+
+    uint16_t result = update_channel_mask(excluded, fail_count, blacklisted_since, 1000 + COOLDOWN, FAIL_THRESHOLD, COOLDOWN);
+
+    TEST_ASSERT_TRUE_MESSAGE(result & (1u << 3), "canal deveria ser reincluido apos o cooldown vencer");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, fail_count[3], "fail_count deveria ser zerado na reinclusao");
+}
+
+static void test_update_channel_mask_transition_writes_timestamp_once(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    fail_count[3] = FAIL_THRESHOLD;
+
+    uint16_t mask = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN);
+    TEST_ASSERT_EQUAL_UINT32(1000, blacklisted_since[3]);
+
+    // canal ja excluido, ainda com falha no limiar -- chamadas repetidas nao
+    // podem reescrever blacklisted_since (senao o cooldown nunca vence).
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, 1050, FAIL_THRESHOLD, COOLDOWN);
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, 1100, FAIL_THRESHOLD, COOLDOWN);
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1000, blacklisted_since[3], "timestamp nao deveria ser reescrito enquanto ja excluido");
+}
+
+static void test_update_channel_mask_guard_never_empties_mask(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+        fail_count[i] = FAIL_THRESHOLD; // todos os canais habilitados falhando ao mesmo tempo
+
+    uint16_t result = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN);
+
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(0xFFFF, result, "guarda deveria manter a mascara anterior em vez de esvaziar tudo");
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, blacklisted_since[i], "guarda nao deveria gravar timestamp de exclusao que nao ocorreu");
+}
+
+static void test_update_channel_mask_flapping_cycle(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    fail_count[3] = FAIL_THRESHOLD;
+
+    // 1) exclui
+    uint16_t mask = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 0, FAIL_THRESHOLD, COOLDOWN);
+    TEST_ASSERT_FALSE(mask & (1u << 3));
+
+    // 2) cooldown cumprido -> reinclui, fail_count zerado
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, COOLDOWN, FAIL_THRESHOLD, COOLDOWN);
+    TEST_ASSERT_TRUE(mask & (1u << 3));
+    TEST_ASSERT_EQUAL_UINT8(0, fail_count[3]);
+
+    // 3) nova sequencia de falhas -> exclui de novo, com timestamp novo
+    fail_count[3] = FAIL_THRESHOLD;
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, COOLDOWN + 10, FAIL_THRESHOLD, COOLDOWN);
+    TEST_ASSERT_FALSE_MESSAGE(mask & (1u << 3), "canal deveria ser excluido de novo apos nova sequencia de falhas");
+    TEST_ASSERT_EQUAL_UINT32(COOLDOWN + 10, blacklisted_since[3]);
+
+    // 4) antes do segundo cooldown vencer, continua excluido
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, COOLDOWN + 10 + COOLDOWN - 1, FAIL_THRESHOLD, COOLDOWN);
+    TEST_ASSERT_FALSE(mask & (1u << 3));
+
+    // 5) segundo cooldown vencido -> reinclui de novo, sem estado inconsistente
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, COOLDOWN + 10 + COOLDOWN, FAIL_THRESHOLD, COOLDOWN);
+    TEST_ASSERT_TRUE_MESSAGE(mask & (1u << 3), "canal deveria ser reincluido de novo apos o segundo cooldown");
+}
+
 int main(int argc, char **argv)
 {
     UNITY_BEGIN();
@@ -172,5 +295,11 @@ int main(int argc, char **argv)
     RUN_TEST(test_get_next_active_channel_only_returns_enabled_channels);
     RUN_TEST(test_get_next_active_channel_single_channel_mask);
     RUN_TEST(test_get_next_active_channel_zero_mask_falls_back_to_full_table);
+    RUN_TEST(test_update_channel_mask_basic_exclusion);
+    RUN_TEST(test_update_channel_mask_no_reinclusion_before_cooldown);
+    RUN_TEST(test_update_channel_mask_reinclusion_after_cooldown);
+    RUN_TEST(test_update_channel_mask_transition_writes_timestamp_once);
+    RUN_TEST(test_update_channel_mask_guard_never_empties_mask);
+    RUN_TEST(test_update_channel_mask_flapping_cycle);
     return UNITY_END();
 }
