@@ -24,9 +24,9 @@ sincronismo.
   perda de sincronismo já existente
 
 ### Requirement: Todo pacote do mestre durante o salto carrega o contador de hop
-Todo pacote que o mestre envia durante o salto — fragmento de dado ou
-pacote de controle — DEVE (MUST) carregar o contador de hop corrente do
-mestre, e o escravo DEVE adotá-lo ao receber qualquer um deles.
+O mestre DEVE (MUST) incluir o contador de hop corrente em todo pacote
+que envia durante o salto — fragmento de dado ou pacote de controle —, e
+o escravo DEVE adotá-lo ao receber qualquer um deles.
 
 #### Scenario: Controle pendente durante a ressincronização
 - **WHEN** o escravo está estacionado e o mestre está enviando um pacote
@@ -35,8 +35,9 @@ mestre, e o escravo DEVE adotá-lo ao receber qualquer um deles.
   de hop dele e sai do estacionamento
 
 ### Requirement: Orçamento de ressincronização verificado em compilação
-O tempo máximo de ressincronização do escravo (hops até estacionar mais o
-limite de estacionamento) DEVE (MUST) ser menor que o tempo que o mestre
+O firmware DEVE (MUST) garantir que o tempo máximo de ressincronização do
+escravo (hops até estacionar mais o limite de estacionamento) seja menor
+que o tempo que o mestre
 leva para declarar perda de sincronismo, com essa relação verificada em
 tempo de compilação.
 
