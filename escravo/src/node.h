@@ -73,6 +73,13 @@ static bool g_mask_apply_scheduled = false;
 static uint16_t g_mask_apply_value = 0;
 static uint32_t g_mask_apply_at = 0;
 
+// scenario-automation: Cenário A (sem hopping) -- espelha "mode
+// fixed|hopping" do mestre (mestre/src/node.h). Comando serial próprio,
+// não pacote de protocolo: é configuração de bancada pelo operador (igual
+// ao "mode sweep|targeted" do jammer), não uma decisão em runtime que
+// precise ser negociada entre os dois lados.
+static bool g_fixed_channel_mode = false;
+
 // ---- Métricas de PLR (Packet Loss Rate) ----
 static const uint32_t g_window_size = 50; // hops por janela (~11s a 220ms/hop)
 static uint32_t g_window_expected = 0;
@@ -244,6 +251,72 @@ static void escravo_setup()
 // Nos dois casos o efeito é o mesmo: contabiliza PLR desta rodada, avança
 // hop_counter em exatamente 1, escolhe e configura o próximo canal, e
 // reinicia o deadline de escuta dele.
+// scenario-automation: comando serial "mode fixed|hopping", espelhando
+// handle_mestre_command() em mestre/src/node.h -- ver comentário em
+// g_fixed_channel_mode acima sobre por que é comando local, não pacote.
+static char g_escravo_cmd_buf[32];
+static uint8_t g_escravo_cmd_len = 0;
+
+// Retorna true se o comando foi reconhecido -- usado tanto por
+// process_escravo_serial() (escravo standalone, lê a própria Serial)
+// quanto como sink de jammer_set_unknown_cmd_sink() na placa combinada
+// (ver comentário em g_fixed_channel_mode acima e em jammer/src/node.h:
+// só o jammer lê Serial fisicamente ali, pra não correr com este leitor).
+static bool handle_escravo_command(const char *raw_line)
+{
+    const char *line = raw_line;
+    while (*line == ' ' || *line == '\t')
+        line++;
+
+    if (strcmp(line, "mode fixed") == 0)
+    {
+        g_fixed_channel_mode = true;
+        tlm_event("escravo", "mode_fixed");
+        guarded_printf("[ESCRAVO] Modo fixo: canal travado em %u\n", TEST_FIXED_CHANNEL);
+        return true;
+    }
+    if (strcmp(line, "mode hopping") == 0)
+    {
+        g_fixed_channel_mode = false;
+        tlm_event("escravo", "mode_hopping");
+        guarded_println("[ESCRAVO] Modo hopping normal restaurado.");
+        return true;
+    }
+    return false;
+}
+
+static void process_escravo_serial()
+{
+    // Na placa combinada (g_escravo_ready_sink registrado por
+    // placa_b/src/main.cpp), o jammer é o único a ler Serial fisicamente
+    // e repassa comandos não reconhecidos pra handle_escravo_command()
+    // via jammer_set_unknown_cmd_sink() -- ler aqui também correria com
+    // aquela leitura na mesma UART. Standalone (sem sink), o escravo lê
+    // normalmente.
+    if (g_escravo_ready_sink)
+        return;
+
+    while (Serial.available())
+    {
+        char c = (char)Serial.read();
+        if (c == '\n' || c == '\r')
+        {
+            if (g_escravo_cmd_len > 0)
+            {
+                g_escravo_cmd_buf[g_escravo_cmd_len] = '\0';
+                if (!handle_escravo_command(g_escravo_cmd_buf))
+                    guarded_printf("[ESCRAVO] Comando desconhecido: %s\n", g_escravo_cmd_buf);
+                g_escravo_cmd_len = 0;
+            }
+            continue;
+        }
+        if (g_escravo_cmd_len < sizeof(g_escravo_cmd_buf) - 1)
+            g_escravo_cmd_buf[g_escravo_cmd_len++] = c;
+        else
+            g_escravo_cmd_len = 0;
+    }
+}
+
 static void escravo_advance_hop()
 {
     g_window_expected++;
@@ -268,7 +341,10 @@ static void escravo_advance_hop()
     }
 
     hop_counter++;
-    current_channel = get_next_active_channel(g_seed, hop_counter, g_channel_mask);
+    // scenario-automation, Cenário A: espelha o modo fixo do mestre (ver
+    // mestre/src/node.h) -- mesmo TEST_FIXED_CHANNEL literal dos dois
+    // lados, sem depender de seed/mascara.
+    current_channel = g_fixed_channel_mode ? TEST_FIXED_CHANNEL : get_next_active_channel(g_seed, hop_counter, g_channel_mask);
     escravo_radio.setChannel(current_channel);
     // Achado de bancada: mesmo motivo do lado do mestre (ver
     // mestre/src/node.h) -- 500us em vez dos 130us do datasheet.
@@ -287,6 +363,8 @@ static void escravo_advance_hop()
 
 static void escravo_loop()
 {
+    process_escravo_serial();
+
     // ---- BLINK NÃO-BLOQUEANTE (HEARTBEAT) ----
     if (!g_escravo_ready_sink)
     {

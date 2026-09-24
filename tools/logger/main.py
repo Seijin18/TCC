@@ -46,7 +46,9 @@ MAX_SESSION_BYTES = 100 * 1024 * 1024  # rotação simples por tamanho
 EVENT_RE = re.compile(r"^@(?P<src>[^;]+);t=(?P<t>\d+);e=(?P<event>[^;]*)(?P<rest>;.*)?$")
 
 # Eventos de rotina, omitidos de events.log (ainda vão para o JSONL bruto).
-ROUTINE_EVENTS = {"hop", "ack", "miss", "pair_scan"}
+# scenario-automation: "latency" é por fragmento confirmado, mesma
+# frequência de "ack" -- tratado como rotina pelo mesmo motivo.
+ROUTINE_EVENTS = {"hop", "ack", "miss", "pair_scan", "latency"}
 
 CSV_MIN_FIELDS = 100
 
@@ -116,12 +118,23 @@ class StateStore:
             elif event == "plr":
                 node["plr_window"] = fields.get("window")
                 node["plr_session"] = fields.get("session")
+            elif event == "throughput":
+                node["throughput_frags_per_s"] = fields.get("frags_per_s")
             elif event in ("alert_on", "alert_off"):
                 node["alert"] = event == "alert_on"
             elif event == "blacklist":
                 node["channel_mask"] = fields.get("mask")
             elif event in ("jam_mode_sweep", "jam_mode_targeted"):
                 node["jam_mode"] = "targeted" if event == "jam_mode_targeted" else "sweep"
+            elif event in ("mode_fixed", "mode_hopping"):
+                # scenario-automation: Cenário A (mestre/escravo "mode
+                # fixed|hopping" via cmd.in) -- ver mestre/src/node.h e
+                # escravo/src/node.h.
+                node["hop_mode"] = "fixed" if event == "mode_fixed" else "hopping"
+            elif event in ("mitigation_on", "mitigation_off"):
+                # scenario-automation: Cenário B vs. C ("mitigation on|off"
+                # no mestre, via cmd.in) -- ver mestre/src/node.h.
+                node["mitigation"] = event == "mitigation_on"
             elif event in ("jam_state_on", "jam_state_off"):
                 node["jam_enabled"] = event == "jam_state_on"
             elif event in ("rekey_tx", "rekey_ack", "rekey_apply", "rekey_failed"):

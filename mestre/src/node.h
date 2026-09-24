@@ -102,6 +102,19 @@ static void wait_for_seed_window()
     guarded_printf("[MESTRE] Nenhuma seed digitada a tempo. Usando default: %u\n", g_seed);
 }
 
+// scenario-automation: Cenário A (sem hopping) -- "mode fixed" trava o
+// canal de dados em TEST_FIXED_CHANNEL e desativa reseed/blacklist (o
+// objetivo é medir o baseline SEM nenhuma adaptação). "mode hopping" volta
+// ao comportamento normal (default).
+static bool g_fixed_channel_mode = false;
+
+// scenario-automation: Cenário B (hopping fixo, sem self-healing) vs.
+// Cenário C (sistema completo, default) -- "mitigation off" desativa só a
+// REAÇÃO (reseed/blacklist) sem desativar o hopping em si, ortogonal a
+// g_fixed_channel_mode. Combinações válidas: fixed (A) · hopping+mitigation
+// off (B) · hopping+mitigation on (C, default).
+static bool g_mitigation_enabled = true;
+
 // Comando runtime "seed <n>" -- só tem efeito antes da seed ser confirmada
 // pelo escravo (adaptive-rendezvous, tarefa 4.3). Depois disso a sessão já
 // está em andamento; reiniciar a placa para trocar de seed manualmente.
@@ -130,6 +143,30 @@ static void handle_mestre_command(char *line)
         {
             guarded_printf("[MESTRE] Valor de seed inválido: %d\n", value);
         }
+    }
+    else if (strcmp(line, "mode fixed") == 0)
+    {
+        g_fixed_channel_mode = true;
+        tlm_event("mestre", "mode_fixed");
+        guarded_printf("[MESTRE] Modo fixo: canal travado em %u (sem hopping, sem reseed/blacklist)\n", TEST_FIXED_CHANNEL);
+    }
+    else if (strcmp(line, "mode hopping") == 0)
+    {
+        g_fixed_channel_mode = false;
+        tlm_event("mestre", "mode_hopping");
+        guarded_println("[MESTRE] Modo hopping normal restaurado.");
+    }
+    else if (strcmp(line, "mitigation off") == 0)
+    {
+        g_mitigation_enabled = false;
+        tlm_event("mestre", "mitigation_off");
+        guarded_println("[MESTRE] Mitigação (reseed/blacklist) desativada -- hopping continua normal (Cenário B).");
+    }
+    else if (strcmp(line, "mitigation on") == 0)
+    {
+        g_mitigation_enabled = true;
+        tlm_event("mestre", "mitigation_on");
+        guarded_println("[MESTRE] Mitigação (reseed/blacklist) reativada (Cenário C, default).");
     }
     else
     {
@@ -186,6 +223,13 @@ static uint8_t g_channel_fail[TABLE_SIZE] = {0};
 static uint32_t g_channel_blacklisted_since[TABLE_SIZE] = {0};
 static bool g_alert_active = false;
 static bool g_reseed_needed = false;
+
+// scenario-automation: throughput (fragmentos confirmados/s) por janela de
+// hops -- mesmo padrão de janela de plr-metric (escravo, g_window_size).
+static const uint32_t THROUGHPUT_WINDOW_HOPS = 50;
+static uint32_t g_throughput_window_confirmed = 0;
+static uint32_t g_throughput_window_hops = 0;
+static unsigned long g_throughput_window_start_ms = 0;
 
 // Fila de controle: um pacote pendente por vez (seed tem prioridade sobre
 // blacklist -- ver design.md de dynamic-seed-blacklist). 0 = nenhum.
@@ -433,6 +477,16 @@ static void maybe_enqueue_control()
 {
     if (g_control_pending != 0)
         return;
+    // scenario-automation, Cenário A: modo fixo mede o baseline SEM
+    // nenhuma adaptação -- nenhum reseed nem reavaliação de blacklist
+    // enquanto ativo.
+    if (g_fixed_channel_mode)
+        return;
+    // scenario-automation, Cenário B: hopping continua normal, mas sem
+    // reação a ataque -- mede o quanto o FHSS sozinho (sem detecção nem
+    // blacklist) já ajuda, isolado do ganho adicional da mitigação ativa.
+    if (!g_mitigation_enabled)
+        return;
 
     if (g_reseed_needed)
     {
@@ -454,6 +508,38 @@ static void maybe_enqueue_control()
         g_control_retries_left = CONTROL_RETRY_HOPS;
         tlm_printf("mestre", "rekey_tx", "kind=blacklist;mask=0x%04X;apply=%lu", g_control_mask_value, g_control_apply_at);
     }
+}
+
+// scenario-automation: throughput = fragmentos confirmados / segundo,
+// numa janela de THROUGHPUT_WINDOW_HOPS hops (mesmo padrão de janela de
+// plr-metric no escravo) -- conta tanto hops de controle quanto de dados
+// no tamanho da janela, mas só fragmentos realmente confirmados (ack_ok)
+// no numerador.
+static void note_hop_for_throughput(bool fragment_confirmed)
+{
+    if (g_throughput_window_hops == 0)
+        g_throughput_window_start_ms = millis();
+
+    g_throughput_window_hops++;
+    if (fragment_confirmed)
+        g_throughput_window_confirmed++;
+
+    if (g_throughput_window_hops >= THROUGHPUT_WINDOW_HOPS)
+    {
+        unsigned long elapsed_ms = millis() - g_throughput_window_start_ms;
+        float frags_per_s = elapsed_ms > 0 ? (1000.0f * (float)g_throughput_window_confirmed / (float)elapsed_ms) : 0.0f;
+        tlm_printf("mestre", "throughput", "frags_per_s=%.2f;confirmed=%u;window_ms=%lu",
+                   frags_per_s, g_throughput_window_confirmed, elapsed_ms);
+        g_throughput_window_hops = 0;
+        g_throughput_window_confirmed = 0;
+    }
+}
+
+static void reset_throughput_window()
+{
+    g_throughput_window_hops = 0;
+    g_throughput_window_confirmed = 0;
+    g_throughput_window_start_ms = 0;
 }
 
 static void apply_scheduled_changes()
@@ -562,6 +648,7 @@ static void reset_to_pairing()
     // e faria wraparound (unsigned), tornando todos os canais "elegíveis"
     // pra reinclusão instantaneamente (ver design.md, risco de underflow).
     memset(g_channel_blacklisted_since, 0, sizeof(g_channel_blacklisted_since));
+    reset_throughput_window();
     tlm_event("mestre", "loss_of_sync");
 }
 
@@ -727,7 +814,9 @@ static void mestre_loop()
     // rodada no mesmo instante real).
     maybe_enqueue_control();
 
-    uint8_t channel = get_next_active_channel(g_seed, g_hop_counter, g_channel_mask);
+    // scenario-automation, Cenário A: modo fixo ignora seed/mascara e usa
+    // sempre o mesmo canal -- ver TEST_FIXED_CHANNEL em shared/hopping.h.
+    uint8_t channel = g_fixed_channel_mode ? TEST_FIXED_CHANNEL : get_next_active_channel(g_seed, g_hop_counter, g_channel_mask);
     g_current_channel = channel;
     mestre_radio.setChannel(channel);
     // Achado de bancada: sem esta espera, o PLL do NRF24 ainda nao
@@ -763,6 +852,10 @@ static void mestre_loop()
     // canal esgota (fallback abaixo, any_sent decide se foi por falha de
     // envio ou por falta de ack).
     unsigned long hop_window_end = millis() + HOP_TIMEOUT_MS;
+    // scenario-automation: latência = tempo entre a primeira tentativa de
+    // envio deste fragmento neste hop e o ack recebido (round-trip de
+    // wait_fragment_ack, incluindo reenvios dentro do próprio hop).
+    unsigned long attempt_started_at = millis();
     const uint32_t attempt_wait_ms = 25;
     bool ack_ok = false;
     bool completed = false;
@@ -792,6 +885,7 @@ static void mestre_loop()
             g_channel_fail[idx]++;
         g_hop_counter++;
         apply_scheduled_changes();
+        note_hop_for_throughput(false);
         if (g_hops_since_ack >= LOSS_HOPS)
             reset_to_pairing();
         return;
@@ -815,6 +909,9 @@ static void mestre_loop()
 
         tlm_printf("mestre", "ack", "ch=%u;frag=%u", channel, g_current_fragment);
         guarded_printf("[MESTRE] ACK recebido para frag=%u\n", g_current_fragment + 1);
+        uint32_t latency_ms = (uint32_t)(millis() - attempt_started_at);
+        tlm_printf("mestre", "latency", "ch=%u;frag=%u;ms=%lu", channel, g_current_fragment, latency_ms);
+        note_hop_for_throughput(true);
         g_current_fragment++;
         if (completed || g_current_fragment >= g_total_fragments)
         {
@@ -831,6 +928,7 @@ static void mestre_loop()
             g_channel_fail[idx]++;
         tlm_printf("mestre", "miss", "ch=%u;frag=%u", channel, g_current_fragment);
         guarded_printf("[MESTRE] Timeout ACK no hop=%lu, frag=%u sera reenviada no proximo salto.\n", g_hop_counter, g_current_fragment + 1);
+        note_hop_for_throughput(false);
     }
 
     g_hop_counter++;

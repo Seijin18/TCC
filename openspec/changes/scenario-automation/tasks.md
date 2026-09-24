@@ -1,27 +1,37 @@
 ## 1. Firmware — modo canal fixo e métricas de latência/throughput
 
-- [ ] 1.1 Adicionar comando serial de modo (`mode hopping|fixed`) a
+- [x] 1.1 Adicionar comando serial de modo (`mode hopping|fixed`) a
       `mestre/src/main.cpp` e `escravo/src/main.cpp`, análogo ao já usado
       em `targeted-jammer`; default `hopping` (comportamento atual
       preservado).
-- [ ] 1.2 Em modo `fixed`, usar um canal constante (`PAIRING_CHANNEL` ou
-      configurável) em vez de `get_next_channel`/`get_next_active_channel`
-      em ambos os nós.
-- [ ] 1.3 No mestre, medir e logar latência (ms) por fragmento confirmado
-      (`t_ack_recebido - t_envio`).
-- [ ] 1.4 No mestre, agregar throughput (fragmentos confirmados/s) por
-      janela deslizante e logar, reaproveitando o padrão de janela de
-      `plr-metric`.
+- [x] 1.2 Em modo `fixed`, usar um canal constante (`TEST_FIXED_CHANNEL =
+      HOPPING_CHANNELS[0]`, `shared/hopping.h`) em vez de
+      `get_next_channel`/`get_next_active_channel` em ambos os nós — ver
+      design.md "Implementado (2026-09-24)" pela decisão de constante fixa
+      em vez de configurável.
+- [x] 1.3 No mestre, medir e logar latência (ms) por fragmento confirmado
+      (`t_ack_recebido - t_envio`, evento `latency` em
+      `tlm_printf("mestre","latency","ch=..;frag=..;ms=..")`).
+- [x] 1.4 No mestre, agregar throughput (fragmentos confirmados/s) por
+      janela deslizante (`THROUGHPUT_WINDOW_HOPS=50`, mesmo padrão de
+      `plr-metric`) e logar (evento `throughput`).
+      **Confirmado 2026-09-24**: `pio run` limpo em todos os 10 envs de
+      firmware, `pio test -e native_test` 16/16. Validação em bancada
+      (confirmar os números batendo com o esperado) fica pra seção 4,
+      junto da bateria completa — precisa de placa_b conectada.
 
 ## 2. Ferramenta Python — captura multi-porta
 
-- [ ] 2.1 Adicionar uma segunda instância de leitura serial (porta do
-      escravo) reaproveitando `SerialReaderThread`, com um parser de linha
-      para o formato de PLR/latência/throughput definido em `plr-metric` e
-      na seção 1 deste change.
-- [ ] 2.2 Mesclar as duas fontes por timestamp relativo de recepção no
-      host, tratando o caso de uma das portas não estar conectada com erro
-      explícito (não gravação parcial silenciosa).
+- [x] 2.1/2.2 **Já satisfeito por infraestrutura existente, não por
+      `tools/spectrum/main.py` como o design original previa.**
+      `tools/logger/main.py` (de `telemetry-logging`, implementado depois
+      deste design) já lê as portas de placa_a E placa_b simultaneamente
+      (uma thread por porta) e mescla tudo por ordem de recepção real num
+      único `logs/session-<ts>.jsonl` — nenhum parser novo nem
+      `SerialReaderThread` adicional foi necessário. Os eventos `latency`/
+      `throughput` da seção 1 já chegam nesse mesmo JSONL, parseados
+      genericamente (`k=v` -> dict) sem exigir mudança no logger. Ver
+      design.md, nota no topo do "Context".
 
 ## 3. Orquestração dos cenários
 

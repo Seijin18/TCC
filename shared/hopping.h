@@ -22,6 +22,13 @@ const uint8_t HOPPING_CHANNELS[TABLE_SIZE] = {
     70, 82, 94, 100, 105,
     110, 115, 120, 125, 15, 27};
 
+// scenario-automation: canal único usado pelo modo de teste "sem hopping"
+// (Cenário A do guia -- baseline sem nenhuma adaptação, pra comparar com
+// hopping fixo/adaptativo). Literal e compartilhado entre mestre/escravo
+// (em vez de negociado por pacote) porque o modo é configuração de bancada
+// pelo operador, não uma decisão em runtime que precise de sincronização.
+const uint8_t TEST_FIXED_CHANNEL = HOPPING_CHANNELS[0];
+
 // Estrutura do Beacon (Sinal de Sincronismo)
 struct BeaconPacket
 {

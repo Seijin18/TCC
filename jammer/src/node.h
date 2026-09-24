@@ -85,6 +85,23 @@ static void jammer_set_ready_source(bool (*source)())
     g_jammer_ready_source = source;
 }
 
+// two-board-topology / scenario-automation: na placa combinada, jammer e
+// escravo compartilham a MESMA UART física, mas só um dos dois pode ler
+// Serial.available()/read() sem correr (os bytes de uma linha se
+// espalhariam entre os dois leitores concorrentes, corrompendo os dois
+// comandos). jammer continua sendo o único a ler fisicamente (não mudou);
+// comandos que ele não reconhece (ex. "mode fixed"/"mode hopping", do
+// modo de teste de scenario-automation) são repassados a este sink,
+// registrado por placa_b/src/main.cpp -> handle_escravo_command(). Sem
+// sink registrado (jammer standalone/4 placas), comando desconhecido só
+// imprime o erro, como antes.
+static bool (*g_jammer_unknown_cmd_sink)(const char *) = nullptr;
+
+static void jammer_set_unknown_cmd_sink(bool (*sink)(const char *))
+{
+    g_jammer_unknown_cmd_sink = sink;
+}
+
 #define CMD_BUF_SIZE 32
 static char cmdBuf[CMD_BUF_SIZE];
 static uint8_t cmdLen = 0;
@@ -208,7 +225,7 @@ static void handleCommand(char *line)
         applyPowerLevel();
         guarded_println("[JAMMER] Potencia: MAX");
     }
-    else
+    else if (!g_jammer_unknown_cmd_sink || !g_jammer_unknown_cmd_sink(line))
     {
         guarded_printf("[ERRO] comando desconhecido: %s\n", line);
     }

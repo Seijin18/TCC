@@ -31,6 +31,11 @@ void setup()
     // chamado quando escravo_setup() roda.
     escravo_set_ready_sink(placaB_ready_set);
     jammer_set_ready_source(placaB_ready_get);
+    // scenario-automation: jammer é o único a ler Serial fisicamente nesta
+    // placa combinada (ver comentário em jammer/src/node.h); comandos que
+    // ele não reconhece (ex. "mode fixed"/"mode hopping" do escravo) são
+    // repassados aqui.
+    jammer_set_unknown_cmd_sink(handle_escravo_command);
 
     escravo_setup();
 

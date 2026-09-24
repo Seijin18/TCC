@@ -1,13 +1,32 @@
 ## Context
 
-`tools/spectrum/main.py` já sabe: ler uma porta serial em thread separada
+**Nota (2026-09-24): arquitetura de tooling evoluiu desde que este design
+foi escrito.** As `Decisions` abaixo foram escritas contra
+`tools/spectrum/main.py` (GUI, `SerialReaderThread`, `pandas`/CSV) — mas
+`telemetry-logging` (implementado depois) entregou `tools/logger/main.py`,
+um daemon headless que já lê **as duas portas seriais simultaneamente**
+(placa_a + placa_b), mescla tudo por ordem de recepção real num único
+`logs/session-<ts>.jsonl`, e aceita comandos de volta via `logs/cmd.in`
+(`echo "placa_a mode fixed" >> logs/cmd.in`). `tools/validation/run_scenario.py`
+já orquestra fases (baseline→jamming→recovery) sobre essa base, e
+`tools/validation/plot_scenario.py` já gera os gráficos a partir do JSONL.
+Ou seja: o Goal "ler duas portas seriais simultaneamente" (abaixo) e boa
+parte da Decision "segunda porta serial na ferramenta Python" **já estão
+satisfeitos por infraestrutura existente**, sem precisar tocar
+`tools/spectrum/main.py` — ver seção 2 de `tasks.md`. O que ainda falta
+genuinamente é o que a seção 1 (modo firmware) e as seções 3-4 (orquestrar
+A/B/C especificamente, gerar os gráficos de throughput/latência) descrevem.
+
+`tools/spectrum/main.py` já sabia: ler uma porta serial em thread separada
 (`SerialReaderThread`), enviar comandos (`send_command`/
 `_send_jammer_command`), ciclar jammer on/off por tempo
 (`_desired_jammer_on`, `_apply_auto_jammer`), gravar amostras em
 `pandas.DataFrame` e salvar CSV (`_save_data`), e plotar heatmap a partir
-de um CSV salvo (`ViewTab._plot_heatmap`). O que falta é: uma segunda fonte
-serial (escravo, com PLR de `plr-metric`), um modo de firmware sem hopping,
-e a orquestração/rotulagem dos 3 cenários nomeados pelo guia.
+de um CSV salvo (`ViewTab._plot_heatmap`). Historicamente era isso que
+faltava: uma segunda fonte serial (escravo, com PLR de `plr-metric`), um
+modo de firmware sem hopping, e a orquestração/rotulagem dos 3 cenários
+nomeados pelo guia — a primeira lacuna já foi fechada por
+`telemetry-logging` (ver nota acima), as outras duas continuam abertas.
 
 ## Goals / Non-Goals
 
@@ -65,6 +84,33 @@ e a orquestração/rotulagem dos 3 cenários nomeados pelo guia.
   cenário — decisão de GUI vs. CLI fica para a implementação, com CLI
   preferível para rodar em bancada sem depender de clique manual em cada
   fase.
+
+## Implementado (2026-09-24) — seção 1
+
+- **Canal fixo é uma constante literal** (`TEST_FIXED_CHANNEL =
+  HOPPING_CHANNELS[0]`, `shared/hopping.h`), não configurável em runtime
+  além de ligar/desligar — mais simples que a alternativa considerada
+  ("canal fixo configurável"), e suficiente pro Cenário A (só precisa de
+  UM canal fixo conhecido, não de escolher qual).
+- **Comando independente em cada lado** (`mode fixed`/`mode hopping` via
+  serial, tanto no mestre quanto no escravo — espelhando o padrão já
+  usado pelo `mode sweep|targeted` do jammer), não um pacote de protocolo
+  coordenado: o modo é configuração de bancada do operador (ou do
+  orquestrador da seção 3, via `logs/cmd.in`), não uma decisão em runtime
+  que precise ser negociada/confirmada entre os dois lados como
+  seed/blacklist são.
+- **Modo fixo desliga toda a adaptação**, não só o hopping:
+  `maybe_enqueue_control()` retorna cedo (nenhum reseed, nenhuma
+  reavaliação de blacklist) enquanto `g_fixed_channel_mode` está ativo no
+  mestre — o Cenário A precisa medir o baseline SEM nenhuma mitigação,
+  não hopping fixo COM blacklist ainda tentando agir.
+- **Latência = duração do hop inteiro** (da primeira tentativa de envio até
+  o ack, incluindo reenvios dentro do mesmo `HOP_TIMEOUT_MS`), não só o
+  último round-trip bem-sucedido — mais simples de medir no ponto de
+  código existente e captura o custo real de entrega sob perda parcial.
+- **Throughput conta só hops de fragmento de dado** (não hops consumidos
+  por pacote de controle) no numerador/denominador da janela — pacotes de
+  controle não são "dado útil" pra fins de throughput.
 
 ## Risks / Trade-offs
 
