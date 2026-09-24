@@ -66,16 +66,41 @@
 - [ ] 4.4 Registrar `plr_window` antes e depois da mitigação e confirmar
       queda visível (critério de "self-healing" para a monografia) —
       esses números alimentam o cenário C de `scenario-automation`.
-      **Tentado em 2026-09-23, ainda não passa**: a mitigação disparou
+      **Tentado em 2026-09-23, não passava**: a mitigação disparou
       corretamente (4.1-4.3), mas ~5s depois o enlace caiu de vez
       (`loss_of_sync`, 2x) e ficou preso tentando repareear pelo resto da
       janela de jamming (150s) sem se recuperar enquanto o ataque
-      continuava ativo — sem PLR pós-mitigação pra registrar. Não fica
-      claro se é por causa do jamming ser forte demais pra permitir
-      repareamento nos 8 canais candidato durante o ataque, ou algo mais
-      especifico do repareamento nessas condições -- precisa de mais
-      investigação (testar com jamming mais fraco, ou uma janela de
-      recuperação mais longa) antes de fechar este item.
+      continuava ativo — sem PLR pós-mitigação pra registrar.
+
+      **Causa raiz provável encontrada e corrigida em 2026-09-24**, ao
+      rodar as duas placas reais lado a lado de novo (sessão que também
+      produziu `blacklist-decay`): `escravo_advance_hop()` só contava um
+      hop como "recebido" quando `g_hop_received_flag` estava setado, e
+      esse flag só era setado no recebimento de FRAGMENTO -- nunca no
+      recebimento de pacote de controle (`MSG_CTRL_SEED`/
+      `MSG_CTRL_BLACKLIST`), mesmo quando o controle chegava e era
+      ackado com sucesso (`escravo/src/node.h`). Sob rajada de controle
+      -- exatamente o que uma sequência de `rekey_tx` de blacklist sob
+      jamming real produz -- isso inflava `g_hops_since_rx` do escravo
+      até `LOSS_HOPS` **mesmo o enlace estando funcional**, derrubando o
+      pareamento por engano. Um segundo bug relacionado também corrigido:
+      `g_hops_since_ack` do mestre nunca era atualizado no caminho de
+      pacote de controle (nem em sucesso, nem em falha), então um
+      controle que nunca fosse confirmado also nunca acionava o fallback
+      de `LOSS_HOPS` do lado do mestre. Ver commit "correcao: 3 bugs
+      reais de pareamento/enlace encontrados em bancada ao vivo" e
+      `openspec/changes/adaptive-rendezvous/design.md` (um terceiro bug
+      relacionado, de pareamento inicial, também encontrado na mesma
+      sessão).
+
+      **Ainda não re-validado sob jamming real** com os três fixes
+      juntos -- a sessão de 2026-09-24 encontrou interferência de RF real
+      no ambiente (alerta sustentado do analisador mesmo com jammer
+      desligado e mitigação desativada) que impediu completar esta
+      validação. Próximo passo: repetir `run_scenario.py --jammer-mode
+      targeted` com as placas atuais assim que o ambiente permitir, e
+      confirmar que `plr_window` cai de fato após a mitigação em vez de o
+      enlace cair de vez.
 - [ ] 4.5 Calibrar `g_channel_fail` threshold e `ATTACK_STREAK_N` (de
       `spectrum-attack-classification`) em conjunto, já que os dois
       interagem no tempo de reação total. `ATTACK_STREAK_N` mudou de 3

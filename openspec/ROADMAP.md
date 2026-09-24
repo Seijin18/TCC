@@ -6,6 +6,62 @@ verdade de contexto/dependências) — é a camada de "o que fazer agora, em que
 ordem" derivada dele. Atualizar esta lista conforme tasks forem fechadas ou
 changes forem arquivados.
 
+## Sessão 2026-09-24: `blacklist-decay` e `scenario-automation` implementados, 3 bugs reais de enlace encontrados e corrigidos em bancada — validação bloqueada por RF do ambiente
+
+Implementado (código completo, `pio run`/`pio test` limpos, `openspec
+validate --strict` 9/9): `blacklist-decay` (canais banidos voltam após
+cooldown, sem depender do alerta — `update_channel_mask()` em
+`shared/hopping.h`, 6 testes novos) e `scenario-automation` seções 1-3+4.1
+(modo "sem hopping"/"sem mitigação" no mestre/escravo, telemetria de
+latência/throughput, orquestrador `tools/validation/run_battery.py` para
+os 3 cenários A/B/C do guia, `plot_battery.py` para os gráficos
+comparativos).
+
+Ao flashear as duas placas reais para validar isso em bancada, três bugs
+de enlace genuínos apareceram (o tráfego de controle mais frequente do
+blacklist-decay tornou mais fácil expô-los) — todos encontrados, corrigidos
+e recompilados:
+
+1. **Deadlock de pareamento** (`adaptive-rendezvous`): escravo declarava
+   link estabelecido só por ter conseguido transmitir o `LINK_ACK` (sem
+   confirmação real de entrega), ficando preso pra sempre esperando uma
+   seed se esse ack não chegasse a tempo no mestre. Fix:
+   `SEED_WAIT_TIMEOUT_MS`.
+2. **Mestre nunca desistia de um controle não confirmado**
+   (`dynamic-seed-blacklist`): `g_hops_since_ack` não era atualizado no
+   caminho de pacote de controle, então um controle que nunca fosse
+   ackado nunca acionava o fallback de `LOSS_HOPS`.
+3. **Escravo contava controle recebido como perda** (`dynamic-seed-blacklist`,
+   muito provavelmente a causa raiz de `dynamic-seed-blacklist/tasks.md`
+   4.4 — "enlace nunca se recupera após a mitigação disparar sob jamming
+   real"): `g_hop_received_flag` só era setado no recebimento de
+   fragmento, nunca no de pacote de controle, mesmo quando ackado com
+   sucesso — uma rajada de controle (exatamente o que jamming real
+   produz) inflava `g_hops_since_rx` até `LOSS_HOPS` e derrubava um
+   enlace funcional.
+
+Os fixes 1-2 foram confirmados quebrando um deadlock real ao vivo (o
+enlace que antes travava para sempre voltou a parear e trafegar dados
+reais, mitigação incluída). O fix 3 ainda não foi re-validado sob jamming
+real: a sessão encontrou **interferência de RF real no ambiente** (o
+analisador manteve alerta sustentado mesmo com o jammer desligado e a
+mitigação desativada — testado explicitamente para descartar
+autodetecção do mestre por si mesmo) que impediu terminar a bateria de
+validação (`scenario-automation` §4.2/4.3, `blacklist-decay` §4,
+`dynamic-seed-blacklist` 4.4/4.5, `spectrum-attack-classification` 3.1/3.3)
+nesta sessão. Também observado, sem conclusão: `measure_and_pick_candidate()`
+do mestre convergiu quase sempre pro mesmo candidato de pareamento (76)
+em duas sessões distintas de boot — pode ser preferência real de RF desta
+bancada, não um bug (testado aumentar o dwell de medição e desligar a
+mitigação, nenhum dos dois mudou o padrão). Ver
+`openspec/changes/adaptive-rendezvous/tasks.md` (seção 6) para o detalhe
+completo.
+
+**Próximo passo, assim que o ambiente permitir**: repetir
+`tools/validation/run_scenario.py --jammer-mode targeted` para confirmar
+que o fix 3 resolve de fato o `dynamic-seed-blacklist` 4.4, depois rodar
+`tools/validation/run_battery.py` para fechar `scenario-automation`.
+
 ## Resolvido (2026-09-23): pipeline completo jamming→alerta→rekey→blacklist funciona de ponta a ponta pela primeira vez
 
 Depois de três causas encontradas e corrigidas em sequência (histórico

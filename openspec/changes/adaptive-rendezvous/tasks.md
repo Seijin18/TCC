@@ -58,6 +58,35 @@
       2026-09-17 após remover `enableAckPayload()` (bug real, ver
       design.md "Correção") — `pair_ok`/`seed` em ambos os lados,
       repetível.
+**Achado de bancada (2026-09-24), relevante para 6.3-6.4**: reproduzido um
+deadlock real de pareamento -- `try_establish_link()` no mestre espera
+`MSG_LINK_ACK` por `LINK_ACK_WAIT_MS`, mas o escravo declarava
+`link_established = true` assim que CONSEGUIA TRANSMITIR esse ack
+(`radio_send()` é NO_ACK, sem confirmação real de entrega), sem esperar
+nenhuma confirmação de que o mestre de fato recebeu. Se o ack chegasse
+fora da janela do mestre (perda de pacote, timing), o escravo ficava preso
+permanentemente esperando uma seed que nunca chegaria — ele só volta a
+responder a `MSG_LINK_PROBE` no ramo `if (!link_established)`, que nunca
+mais era reavaliado. Reproduzido em bancada: escravo silencioso por >1 min
+após um `pair_ok` que o mestre nunca confirmou (nenhum `pair_ok`/`seed`
+correspondente do lado do mestre). **Corrigido**: `SEED_WAIT_TIMEOUT_MS`
+(`shared/protocol.h`) — o escravo volta a escanear se a seed não chegar a
+tempo, dando ao par uma nova chance. Ver commit "correcao: 3 bugs reais de
+pareamento/enlace encontrados em bancada ao vivo".
+
+Também observado na mesma sessão (não corrigido, natureza incerta):
+`measure_and_pick_candidate()` no mestre convergiu quase sempre (>90%)
+para o mesmo candidato (76) em duas sessões de boot distintas, mesmo após
+aumentar `PAIR_MEASURE_DWELL_US` de 130 para 500 (mesmo valor já usado no
+salto de canal de dados, testado por hipótese de PLL não assentado — não
+resolveu). Testado também com `mitigation off` (elimina qualquer
+tráfego de controle do mestre) sem melhora, e o analisador mostrava
+alerta sustentado o tempo todo (mesmo sem jammer e sem mitigação reagindo)
+— aponta para interferência de RF real no ambiente físico naquele
+momento, não um bug de software, mas fica registrado sem conclusão
+definitiva porque não foi possível inspecionar o ambiente fisicamente
+durante a sessão.
+
 - [ ] 6.2 Jammer sweep ativo **antes** do boot das duas placas: confirmar
       que o escravo varre, evita candidatos ruidosos, e o par converge num
       candidato fora de 2–80.
