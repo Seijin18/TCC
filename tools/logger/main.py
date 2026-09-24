@@ -337,7 +337,16 @@ class SerialBoard(threading.Thread):
             self.session_writer.write_raw(self.board_name, line, None)
             return
 
-        m = EVENT_RE.match(line)
+        # jammer heartbeat '.' sem newline na placa_b (pairing-handshake-hardening):
+        # pode colar o proximo telemetry no formato `.@escravo;...`. Tira os dots
+        # antes de match EVENT_RE, mas mantém a linha original no "raw".
+        line_to_match = line
+        if line.startswith('.'):
+            stripped = line.lstrip('.')
+            if stripped and stripped[0] == '@':
+                line_to_match = stripped
+
+        m = EVENT_RE.match(line_to_match)
         parsed = None
         if m:
             src = m.group("src")

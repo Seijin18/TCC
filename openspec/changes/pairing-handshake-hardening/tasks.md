@@ -67,9 +67,13 @@
       `reset_to_scanning()` e timeout de seed (escravo).
 - [x] 2.3 `flush_rx()` a cada troca de canal no pareamento (mestre: início
       de acampamento; escravo: cada janela).
-- [ ] 2.4 Confirmar na placa B que reinicializar o rádio do escravo não
+- [x] 2.4 Confirmar na placa B que reinicializar o rádio do escravo não
       afeta o jammer (HSPI) — `jam_state` contínuo durante um
       `reset_to_scanning`.
+      **Resultado (15:32-15:34)**: jammer em `jam_state_on` desde 15:32:47
+      atravessou vários `radio_reinit()` do escravo (`loss_of_sync`
+      15:32:53, `pair_timeout` 15:33:33, ...) sem `jam_state_off` nem
+      reboot, heartbeat contínuo.
 - [x] 2.5 `repair_trials.py -n 20` ⇒ comparar com 1.8 e registrar.
       **Resultado (14:57)**: com `radio_reinit()` o escravo **volta a ouvir
       em ~1 s** após `loss_of_sync` (antes: nunca) — `powerDown()/powerUp()`
@@ -140,14 +144,43 @@
       pareamento automático, confirmado em seguida. Se for preciso baixar
       o tempo total, o próximo alvo é a detecção (`LOSS_HOPS`), não o
       handshake.
-- [ ] 5.2 Perda injetada (`drop_next_ack`): pareamento conclui pelo re-ack
+- [x] 5.2 Perda injetada (`drop_next_ack`): pareamento conclui pelo re-ack
       em ≤ 2 × `LINK_RETRY_MS` a mais que o normal; primeiro fragmento com
       ack sem `loss_of_sync`.
-- [ ] 5.3 Reboot assimétrico (desligar uma placa ~5 s) ×5: recupera sem
+      **Resultado (15:30)**: ack descartado de propósito (nonce 36522) →
+      `pair_reack` **91 ms** depois (≈ 1 × `LINK_RETRY_MS`) → `pair_ok` do
+      mestre 50 ms depois → `pair_confirm`, sem `loss_of_sync`.
+- [x] 5.3 Reboot assimétrico (desligar uma placa ~5 s) ×5: recupera sem
       intervenção (fecha `adaptive-rendezvous` 6.3/6.5).
-- [ ] 5.4 Jammer sweep/targeted ligado **antes** do boot: pareamento
+      **Resultado (15:31)**: 5/5 recuperados, placa segurada em reset por
+      5 s via RTS (não dá pra cortar a alimentação remotamente — o rádio
+      continua alimentado, o ESP32 para). Placa B: `pair_confirm` 4,4-4,5 s
+      após soltar; placa A: 7,5 s — ambos dominados pelo próprio boot
+      (atrasos de `setup()` e janela de seed de 3 s do mestre).
+- [x] 5.4 Jammer sweep/targeted ligado **antes** do boot: pareamento
       converge num candidato fora da faixa atacada (fecha
       `adaptive-rendezvous` 6.2).
+      **Resultado (15:32-15:34), critério revisado**: na placa B combinada
+      o jammer volta desligado a cada boot e só arma depois do primeiro
+      handshake, então "antes do boot" não é possível por construção —
+      testado o equivalente: sweep 2-80 em PA_LOW ativo, forçando
+      re-pareamentos. **O pareamento convergiu em todas as 7 tentativas**
+      (re-acks absorvendo acks perdidos), mas quase sempre em ch 76,
+      *dentro* da faixa varrida — e a regra D5 corretamente **não** o
+      excluiu, porque houve dado de verdade ali (acks/`msg_done` em 5 das
+      6 janelas). A premissa do critério original ("candidato dentro da
+      faixa varrida é inutilizável") não vale para uma varredura em PA_LOW:
+      cada canal só é atingido por instantes a cada ciclo. O enlace então
+      durou ~10-20 s antes de cair por perda de hops (`LOSS_HOPS`) — isso é
+      desempenho da mitigação sob ataque, validado na fila de 5.5, não do
+      pareamento.
+      **Achado de telemetria**: o heartbeat `'.'` do jammer (sem newline)
+      grudava no início da próxima linha `@escravo;...`, e o logger (regex
+      ancorada em `^@`) perdia o evento — 31 linhas perdidas nesta sessão,
+      incluindo 10 `pair_confirm` e 8 `loss_of_sync`. Toda medição anterior
+      com jammer ligado na placa B pode ter perdido eventos do escravo.
+      Corrigido no logger (5.6).
+- [x] 5.6 Logger tolerante a `'.'` antes de `@` (heartbeat do jammer).
 - [ ] 5.5 Retomar a fila bloqueada, nesta ordem: jammer `adaptive` ao vivo
       (`targeted-jammer` 4.5) → `run_scenario.py --jammer-mode targeted`
       (`dynamic-seed-blacklist` 4.4/4.5) → `blacklist-decay` §4 →
@@ -157,7 +190,7 @@
 
 ## 6. Documentação
 
-- [ ] 6.1 `adaptive-rendezvous/design.md` e `tasks.md` (§6, §7.5):
+- [x] 6.1 `adaptive-rendezvous/design.md` e `tasks.md` (§6, §7.5):
       substituir o diagnóstico "interferência de RF ambiente" pelas
       evidências deste change; apontar para cá.
 - [ ] 6.2 `openspec/ROADMAP.md` e `openspec/project.md` (ordem de

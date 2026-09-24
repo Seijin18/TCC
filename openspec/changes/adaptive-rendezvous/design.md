@@ -284,14 +284,23 @@ seleção de candidato (não hops, que não existem antes de parear) — ver
 confirmou o ciclo completo funcionando com dados reais — candidatos sendo
 excluídos um a um conforme falhavam (`0xFF→0xFE→0xFC→0xF8→0xF0`) e
 reincluídos após o cooldown vencer (`...→0xE1→0xE2→0xE4`), sem nunca
-esvaziar a máscara. **Importante**: mesmo com essa exclusão/reinclusão
-funcionando corretamente, o pareamento não convergiu de forma estável
-nessa sessão — evidência de que a dificuldade real não era "qual
-candidato escolher" (esse mecanismo já resolve isso), mas sim ruído/
-interferência de RF afetando vários ou todos os candidatos ao mesmo
-tempo, exatamente o limite já previsto no risco abaixo ("se todos os 8
-candidatos estiverem sob ataque simultâneo"). Ver `openspec/ROADMAP.md`
-para o estado da investigação de RF.
+esvaziar a máscara. Mesmo assim o pareamento não convergia nessa sessão.
+
+**Correção do diagnóstico (2026-09-24, mais tarde)**: a explicação
+registrada aqui antes — "ruído/interferência de RF ambiente afetando
+todos os candidatos" — **estava errada**. A investigação de
+[pairing-handshake-hardening](../pairing-handshake-hardening/design.md)
+mostrou três defeitos de protocolo/rádio: (1) depois da fase de salto, o
+rádio do escravo (clone NRF24) ficava surdo com registradores idênticos
+aos do boot — só um power-cycle (`powerDown()/powerUp()`) limpa;
+(2) `send_seed_to_slave()` imprimia na serial entre transmitir e voltar a
+escutar, perdendo o `SeedAck` quase sempre (handshake meio-aberto);
+(3) acampamento de 2 s menor que o ciclo de varredura de 3,2 s. E a
+blacklist de candidatos, contando "ninguém respondeu" como falha do canal,
+culpava os canais pela surdez do escravo — o ciclo `pair_mask` acima era
+sintoma, não prova de ruído. Com as correções daquele change: 20/20
+re-pareamentos forçados (antes 0/6). As regras de falha/sucesso de
+candidato descritas acima foram substituídas pela D5 de lá.
 
 ## Risks / Trade-offs
 
@@ -304,8 +313,9 @@ para o estado da investigação de RF.
 - Se **todos** os 8 candidatos estiverem sob ataque simultâneo (sweep total
   da banda), o pareamento não converge — cenário aceito como limite do
   sistema (jammer com banda maior que a capacidade de fuga), não coberto por
-  este change. **Observado na prática em 2026-09-24** (ver seção acima),
-  embora por ruído ambiente, não jamming deliberado.
+  este change. (Uma observação de 2026-09-24 atribuída a isso por ruído
+  ambiente foi depois explicada por defeitos de protocolo — ver a correção
+  na seção acima.)
 
 ## Migration Plan
 

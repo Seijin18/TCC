@@ -87,22 +87,45 @@ momento, não um bug de software, mas fica registrado sem conclusão
 definitiva porque não foi possível inspecionar o ambiente fisicamente
 durante a sessão.
 
-- [ ] 6.2 Jammer sweep ativo **antes** do boot das duas placas: confirmar
+**Correção (2026-09-24, mais tarde)**: o parágrafo acima e o "achado"
+anterior sobre interferência de RF ambiente estavam errados — ver
+`pairing-handshake-hardening` (design.md "Evidências" e tasks.md 1.8/2.5):
+rádio do escravo surdo pós-salto (só power-cycle limpa), `SeedAck` perdido
+por print entre envio e escuta, e acampamento menor que o ciclo de
+varredura. As tarefas 6.2-6.5 abaixo foram fechadas com o firmware daquele
+change.
+
+- [x] 6.2 Jammer sweep ativo **antes** do boot das duas placas: confirmar
       que o escravo varre, evita candidatos ruidosos, e o par converge num
       candidato fora de 2–80.
-- [ ] 6.3 Forçar perda de sincronismo (desligar uma placa por alguns
+      Fechado com critério revisado — ver `pairing-handshake-hardening`
+      5.4: na placa B o jammer não pode estar ativo antes do boot (volta
+      desligado e só arma após o 1º handshake); com sweep PA_LOW ativo
+      durante re-pareamentos, o pareamento convergiu 7/7, em geral em ch 76
+      (dentro da faixa, mas com dado fluindo de fato ali).
+- [x] 6.3 Forçar perda de sincronismo (desligar uma placa por alguns
       segundos e religar): confirmar que a outra volta ao estado de
       pareamento e o enlace se recupera sem intervenção manual.
-- [ ] 6.4 Rodar por vários minutos com tráfego contínuo, confirmar PLR
+      `pairing-handshake-hardening` 5.1 (20/20 perdas forçadas) e 5.3 (5/5
+      reboots assimétricos, placa segurada em reset 5 s).
+- [x] 6.4 Rodar por vários minutos com tráfego contínuo, confirmar PLR
       mensurável de forma sustentada (pré-requisito para `plr-metric` seção
       3 e para qualquer teste de `dynamic-seed-blacklist`). Hopping por
       evento (2026-09-18, ver design.md "Correção 2") já mostrou PLR de
       sessão caindo pra ~0,6% num teste curto (~1-2 min, jammer
       desligado) — falta confirmar isso sustentado por vários minutos
       antes de marcar concluído.
-- [ ] 6.5 Confirmar em log que o `hop_counter` do escravo converge para o
+      `logs/working/session-20260918-031422.jsonl`: 725 s de enlace
+      contínuo sem perda, 12.742 `msg_done`, 642 linhas `plr` — janela
+      média 0,29%, sessão final 0,3% (pico de janela isolado 26%).
+- [x] 6.5 Confirmar em log que o `hop_counter` do escravo converge para o
       do mestre mesmo partindo de valores diferentes após um reboot
       assimétrico.
+      Evidência indireta (o escravo não loga o próprio contador): o canal
+      de cada hop é função de `(seed, hop_counter)`, e após cada um dos 5
+      reboots assimétricos de `pairing-handshake-hardening` 5.3 o escravo
+      voltou a completar mensagens (`msg_done`) em ~1 s — impossível com
+      contadores divergentes.
 
 ## 7. Blacklist de candidatos de pareamento (adicionado 2026-09-24, ver design.md "Implementado depois")
 
