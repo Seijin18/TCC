@@ -282,6 +282,56 @@ static void test_update_channel_mask_flapping_cycle(void)
     TEST_ASSERT_TRUE_MESSAGE(mask & (1u << 3), "canal deveria ser reincluido de novo apos o segundo cooldown");
 }
 
+// adaptive-rendezvous (2026-09-24): update_channel_mask() generalizado com
+// `count` explicito para ser reusado sobre PAIRING_CANDIDATES (8 entradas),
+// nao só HOPPING_CHANNELS (16) -- estes dois testes confirmam que um
+// `count` menor que TABLE_SIZE funciona igual (exclusão/reinclusão) e que
+// bits fora de `count` nunca são tocados (não fazem parte do universo
+// considerado pela função com esse `count`).
+
+static void test_update_channel_mask_smaller_count_basic_exclusion(void)
+{
+    const uint8_t CANDIDATE_COUNT = 8;
+    uint8_t fail_count[CANDIDATE_COUNT];
+    uint32_t blacklisted_since[CANDIDATE_COUNT];
+    for (uint8_t i = 0; i < CANDIDATE_COUNT; i++)
+    {
+        fail_count[i] = 0;
+        blacklisted_since[i] = 0;
+    }
+    fail_count[5] = FAIL_THRESHOLD;
+
+    uint16_t mask = update_channel_mask(0xFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN, CANDIDATE_COUNT);
+
+    TEST_ASSERT_FALSE_MESSAGE(mask & (1u << 5), "candidato com falha no limiar deveria ser excluido mesmo com count < TABLE_SIZE");
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(0xDF, mask, "bits fora de count nao deveriam ser afetados");
+}
+
+static void test_update_channel_mask_smaller_count_guard_and_reinclusion(void)
+{
+    const uint8_t CANDIDATE_COUNT = 8;
+    uint8_t fail_count[CANDIDATE_COUNT];
+    uint32_t blacklisted_since[CANDIDATE_COUNT];
+    for (uint8_t i = 0; i < CANDIDATE_COUNT; i++)
+    {
+        fail_count[i] = FAIL_THRESHOLD; // todos os 8 candidatos falhando ao mesmo tempo
+        blacklisted_since[i] = 0;
+    }
+
+    uint16_t mask = update_channel_mask(0xFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN, CANDIDATE_COUNT);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(0xFF, mask, "guarda deveria manter todos os 8 candidatos em vez de esvaziar tudo");
+
+    // exclui só o candidato 2, confirma reinclusao apos cooldown com count=8
+    for (uint8_t i = 0; i < CANDIDATE_COUNT; i++)
+        fail_count[i] = 0;
+    fail_count[2] = FAIL_THRESHOLD;
+    mask = update_channel_mask(0xFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN, CANDIDATE_COUNT);
+    TEST_ASSERT_FALSE(mask & (1u << 2));
+
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, 1000 + COOLDOWN, FAIL_THRESHOLD, COOLDOWN, CANDIDATE_COUNT);
+    TEST_ASSERT_TRUE_MESSAGE(mask & (1u << 2), "candidato deveria ser reincluido apos o cooldown, com count < TABLE_SIZE");
+}
+
 int main(int argc, char **argv)
 {
     UNITY_BEGIN();
@@ -301,5 +351,7 @@ int main(int argc, char **argv)
     RUN_TEST(test_update_channel_mask_transition_writes_timestamp_once);
     RUN_TEST(test_update_channel_mask_guard_never_empties_mask);
     RUN_TEST(test_update_channel_mask_flapping_cycle);
+    RUN_TEST(test_update_channel_mask_smaller_count_basic_exclusion);
+    RUN_TEST(test_update_channel_mask_smaller_count_guard_and_reinclusion);
     return UNITY_END();
 }

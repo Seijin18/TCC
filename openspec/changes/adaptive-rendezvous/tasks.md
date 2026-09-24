@@ -103,3 +103,29 @@ durante a sessão.
 - [ ] 6.5 Confirmar em log que o `hop_counter` do escravo converge para o
       do mestre mesmo partindo de valores diferentes após um reboot
       assimétrico.
+
+## 7. Blacklist de candidatos de pareamento (adicionado 2026-09-24, ver design.md "Implementado depois")
+
+- [x] 7.1 Generalizar `update_channel_mask()` (`shared/hopping.h`) com um
+      parâmetro `count` explícito (default `TABLE_SIZE`), preservando o
+      comportamento de todas as chamadas existentes.
+- [x] 7.2 2 novos testes em `test/test_hopping.cpp` confirmando exclusão/
+      reinclusão/guarda com `count=8` (menor que `TABLE_SIZE`).
+- [x] 7.3 `mestre/src/node.h`: `g_candidate_mask`/`g_candidate_fail`/
+      `g_candidate_quarantined_since`/`g_pair_round`, `note_candidate_result()`
+      chamado em (a) janela de camping esgotada sem `pair_ok`, (b)
+      `send_seed_to_slave()` falhando (seed nunca confirmada), (c) seed
+      confirmada com sucesso (zera o histórico do candidato).
+      `measure_and_pick_candidate()` só considera candidatos habilitados
+      em `g_candidate_mask`.
+- [x] 7.4 `pio run -e mestre -e placa_a` + `pio test -e native_test` (20/20)
+      limpos.
+- [x] 7.5 Validação em bancada: confirmado via telemetria `pair_mask` real
+      que exclusão/reinclusão/guarda funcionam corretamente em hardware
+      (`0xFF→0xFE→0xFC→0xF8→0xF0→...→0xE1→0xE2→0xE4`, nunca chegou a 0).
+      **Ainda não confirmado**: se isso, sozinho, é suficiente para reduzir
+      o tempo médio de pareamento em condições de RF ruidosas mas não sob
+      ataque deliberado — a sessão de validação encontrou dificuldade
+      persistente de pareamento mesmo com este mecanismo funcionando
+      corretamente (ver design.md, aponta pra ruído afetando vários
+      candidatos simultaneamente, não pra este mecanismo estar errado).

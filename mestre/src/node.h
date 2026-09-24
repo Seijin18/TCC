@@ -223,6 +223,19 @@ static bool g_camping = false;
 static unsigned long g_pair_camp_start = 0;
 static unsigned long g_last_link_try = 0;
 
+// adaptive-rendezvous (2026-09-24): "blacklist de pareamento" -- mesma
+// lógica de update_channel_mask() (blacklist-decay), aplicada aos 8
+// PAIRING_CANDIDATES em vez dos 16 HOPPING_CHANNELS. g_candidate_mask usa
+// só os 8 bits baixos (bit i = 1 -> PAIRING_CANDIDATES[i] disponível pra
+// medir/acampar). g_pair_round é o "relógio lógico" aqui (não existe
+// hop_counter antes de parear) -- incrementado a cada resultado de
+// tentativa (sucesso ou falha) registrado em note_candidate_result().
+static uint16_t g_candidate_mask = (1u << PAIRING_CANDIDATE_COUNT) - 1;
+static uint8_t g_candidate_fail[PAIRING_CANDIDATE_COUNT] = {0};
+static uint32_t g_candidate_quarantined_since[PAIRING_CANDIDATE_COUNT] = {0};
+static uint32_t g_pair_round = 0;
+static uint8_t g_camped_idx = 0; // índice (em PAIRING_CANDIDATES) do candidato atual, p/ penalizar/confirmar
+
 // ---- Estado de hopping / mensagem ----
 static uint16_t g_msg_id = 1;
 static uint8_t g_current_fragment = 0;
@@ -280,13 +293,20 @@ static uint8_t find_channel_index(uint8_t ch)
 // -------------------------------------------------------------
 // Pareamento: mestre mede atividade e acampa no candidato mais silencioso
 // -------------------------------------------------------------
+// adaptive-rendezvous (2026-09-24): só considera candidatos habilitados em
+// g_candidate_mask -- um candidato "quarentenado" (falhou repetidamente no
+// handshake real, mesmo medindo quieto por RPD -- ver note_candidate_result())
+// fica de fora da medição/seleção até o cooldown vencer.
 static uint8_t measure_and_pick_candidate()
 {
-    uint8_t best_idx = 0;
+    uint8_t best_idx = 255;
     int best_activity = 999;
 
     for (uint8_t i = 0; i < PAIRING_CANDIDATE_COUNT; i++)
     {
+        if (!(g_candidate_mask & (1u << i)))
+            continue;
+
         mestre_radio.setChannel(PAIRING_CANDIDATES[i]);
         mestre_radio.startListening();
         int hits = 0;
@@ -305,12 +325,42 @@ static uint8_t measure_and_pick_candidate()
         }
     }
 
-    return best_idx;
+    // g_candidate_mask nunca deveria chegar a 0 (update_channel_mask() tem
+    // a mesma guarda de blacklist-decay), mas se acontecer, não trava sem
+    // candidato nenhum -- volta pro primeiro.
+    return best_idx == 255 ? 0 : best_idx;
+}
+
+// adaptive-rendezvous (2026-09-24): registra o resultado (sucesso/falha) da
+// última tentativa de pareamento no candidato atual e reavalia
+// g_candidate_mask -- mesma função pura de blacklist-decay
+// (update_channel_mask()), agora sobre PAIRING_CANDIDATES. Chamado nos dois
+// pontos onde uma tentativa de fato termina: falha em conseguir link dentro
+// da janela de camping, ou falha/sucesso no handshake de seed (ver
+// mestre_loop()).
+static void note_candidate_result(bool success)
+{
+    uint8_t idx = g_camped_idx;
+    if (success)
+        g_candidate_fail[idx] = 0;
+    else if (g_candidate_fail[idx] < 255)
+        g_candidate_fail[idx]++;
+
+    g_pair_round++;
+    uint16_t new_mask = update_channel_mask(g_candidate_mask, g_candidate_fail, g_candidate_quarantined_since,
+                                             g_pair_round, PAIR_FAIL_THRESHOLD, PAIR_RECOVERY_ROUNDS,
+                                             PAIRING_CANDIDATE_COUNT);
+    if (new_mask != g_candidate_mask)
+    {
+        tlm_printf("mestre", "pair_mask", "mask=0x%02X;prev=0x%02X", new_mask, g_candidate_mask);
+        g_candidate_mask = new_mask;
+    }
 }
 
 static void pick_new_pair_channel()
 {
     uint8_t idx = measure_and_pick_candidate();
+    g_camped_idx = idx;
     g_pair_channel = PAIRING_CANDIDATES[idx];
     g_pair_camp_start = millis();
     g_camping = true;
@@ -784,7 +834,14 @@ static void mestre_loop()
 
     if (!g_link_established)
     {
-        if (!g_camping || millis() - g_pair_camp_start >= PAIR_CAMP_MS)
+        // adaptive-rendezvous: janela de camping esgotou sem nunca
+        // conseguir link neste candidato -- conta como falha antes de
+        // trocar (ver note_candidate_result()). Não penaliza a
+        // primeiríssima seleção (!g_camping), que não é uma falha real.
+        bool camp_expired = g_camping && (millis() - g_pair_camp_start >= PAIR_CAMP_MS);
+        if (camp_expired)
+            note_candidate_result(false);
+        if (!g_camping || camp_expired)
             pick_new_pair_channel();
 
         if (millis() - g_last_link_try >= LINK_RETRY_MS)
@@ -810,9 +867,19 @@ static void mestre_loop()
             g_seed_confirmed = true;
             g_hop_start_at = millis() + HOP_START_DELAY_MS;
             tlm_printf("mestre", "seed", "seed=%u", g_seed);
+            // adaptive-rendezvous: só agora o candidato provou que
+            // suporta troca de pacote real, não só RPD quieto -- reseta
+            // o histórico de falha dele.
+            note_candidate_result(true);
         }
         else
         {
+            // Achado de bancada 2026-09-24: um candidato pode conseguir
+            // pair_ok (LINK_ACK) e mesmo assim falhar aqui repetidamente
+            // -- RPD quieto não garante que um pacote de verdade
+            // atravessa. Conta como falha do candidato, não só reverte
+            // o link.
+            note_candidate_result(false);
             g_link_established = false;
         }
         return;

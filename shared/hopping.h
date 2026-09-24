@@ -107,12 +107,20 @@ inline uint8_t get_next_active_channel(uint16_t seed, uint32_t counter, uint16_t
  * volta à máscara, com `fail_count[i]` zerado (dá a ele o mesmo número de
  * falhas frescas antes de ser excluído de novo, em vez de já nascer no
  * limiar).
+ *
+ * `count` (adaptive-rendezvous, 2026-09-24): generalizado de `TABLE_SIZE`
+ * fixo para um tamanho explícito, para a MESMA lógica poder ser reusada
+ * sobre `PAIRING_CANDIDATES` (8 entradas) durante o pareamento, não só
+ * sobre `HOPPING_CHANNELS` (16) durante o hopping de dados -- ver
+ * `mestre/src/node.h` `note_candidate_result()`. Default `TABLE_SIZE`
+ * preserva todas as chamadas existentes sem mudança.
  */
 inline uint16_t update_channel_mask(uint16_t mask, uint8_t fail_count[], uint32_t blacklisted_since[],
-                                     uint32_t hop_counter, uint8_t fail_threshold, uint32_t recovery_cooldown_hops)
+                                     uint32_t hop_counter, uint8_t fail_threshold, uint32_t recovery_cooldown_hops,
+                                     uint8_t count = TABLE_SIZE)
 {
     uint16_t candidate = mask;
-    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+    for (uint8_t i = 0; i < count; i++)
     {
         if ((mask & (1u << i)) && fail_count[i] >= fail_threshold)
             candidate &= (uint16_t)~(1u << i);
@@ -124,7 +132,7 @@ inline uint16_t update_channel_mask(uint16_t mask, uint8_t fail_count[], uint32_
     }
     else
     {
-        for (uint8_t i = 0; i < TABLE_SIZE; i++)
+        for (uint8_t i = 0; i < count; i++)
         {
             bool was_enabled = (mask & (1u << i)) != 0;
             bool still_enabled = (candidate & (1u << i)) != 0;
@@ -133,7 +141,7 @@ inline uint16_t update_channel_mask(uint16_t mask, uint8_t fail_count[], uint32_
         }
     }
 
-    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+    for (uint8_t i = 0; i < count; i++)
     {
         if (candidate & (1u << i))
             continue; // já habilitado, nada a reincluir

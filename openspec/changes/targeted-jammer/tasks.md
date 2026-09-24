@@ -39,3 +39,25 @@
       3,5–5,8% sob sweep no mesmo teste) — mesma ordem de grandeza,
       targeted inclusive mais efetivo por mirar direto nos 16 canais do
       hopping.
+
+## 4. Modo `adaptive` (adicionado 2026-09-24, ver design.md "Implementado depois")
+
+- [x] 4.1 `JAM_MODE_ADAPTIVE` + comando serial `mode adaptive` em
+      `jammer/src/node.h`, reconhecido pelo parser existente.
+- [x] 4.2 `senseChannel()`: sai de `startConstCarrier()`, sensoria RPD por
+      `ADAPTIVE_SENSE_SAMPLES` amostras, volta a emitir no mesmo canal.
+- [x] 4.3 `loopAdaptive()`: escaneia os 16 `HOPPING_CHANNELS` procurando
+      atividade; trava no primeiro canal ocupado e revalida a cada
+      `ADAPTIVE_RECHECK_MS`, soltando e voltando a escanear se ficar
+      quieto. Eventos de telemetria `adaptive_lock`/`adaptive_release`.
+- [x] 4.4 `pio run -e jammer -e placa_b` limpo.
+- [ ] 4.5 Validação em bancada: confirmar `adaptive_lock` disparando no
+      canal realmente em uso pelo enlace (não em canais ociosos), e que
+      `dynamic-seed-blacklist` ainda consegue escapar dele.
+      **Bloqueado em 2026-09-24**: a placa combinada só liga a portadora
+      depois que o handshake mestre/escravo confirma pelo menos uma vez
+      (`jammer_set_ready_source`) — a sessão encontrou dificuldade
+      recorrente de pareamento (ver `adaptive-rendezvous` tasks.md) que
+      impediu o modo `adaptive` de chegar a emitir de fato. Confirmado só
+      até `mode adaptive` sendo aceito e a telemetria de troca de modo
+      disparando; falta o resto assim que o enlace conseguir parear.

@@ -58,10 +58,26 @@ static bool has_radio2 = false;
 enum JamMode
 {
     JAM_MODE_SWEEP,
-    JAM_MODE_TARGETED
+    JAM_MODE_TARGETED,
+    JAM_MODE_ADAPTIVE
 };
 
 static JamMode g_mode = JAM_MODE_SWEEP;
+
+// adaptive-rendezvous / targeted-jammer (2026-09-24): modo "adaptive" --
+// em vez de round-robin cego pelos 16 HOPPING_CHANNELS (targeted) ou pela
+// banda inteira (sweep, pode quebrar até o pareamento se for forte
+// demais), sensoria por energia (RPD) e TRAVA no primeiro canal com
+// atividade real, revalidando periodicamente -- concentra a emissão onde
+// o enlace de fato está, em vez de gastar tempo igual em canais ociosos.
+// Só single-radio (jammer_radio) mesmo com has_radio2 -- suficiente pra
+// bancada de 2 placas (o cenário real de teste), sensoriar+emitir com 2
+// rádios simultâneos dobraria a complexidade sem necessidade aqui.
+static const uint32_t ADAPTIVE_SENSE_SAMPLES = 3;
+static const uint32_t ADAPTIVE_RECHECK_MS = 150; // com que frequência reconfirma um canal já travado
+static int8_t g_adaptive_locked_idx = -1;
+static unsigned long g_adaptive_last_recheck = 0;
+static uint8_t g_adaptive_scan_idx = 0;
 
 // Fonte opcional de "handshake concluído" — quando registrada (placa_b,
 // via jammer_set_ready_source()), o jammer usa **só** o rádio HSPI (o
@@ -190,6 +206,14 @@ static void handleCommand(char *line)
         g_mode = JAM_MODE_TARGETED;
         tlm_event("jammer", "jam_mode_targeted");
         guarded_println("[MODE] targeted");
+    }
+    else if (cmdMatches(line, "mode adaptive"))
+    {
+        g_mode = JAM_MODE_ADAPTIVE;
+        g_adaptive_locked_idx = -1;
+        g_adaptive_scan_idx = 0;
+        tlm_event("jammer", "jam_mode_adaptive");
+        guarded_println("[MODE] adaptive");
     }
     else if (cmdMatches(line, "jam off"))
     {
@@ -386,6 +410,71 @@ static void loopTargeted()
     delay(JAM_TARGETED_HOLD_MS);
 }
 
+// Sai do modo de portadora constante (que não permite recepção -- é um
+// registro de teste dedicado do NRF24) para sensoriar RPD por energia em
+// `channel`, depois volta a emitir. Interrupção breve e deliberada,
+// aceitável para o propósito de sensoriamento do modo adaptativo -- mesma
+// técnica (testCarrier() após settle) já validada no analisador
+// (measureChannel()) e no mestre (measure_and_pick_candidate()).
+static bool senseChannel(uint8_t channel)
+{
+    jammer_radio.stopConstCarrier();
+    jammer_radio.setChannel(channel);
+    jammer_radio.startListening();
+
+    int hits = 0;
+    for (uint32_t s = 0; s < ADAPTIVE_SENSE_SAMPLES; s++)
+    {
+        delayMicroseconds(PLL_DWELL_US);
+        if (jammer_radio.testCarrier())
+            hits++;
+    }
+
+    jammer_radio.stopListening();
+    jammer_radio.startConstCarrier(g_jam_power, channel);
+    return hits > 0;
+}
+
+// targeted-jammer (2026-09-24): modo "adaptive" -- sensoria os 16
+// HOPPING_CHANNELS procurando atividade real; ao encontrar, trava e
+// concentra a emissão ali (revalidando a cada ADAPTIVE_RECHECK_MS) em vez
+// de repartir tempo igual entre canais ociosos e ocupados como o
+// round-robin de loopTargeted() faz. Se o canal travado ficar quieto (o
+// enlace escapou ou nunca era o certo), solta e volta a escanear. Só
+// jammer_radio (ver comentário em g_adaptive_locked_idx acima).
+static void loopAdaptive()
+{
+    unsigned long now = millis();
+
+    if (g_adaptive_locked_idx >= 0)
+    {
+        uint8_t ch = HOPPING_CHANNELS[g_adaptive_locked_idx];
+        if (now - g_adaptive_last_recheck >= ADAPTIVE_RECHECK_MS)
+        {
+            g_adaptive_last_recheck = now;
+            if (!senseChannel(ch))
+            {
+                tlm_printf("jammer", "adaptive_release", "ch=%u", ch);
+                g_adaptive_locked_idx = -1;
+                return;
+            }
+        }
+        return; // continua emitindo no canal travado (portadora já ligada nele)
+    }
+
+    uint8_t ch = HOPPING_CHANNELS[g_adaptive_scan_idx];
+    if (senseChannel(ch))
+    {
+        g_adaptive_locked_idx = (int8_t)g_adaptive_scan_idx;
+        g_adaptive_last_recheck = now;
+        tlm_printf("jammer", "adaptive_lock", "ch=%u", ch);
+    }
+    else
+    {
+        g_adaptive_scan_idx = (uint8_t)((g_adaptive_scan_idx + 1) % TABLE_SIZE);
+    }
+}
+
 static void jammer_loop()
 {
     static unsigned long last_print = 0;
@@ -409,6 +498,8 @@ static void jammer_loop()
 
     if (g_mode == JAM_MODE_TARGETED)
         loopTargeted();
+    else if (g_mode == JAM_MODE_ADAPTIVE)
+        loopAdaptive();
     else
         loopSweep();
 

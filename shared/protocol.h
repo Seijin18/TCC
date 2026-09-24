@@ -94,6 +94,21 @@ static const uint32_t PAIR_CAMP_MS = 2000;     // mestre: tempo acampado num can
 static const uint32_t PAIR_DWELL_MS = 400;
 static const uint32_t PAIR_MEASURE_SAMPLES = 20; // mestre: amostras de testCarrier() por candidato
 
+// adaptive-rendezvous (2026-09-24): pareamento ganha o mesmo mecanismo de
+// evitar-canal-ruim de blacklist-decay, aplicado aos PAIRING_CANDIDATES em
+// vez de HOPPING_CHANNELS -- ver mestre/src/node.h note_candidate_result().
+// Achado de bancada: um candidato pode medir "quieto" por RPD
+// (measure_and_pick_candidate) e mesmo assim falhar repetidamente na troca
+// de pacotes real (handshake de seed) -- a métrica de energia não
+// substitui a evidência de sucesso/falha real do protocolo. Limiar mais
+// baixo que CHANNEL_FAIL_THRESHOLD porque cada falha aqui já consumiu um
+// PAIR_CAMP_MS inteiro (ou uma tentativa de seed) -- não vale a pena
+// esperar tantas quanto no hopping de dados, onde cada falha é só 1 hop.
+static const uint8_t PAIR_FAIL_THRESHOLD = 3;
+// Em "rounds" de seleção de candidato (não hops, que ainda não existem
+// antes de parear) -- ver g_pair_round em mestre/src/node.h.
+static const uint32_t PAIR_RECOVERY_ROUNDS = 12;
+
 static const uint32_t HOP_START_DELAY_MS = 900;
 // Hopping por evento (nao mais por relogio periodico fixo): mestre
 // reenvia o fragmento corrente e escravo escuta no canal corrente ate

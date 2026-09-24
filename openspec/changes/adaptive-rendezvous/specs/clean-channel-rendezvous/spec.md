@@ -11,6 +11,34 @@ atividade medida.
 - **THEN** o mestre acampa em outro candidato com atividade menor antes de
   enviar `MSG_LINK_PROBE`
 
+### Requirement: Candidato de pareamento não confiável é temporariamente evitado
+O mestre DEVE (MUST) manter, por candidato de pareamento, um histórico de
+falhas em completar o handshake real (link estabelecido mas troca de seed
+nunca confirmada, ou janela de acampamento inteira sem nenhum link
+estabelecido) — não apenas a medição instantânea de atividade (RPD) —, e
+excluir temporariamente da seleção um candidato cujo número de falhas
+recentes ultrapasse um limiar, reincluindo-o após um período de
+recuperação, sem nunca excluir todos os candidatos simultaneamente.
+
+#### Scenario: Candidato "quieto" mas que falha repetidamente é evitado
+- **WHEN** um candidato de pareamento mede baixa atividade (RPD) mas falha
+  em completar o handshake real por `PAIR_FAIL_THRESHOLD` tentativas
+  consecutivas
+- **THEN** o mestre para de medir/selecionar esse candidato até o período
+  de recuperação (`PAIR_RECOVERY_ROUNDS`) vencer
+
+#### Scenario: Candidato evitado volta a ser considerado após recuperação
+- **WHEN** um candidato está temporariamente excluído e o número de
+  "rounds" de seleção desde a exclusão atinge `PAIR_RECOVERY_ROUNDS`
+- **THEN** o candidato volta a ser medido/considerado na próxima seleção,
+  com seu histórico de falhas zerado
+
+#### Scenario: Nunca esvaziar todos os candidatos
+- **WHEN** todos os candidatos de pareamento atingiriam o limiar de falhas
+  simultaneamente
+- **THEN** a exclusão não é aplicada e todos os candidatos permanecem
+  disponíveis para seleção
+
 ### Requirement: Escravo varre candidatos em vez de escutar um canal fixo
 O escravo DEVE (MUST) alternar entre todos os candidatos de pareamento,
 escutando cada um por um período curto, até estabelecer o link com o

@@ -248,6 +248,51 @@ individualmente (PA, DPL, PLL, mutex, rajada de largada, offset de
 fase). Validação de soak mais longa (minutos, não segundos) e sob jammer
 ativo ainda não foi feita — ver tasks.md seção 6.
 
+## Implementado depois (2026-09-24): blacklist de candidatos de pareamento
+
+**Motivação**: o achado de bancada da seção 6 de `tasks.md` (deadlock de
+pareamento por `LINK_ACK` sem confirmação real, corrigido com
+`SEED_WAIT_TIMEOUT_MS`) revelou um problema separado: mesmo depois de
+corrigido o deadlock, um candidato podia medir "quieto" por RPD
+(`measure_and_pick_candidate()`) e mesmo assim falhar repetidamente no
+handshake real (seed nunca confirmada) — a métrica de energia não é o
+mesmo que "um pacote de verdade atravessa". Sem memória entre tentativas,
+o mestre podia voltar a medir e escolher o MESMO candidato ruim
+indefinidamente, gastando toda a janela de retry nele.
+
+**Decisão**: reusar a lógica já validada de `blacklist-decay`
+(`update_channel_mask()` em `shared/hopping.h`) para os 8
+`PAIRING_CANDIDATES`, não só os 16 `HOPPING_CHANNELS`. Isso exigiu
+generalizar `update_channel_mask()` com um parâmetro `count` explícito
+(default `TABLE_SIZE`, preservando todas as chamadas existentes) em vez
+de assumir 16 fixo — ver `shared/hopping.h` e os 2 novos testes em
+`test/test_hopping.cpp` que confirmam o comportamento com `count=8`.
+
+**O que conta como falha de um candidato** (`note_candidate_result()` em
+`mestre/src/node.h`): (a) a janela inteira de `PAIR_CAMP_MS` passar sem
+nunca conseguir `pair_ok` nesse candidato, OU (b) `pair_ok` foi
+conseguido mas `send_seed_to_slave()` falhou (a seed nunca foi
+confirmada) — o sinal mais específico e mais relevante para o problema
+observado. Sucesso completo (seed confirmada) zera o histórico de falha
+do candidato. `PAIR_FAIL_THRESHOLD=3` (menor que `CHANNEL_FAIL_THRESHOLD=5`
+do hopping de dados, porque cada falha aqui já consumiu uma janela de
+camping inteira, não só 1 hop) e `PAIR_RECOVERY_ROUNDS=12` "rounds" de
+seleção de candidato (não hops, que não existem antes de parear) — ver
+`shared/protocol.h`.
+
+**Validado em bancada real em 2026-09-24**: telemetria `pair_mask`
+confirmou o ciclo completo funcionando com dados reais — candidatos sendo
+excluídos um a um conforme falhavam (`0xFF→0xFE→0xFC→0xF8→0xF0`) e
+reincluídos após o cooldown vencer (`...→0xE1→0xE2→0xE4`), sem nunca
+esvaziar a máscara. **Importante**: mesmo com essa exclusão/reinclusão
+funcionando corretamente, o pareamento não convergiu de forma estável
+nessa sessão — evidência de que a dificuldade real não era "qual
+candidato escolher" (esse mecanismo já resolve isso), mas sim ruído/
+interferência de RF afetando vários ou todos os candidatos ao mesmo
+tempo, exatamente o limite já previsto no risco abaixo ("se todos os 8
+candidatos estiverem sob ataque simultâneo"). Ver `openspec/ROADMAP.md`
+para o estado da investigação de RF.
+
 ## Risks / Trade-offs
 
 - **Candidatos fixos são conhecidos por qualquer jammer que leia o código
@@ -259,7 +304,8 @@ ativo ainda não foi feita — ver tasks.md seção 6.
 - Se **todos** os 8 candidatos estiverem sob ataque simultâneo (sweep total
   da banda), o pareamento não converge — cenário aceito como limite do
   sistema (jammer com banda maior que a capacidade de fuga), não coberto por
-  este change.
+  este change. **Observado na prática em 2026-09-24** (ver seção acima),
+  embora por ruído ambiente, não jamming deliberado.
 
 ## Migration Plan
 

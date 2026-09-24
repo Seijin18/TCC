@@ -62,6 +62,51 @@ completo.
 que o fix 3 resolve de fato o `dynamic-seed-blacklist` 4.4, depois rodar
 `tools/validation/run_battery.py` para fechar `scenario-automation`.
 
+### Continuação, mesmo dia: blacklist de pareamento + modo `adaptive` do jammer
+
+Duas peças novas, pedidas para robustecer justamente o problema acima
+("candidato mede quieto mas pareamento ainda falha", e "sweep pode ser
+forte demais pra testar o sistema de forma útil"):
+
+1. **Blacklist de candidatos de pareamento** (`adaptive-rendezvous`,
+   ver design.md "Implementado depois"): reusa `update_channel_mask()`
+   de `blacklist-decay` (generalizada com um parâmetro `count`) para os 8
+   `PAIRING_CANDIDATES`, não só os 16 canais de dados — um candidato que
+   falha repetidamente no handshake real (mesmo medindo quieto por RPD)
+   é temporariamente evitado, com a mesma garantia de nunca esvaziar
+   todos os 8. **Confirmado funcionando em bancada real** via telemetria
+   `pair_mask` (exclusão/reinclusão/guarda todas observadas
+   corretamente). Achado importante: mesmo com isso funcionando
+   perfeitamente, o pareamento ainda não convergiu de forma estável na
+   sessão — evidência de que o problema não é "qual candidato escolher"
+   mas ruído afetando vários/todos os candidatos ao mesmo tempo.
+2. **Modo `adaptive` do jammer** (`targeted-jammer`, ver design.md
+   "Implementado depois"): em vez de round-robin cego pelos 16
+   `HOPPING_CHANNELS` (`targeted`) ou a banda inteira (`sweep`, forte
+   demais — pode quebrar até o pareamento, tornando o teste inconclusivo),
+   sensoria por energia e trava no canal com atividade real, revalidando
+   periodicamente. **Ainda não validado em bancada**: a placa combinada só
+   liga a portadora depois que o handshake inicial mestre/escravo
+   confirma pelo menos uma vez, e o pareamento não convergiu nesta
+   sessão para chegar a esse ponto.
+
+**Achado de caracterização de RF (2026-09-24, mais preciso que o
+"interferência real" reportado acima)**: uma amostragem de 40 varreduras
+recentes do analisador mostrou média de banda de só ~2% de atividade,
+nenhum canal cronicamente ocupado — ou seja, NÃO é um jammer contínuo
+externo. É mais consistente com ruído ambiente ordinário e intermitente
+(Wi-Fi/Bluetooth normais do ambiente) que ocasionalmente coincide com a
+janela curta e pouco redundante do handshake de pareamento (um probe, um
+ack, uma seed — poucos bytes, sem muitas tentativas de retry dentro de
+uma mesma janela de candidato). Isso é uma característica arquitetural
+real do protocolo de pareamento (frágil contra ruído ordinário, não só
+contra ataque deliberado), distinta de "tem um jammer não identificado no
+ambiente" — vale considerar como possível trabalho futuro (ex.: mais
+retries de `MSG_LINK_PROBE` dentro da mesma janela de `PAIR_CAMP_MS`, ou
+pacotes de pareamento maiores/mais redundantes) se a banca perguntar por
+que o pareamento inicial é mais lento que o hopping de dados já
+estabelecido.
+
 ## Resolvido (2026-09-23): pipeline completo jamming→alerta→rekey→blacklist funciona de ponta a ponta pela primeira vez
 
 Depois de três causas encontradas e corrigidas em sequência (histórico

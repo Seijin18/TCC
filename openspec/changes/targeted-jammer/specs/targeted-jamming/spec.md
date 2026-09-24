@@ -32,6 +32,30 @@ padrão ao ligar.
 - **THEN** o modo atual é mantido inalterado e uma mensagem de erro é
   impressa na serial
 
+### Requirement: Modo adaptive concentra emissão no canal em uso real
+Quando o jammer estiver em modo `adaptive`, ele DEVE (MUST) sensoriar por
+energia (RPD) os canais de `HOPPING_CHANNELS` em vez de percorrê-los em
+round-robin cego, travar emissão contínua no primeiro canal com atividade
+detectada, e revalidar periodicamente se esse canal continua ativo antes
+de continuar concentrado nele.
+
+#### Scenario: Trava no canal com atividade real
+- **WHEN** o jammer está em modo `adaptive` e sensoria um canal de
+  `HOPPING_CHANNELS` com atividade real (RPD positivo)
+- **THEN** ele trava e emite continuamente nesse canal, em vez de avançar
+  para o próximo candidato do round-robin
+
+#### Scenario: Solta um canal que ficou quieto
+- **WHEN** o jammer está travado (modo `adaptive`) num canal e a
+  revalidação periódica não detecta mais atividade nele
+- **THEN** ele solta o canal e volta a escanear os demais candidatos de
+  `HOPPING_CHANNELS`
+
+#### Scenario: Comando `mode adaptive` reconhecido em runtime
+- **WHEN** o firmware recebe `mode adaptive` pela serial
+- **THEN** o modo ativo muda para `adaptive` e uma confirmação é impressa,
+  sem exigir novo flash
+
 ### Requirement: Modo targeted disponível no harness de validação
 O harness `validacao/src/main.cpp` DEVE (MUST) suportar o mesmo comando de modo
 (`mode sweep|targeted`) aplicado à sua lógica de seleção de canal do
