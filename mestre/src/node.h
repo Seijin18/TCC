@@ -42,7 +42,16 @@
 
 static RF24 mestre_radio(PIN_CE, PIN_CSN);
 
-static const uint32_t PAIR_MEASURE_DWELL_US = 130;
+// Achado de bancada (2026-09-24): igual ao motivo de HOP_TIMEOUT_MS/o
+// delayMicroseconds(500) em mestre_loop() (ver comentário lá) -- 130us
+// (o valor nominal do datasheet) não é suficiente pro PLL assentar após um
+// salto grande de frequência nestes módulos específicos. Aqui isso
+// enviesava measure_and_pick_candidate(): candidato 0 (primeiro avaliado,
+// e o canal em que o rádio já estava desde o setup) sempre "ganhava" por
+// os demais lerem atividade espúria (settling incompleto, não ruído
+// real) -- confirmado em bancada, ~90% das escolhas caindo no candidato 0
+// em duas sessões distintas, mesmo sob condições limpas.
+static const uint32_t PAIR_MEASURE_DWELL_US = 500;
 
 // Fonte alternativa do alerta de ataque (two-board-topology): quando
 // registrada (Placa A combinada, mestre+analisador na mesma placa), lê uma
@@ -575,9 +584,13 @@ static void apply_scheduled_changes()
 
 // Retorna true se o hop atual foi consumido por um pacote de controle (em
 // vez de um fragmento de dado) -- fragmento fica pausado até o controle
-// resolver (confirmar ou esgotar retries).
-static bool send_pending_control_if_any()
+// resolver (confirmar ou esgotar retries). `acked_out` reporta se ESTA
+// tentativa em particular foi confirmada (usado pelo chamador pra manter
+// g_hops_since_ack coerente -- ver achado de bancada 2026-09-24 no
+// comentário de reset_to_pairing() abaixo).
+static bool send_pending_control_if_any(bool &acked_out)
 {
+    acked_out = false;
     if (g_control_pending == 0)
         return false;
 
@@ -638,6 +651,7 @@ static bool send_pending_control_if_any()
         g_control_pending = 0;
     }
 
+    acked_out = acked;
     return true;
 }
 
@@ -848,10 +862,24 @@ static void mestre_loop()
     // mesmo fragmento é reenviado em canais sucessivos até ser confirmado).
     mestre_radio.flush_rx();
 
-    if (send_pending_control_if_any())
+    bool control_acked = false;
+    if (send_pending_control_if_any(control_acked))
     {
+        // Achado de bancada (2026-09-24): faltava isto -- sem atualizar
+        // g_hops_since_ack aqui, um controle que falha pra sempre (ex.
+        // escravo já não está mais lá) nunca acumulava falhas o bastante
+        // pra disparar o fallback de LOSS_HOPS, e o mestre ficava preso
+        // reenviando a mesma proposta de blacklist/seed indefinidamente
+        // em vez de voltar a parear. Espelha o tratamento de ack/miss de
+        // fragmento logo abaixo.
+        if (control_acked)
+            g_hops_since_ack = 0;
+        else
+            g_hops_since_ack++;
         g_hop_counter++;
         apply_scheduled_changes();
+        if (g_hops_since_ack >= LOSS_HOPS)
+            reset_to_pairing();
         return;
     }
 

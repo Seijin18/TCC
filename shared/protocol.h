@@ -105,6 +105,20 @@ static const uint32_t HOP_TIMEOUT_MS = 220;
 static const uint32_t ACK_TIMEOUT_MS = 120;
 static const uint32_t SEED_ACK_WAIT_MS = 500;
 static const uint32_t SEED_WAIT_WINDOW_MS = 3000; // seed nao-bloqueante: janela na serial antes do default
+// Achado de bancada (2026-09-24): o LINK_ACK do escravo (MSG_LINK_ACK, em
+// try_establish_link()) e enviado sem confirmacao real de entrega
+// (radio_send() usa NO_ACK -- a "confirmacao" seria o proprio mestre
+// completar o handshake enviando a seed). Se esse ack se perder ou chegar
+// fora da janela de LINK_ACK_WAIT_MS do mestre, o escravo mesmo assim
+// declara link_established=true (baseado so no envio local ter tido
+// sucesso) e para de responder a novas sondas -- ver o guard
+// "if (!link_established)" em escravo_loop(). Sem um timeout aqui, isso e
+// um DEADLOCK permanente: o mestre nunca recebeu o ack (continua
+// sondando), e o escravo nunca mais responde a sonda nenhuma (esta
+// esperando so por uma seed que nunca vai chegar). SEED_WAIT_TIMEOUT_MS
+// da ao escravo uma saida -- volta a escanear se nenhuma seed chegar a
+// tempo, permitindo uma tentativa de pareamento futura ter sucesso.
+static const uint32_t SEED_WAIT_TIMEOUT_MS = 3000;
 static const uint16_t SEED_DEFAULT = 42;
 
 // Perda de sincronismo: depois de LOSS_HOPS hops sem trafego/ACK valido, os

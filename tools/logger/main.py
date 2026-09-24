@@ -110,6 +110,11 @@ class StateStore:
                 node["pair_channel"] = fields.get("ch")
             elif event == "loss_of_sync":
                 node["link"] = False
+            elif event == "pair_timeout":
+                # Achado de bancada 2026-09-24: LINK_ACK do escravo sem
+                # confirmacao real de entrega -- ver SEED_WAIT_TIMEOUT_MS
+                # em shared/protocol.h.
+                node["link"] = False
             elif event == "seed":
                 node["seed"] = fields.get("seed")
             elif event == "hop":

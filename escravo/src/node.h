@@ -50,6 +50,10 @@ static bool completion_logged = false;
 static bool link_established = false;
 static uint8_t g_pair_idx = 0;
 static unsigned long g_pair_dwell_start = 0;
+// Achado de bancada 2026-09-24 (ver SEED_WAIT_TIMEOUT_MS em
+// shared/protocol.h): instante em que link_established virou true,
+// usado só pra medir o timeout de espera pela seed.
+static unsigned long g_seed_wait_start = 0;
 
 // ---- Estado de hopping ----
 static uint32_t hop_counter = 0;
@@ -416,6 +420,7 @@ static void escravo_loop()
                     if (wrote)
                     {
                         link_established = true;
+                        g_seed_wait_start = millis();
                         hop_counter = 0;
                         g_hops_since_rx = 0;
                         hop_start_at = millis() + HOP_START_DELAY_MS;
@@ -445,6 +450,24 @@ static void escravo_loop()
 
     if (!g_seed_initialized)
     {
+        // Achado de bancada 2026-09-24 (ver SEED_WAIT_TIMEOUT_MS em
+        // shared/protocol.h): sem este timeout, um LINK_ACK que o mestre
+        // não recebeu a tempo (nunca confirmado -- radio_send() é NO_ACK)
+        // deixava o escravo aqui PARA SEMPRE: link_established=true já
+        // significa que ele não responde mais a MSG_LINK_PROBE (só ao
+        // bloco acima, guardado por "if (!link_established)"), então
+        // nenhuma sonda futura do mestre tem como reabrir o pareamento --
+        // deadlock permanente, reproduzido em bancada (escravo silencioso
+        // por >1 minuto após um "pair_ok" que o mestre nunca confirmou).
+        if (millis() - g_seed_wait_start >= SEED_WAIT_TIMEOUT_MS)
+        {
+            guarded_println("[ESCRAVO] Seed não chegou a tempo -- voltando a escanear.");
+            tlm_event("escravo", "pair_timeout");
+            link_established = false;
+            g_pair_dwell_start = millis();
+            return;
+        }
+
         uint8_t pipe;
         if (escravo_radio.available(&pipe))
         {
@@ -625,6 +648,20 @@ static void escravo_loop()
                         radio_send(escravo_radio, &ack, sizeof(ack));
                         escravo_radio.startListening();
                         tlm_printf("escravo", "rekey_ack", "kind=seed;seed=%u;apply=%lu", pkt.new_seed, pkt.apply_at_hop);
+                        // Achado de bancada (2026-09-24): faltava esta linha
+                        // -- sem ela, escravo_advance_hop() logo abaixo conta
+                        // este hop como PERDA (g_hop_received_flag continua
+                        // false), mesmo o pacote de controle tendo sido
+                        // recebido e ackado com sucesso. Sob rajada de
+                        // controle (vários MUDAR_SEED/BLACKLIST_UPDATE em
+                        // sequência, exatamente o que acontece sob jamming
+                        // real ou reavaliação contínua de blacklist-decay),
+                        // isso inflava g_hops_since_rx até LOSS_HOPS e
+                        // derrubava um enlace que na verdade estava
+                        // funcionando -- provável causa raiz do "link nunca
+                        // se recupera" investigado em dynamic-seed-blacklist
+                        // tasks.md 4.4.
+                        g_hop_received_flag = true;
                         // Mesmo caminho de evento-sucesso do fragmento: o
                         // mestre também avança o dele imediatamente após
                         // enviar um pacote de controle (ver mestre_loop()).
@@ -643,6 +680,8 @@ static void escravo_loop()
                         radio_send(escravo_radio, &ack, sizeof(ack));
                         escravo_radio.startListening();
                         tlm_printf("escravo", "rekey_ack", "kind=blacklist;mask=0x%04X;apply=%lu", pkt.mask, pkt.apply_at_hop);
+                        // Mesmo achado do ramo MSG_CTRL_SEED acima.
+                        g_hop_received_flag = true;
                         escravo_advance_hop();
                     }
                     else
