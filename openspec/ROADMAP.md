@@ -6,7 +6,49 @@ verdade de contexto/dependências) — é a camada de "o que fazer agora, em que
 ordem" derivada dele. Atualizar esta lista conforme tasks forem fechadas ou
 changes forem arquivados.
 
-## Sessão 2026-09-24: `blacklist-decay` e `scenario-automation` implementados, 3 bugs reais de enlace encontrados e corrigidos em bancada — validação bloqueada por RF do ambiente
+## Sessão 2026-09-24 (tarde): re-pareamento consertado — `pairing-handshake-hardening`
+
+**O diagnóstico de "ruído de RF ambiente" registrado na seção abaixo
+estava errado.** Uma análise mais cuidadosa dos logs, seguida de
+instrumentação (`e=regs`, `e=pair_stats`) e bisseção em bancada, achou
+defeitos de protocolo/rádio, todos corrigidos no change
+`pairing-handshake-hardening` (ver design.md/tasks.md dele):
+
+- **Escravo surdo depois da fase de salto**: registradores idênticos aos do
+  boot, FIFO vazia, canal certo — e zero pacotes recebidos. Reiniciar só a
+  placa B resolvia; `radio_reinit()` (`powerDown()/powerUp()` + config do
+  `setup()`) em toda entrada em pareamento resolve (estado interno do clone
+  NRF24).
+- **`SeedAck` perdido quase sempre**: o mestre imprimia na serial entre
+  transmitir a seed e voltar a escutar; na placa A essa escrita disputa o
+  mutex com o CSV de ~400 B do analisador. Handshake refeito em 2
+  mensagens (sonda com nonce + seed → ack que ecoa ambos), com re-ack
+  idempotente e confirmação só no primeiro fragmento real.
+- **Acampamento (2 s) < ciclo de varredura (3,2 s)**, e a blacklist de
+  candidatos culpando canais pela ausência do escravo — novas constantes
+  com `static_assert` das invariantes; candidato só é penalizado com
+  evidência de canal ruim.
+- **Corrida de SPI entre cores** na placa B (comandos do escravo chegavam
+  pela task do jammer) e **perda de telemetria do escravo** sempre que o
+  jammer estava ligado (heartbeat `'.'` grudado antes de `@`) — ambos
+  corrigidos. Toda medição anterior com jammer ligado pode ter perdido
+  eventos do escravo.
+
+Resultado em bancada: **20/20 re-pareamentos forçados** (antes 0/6),
+mediana 7,9 s (≈ 5,4 s detectando a perda + ≤ 1,8 s de handshake), re-ack
+após ack perdido em 91 ms, 5/5 reboots assimétricos, pareamento sob sweep
+7/7. `adaptive-rendezvous` e `plr-metric` arquivados.
+
+**Próximo**: retomar a fila de validação sob ataque, nesta ordem —
+jammer `adaptive` ao vivo (`targeted-jammer` 4.5) →
+`run_scenario.py --jammer-mode targeted` (`dynamic-seed-blacklist`
+4.4/4.5) → `blacklist-decay` §4 → `run_battery.py` A/B/C
+(`scenario-automation` 4.2/4.3) → `spectrum-attack-classification`
+3.1/3.3 → `two-board-topology` 6.2-6.5. Observação do teste sob sweep:
+com PA_LOW a centímetros do escravo o enlace pareia mas cai em ~10-20 s
+(`LOSS_HOPS` consecutivos) — é o que a mitigação precisa resolver.
+
+## Sessão 2026-09-24 (manhã): `blacklist-decay` e `scenario-automation` implementados, 3 bugs reais de enlace encontrados e corrigidos em bancada — validação bloqueada (diagnóstico de RF ambiente depois corrigido, ver acima)
 
 Implementado (código completo, `pio run`/`pio test` limpos, `openspec
 validate --strict` 9/9): `blacklist-decay` (canais banidos voltam após
@@ -54,7 +96,7 @@ do mestre convergiu quase sempre pro mesmo candidato de pareamento (76)
 em duas sessões distintas de boot — pode ser preferência real de RF desta
 bancada, não um bug (testado aumentar o dwell de medição e desligar a
 mitigação, nenhum dos dois mudou o padrão). Ver
-`openspec/changes/adaptive-rendezvous/tasks.md` (seção 6) para o detalhe
+`openspec/changes/archive/2026-09-24-adaptive-rendezvous/tasks.md` (seção 6) para o detalhe
 completo.
 
 **Próximo passo, assim que o ambiente permitir**: repetir
@@ -218,7 +260,7 @@ incondicionalmente, sucesso ou falha) desde o commit inicial do projeto
 — mantendo mestre e escravo em relógios livres independentes,
 sincronizados só por sorte residual de fase. Reescrito para hopping **por
 evento com fallback de timeout** (`mestre_loop()`/`escravo_loop()`, ver
-`openspec/changes/adaptive-rendezvous/design.md` "Correção 2"): o canal
+`openspec/changes/archive/2026-09-24-adaptive-rendezvous/design.md` "Correção 2"): o canal
 só avança quando o hop atual é confirmado (ack/fragmento recebido) ou
 quando um timeout por tentativa esgota (fallback, evita travar num canal
 jamado pra sempre).
@@ -282,7 +324,7 @@ maioria dos hops (~0–10% de entrega). PA, DPL, assentamento de PLL,
 contenção de mutex de telemetria, rajada de relógio na largada e mesmo
 um teste decisivo de offset de fase (dwell 2000ms + ~76 reenvios/hop,
 ainda só 2/14 hops) já foram descartados como causa única — ver detalhe
-completo em `openspec/changes/adaptive-rendezvous/design.md`, seção
+completo em `openspec/changes/archive/2026-09-24-adaptive-rendezvous/design.md`, seção
 "Correção". Causa raiz ainda desconhecida.
 
 A seção "Bloqueio atual" e "Diagnóstico em duas rodadas" abaixo ficam só
@@ -294,7 +336,7 @@ Placa A) **não deve ser seguida**.
 
 Ao tentar validar o handshake mestre↔escravo pela primeira vez, dois bugs
 reais de firmware foram encontrados e corrigidos (detalhe completo em
-`openspec/changes/adaptive-rendezvous/design.md`, seção "Achado de
+`openspec/changes/archive/2026-09-24-adaptive-rendezvous/design.md`, seção "Achado de
 bancada"):
 
 1. `RF24::write()` (lib RF24 1.6.2) tem um bug que trava para sempre quando
@@ -362,7 +404,7 @@ das duas fases desta sessão.
 ~~Trocar o módulo VSPI da Placa A~~ — descartado, ver correção acima: os
 4 módulos funcionam. ~~Investigar causa da falha de hopping~~ —
 encontrada e corrigida: hopping era por relógio periódico, trocado por
-evento com fallback de timeout (`openspec/changes/adaptive-rendezvous/design.md`
+evento com fallback de timeout (`openspec/changes/archive/2026-09-24-adaptive-rendezvous/design.md`
 "Correção 2"). Pareamento/seed/hopping já funcionam de forma confiável
 num teste curto.
 
@@ -398,7 +440,7 @@ e alerta (spectrum-attack-classification) confirmados funcionando primeiro.
 
 `pair_ok`/`seed`/hopping já funcionam de forma confiável num teste curto
 (confirmado em 2026-09-18 após trocar hopping por relógio periódico por
-hopping por evento, ver `openspec/changes/adaptive-rendezvous/design.md`
+hopping por evento, ver `openspec/changes/archive/2026-09-24-adaptive-rendezvous/design.md`
 "Correção 2"). O que falta pra destravar a bateria T1–T7 do plano de
 bancada não é mais nenhum bug conhecido — é rodar as validações mais
 longas/sob ataque que só um teste curto de bancada não cobre: soak de

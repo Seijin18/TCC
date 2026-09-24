@@ -116,7 +116,13 @@ andamento que `dynamic-seed-blacklist` protege).
    `dynamic-seed-blacklist` passa a depender para declarar os pacotes de
    controle (`MUDAR_SEED`/`BLACKLIST_UPDATE`) num único lugar, e o
    `hop_counter` compartilhado necessário para a comutação de canal
-   sincronizada.
+   sincronizada. **Arquivado em 2026-09-24** (junto com `plr-metric`).
+8. **`pairing-handshake-hardening`** (2026-09-24) — depende de
+   `adaptive-rendezvous` (estende a capability `clean-channel-rendezvous`)
+   e de `telemetry-logging`. **Pré-requisito de toda validação de bancada
+   restante**: sem ele o re-pareamento após uma perda de enlace falhava
+   (0/6 → 20/20 com ele), e qualquer cenário com jamming derruba o enlace
+   ao menos uma vez.
 
 Ordem recomendada de execução: `plr-metric` e `targeted-jammer` em paralelo
 → `spectrum-attack-classification` → `dynamic-seed-blacklist` →

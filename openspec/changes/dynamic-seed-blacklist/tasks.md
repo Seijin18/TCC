@@ -89,7 +89,7 @@
       controle que nunca fosse confirmado also nunca acionava o fallback
       de `LOSS_HOPS` do lado do mestre. Ver commit "correcao: 3 bugs
       reais de pareamento/enlace encontrados em bancada ao vivo" e
-      `openspec/changes/adaptive-rendezvous/design.md` (um terceiro bug
+      `openspec/changes/archive/2026-09-24-adaptive-rendezvous/design.md` (um terceiro bug
       relacionado, de pareamento inicial, também encontrado na mesma
       sessão).
 

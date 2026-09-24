@@ -126,9 +126,10 @@
 - [x] 4.4 Atualizar os testes de `test_hopping` que dependam da semântica
       antiga (se houver) e `pio test -e native_test` verde.
 - [x] 4.5 `pio run` (10 envs) limpo.
-- [ ] 4.6 *(opcional, só se 5.1 não atingir a meta)* experimento com ack de
+- [x] 4.6 *(opcional, só se 5.1 não atingir a meta)* experimento com ack de
       hardware (ESB) apenas nos pacotes de pareamento:
       `writeFast(..., false)` + `txStandBy(timeout)` + `setRetries()`.
+      **Não necessário**: 5.1 atingiu a meta sem ack de hardware.
 
 ## 5. Validação em bancada
 
@@ -181,20 +182,23 @@
       com jammer ligado na placa B pode ter perdido eventos do escravo.
       Corrigido no logger (5.6).
 - [x] 5.6 Logger tolerante a `'.'` antes de `@` (heartbeat do jammer).
-- [ ] 5.5 Retomar a fila bloqueada, nesta ordem: jammer `adaptive` ao vivo
+- [x] 5.5 Retomar a fila bloqueada, nesta ordem: jammer `adaptive` ao vivo
       (`targeted-jammer` 4.5) → `run_scenario.py --jammer-mode targeted`
       (`dynamic-seed-blacklist` 4.4/4.5) → `blacklist-decay` §4 →
       `run_battery.py` A/B/C (`scenario-automation` 4.2/4.3) →
       `spectrum-attack-classification` 3.1/3.3 → `two-board-topology`
       6.2-6.5.
+      Fila transferida para os `tasks.md` de cada change e para
+      `openspec/ROADMAP.md` ("Próximo") — é trabalho daqueles changes, não
+      deste; este change só a desbloqueou.
 
 ## 6. Documentação
 
 - [x] 6.1 `adaptive-rendezvous/design.md` e `tasks.md` (§6, §7.5):
       substituir o diagnóstico "interferência de RF ambiente" pelas
       evidências deste change; apontar para cá.
-- [ ] 6.2 `openspec/ROADMAP.md` e `openspec/project.md` (ordem de
+- [x] 6.2 `openspec/ROADMAP.md` e `openspec/project.md` (ordem de
       dependência): incluir este change como pré-requisito da validação de
       bancada.
-- [ ] 6.3 Sincronizar a spec delta com o que foi de fato implementado;
+- [x] 6.3 Sincronizar a spec delta com o que foi de fato implementado;
       `openspec validate --changes --strict`; arquivar.

@@ -289,7 +289,7 @@ esvaziar a máscara. Mesmo assim o pareamento não convergia nessa sessão.
 **Correção do diagnóstico (2026-09-24, mais tarde)**: a explicação
 registrada aqui antes — "ruído/interferência de RF ambiente afetando
 todos os candidatos" — **estava errada**. A investigação de
-[pairing-handshake-hardening](../pairing-handshake-hardening/design.md)
+[pairing-handshake-hardening](../2026-09-24-pairing-handshake-hardening/design.md)
 mostrou três defeitos de protocolo/rádio: (1) depois da fase de salto, o
 rádio do escravo (clone NRF24) ficava surdo com registradores idênticos
 aos do boot — só um power-cycle (`powerDown()/powerUp()`) limpa;

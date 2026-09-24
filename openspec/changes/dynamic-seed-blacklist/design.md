@@ -81,7 +81,7 @@ lida uma vez, via serial, antes do hopping começar (`wait_for_seed`,
 
 ## Dependência: `shared/protocol.h` e `hop_counter` compartilhado
 
-`openspec/changes/adaptive-rendezvous/` extrai `FragmentPacket` e os demais
+`openspec/changes/archive/2026-09-24-adaptive-rendezvous/` extrai `FragmentPacket` e os demais
 tipos hoje duplicados em `mestre/src/node.h`/`escravo/src/node.h` para
 `shared/protocol.h`, e adiciona um `hop_counter` explícito ao
 `FragmentPacket` para os dois lados concordarem sobre o hop atual. Os novos

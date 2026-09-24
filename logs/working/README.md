@@ -18,6 +18,7 @@ no trecho (ou recuperação automática confirmada).
 | `session-20260923-003328.jsonl` | 143 s | 734 | contém `scenario-20260923-033339` |
 | `session-20260923-011357.jsonl` | 341 s | 310 | contém `scenario-20260923-041413` |
 | `session-20260923-012211.jsonl` | 1.262 s | 376 | **re-pareamento automático após `loss_of_sync` funcionou** (16 s); contém `scenario-20260923-042225` |
+| `session-20260924-152517.jsonl` | trechos de ~10 s entre perdas forçadas | ~890 (escravo) | **validação do handshake v2** (`pairing-handshake-hardening`): 20/20 re-pareamentos forçados (`repair-20260924-182542.json`, mediana 7,9 s, p95 9,0 s), re-ack após ack descartado (15:30), 5/5 reboots assimétricos (15:31), pareamento sob sweep (15:32-15:34 — enlace depois cai pelo jamming, ver tasks.md 5.4) |
 
 Cenários (`scenario-*.json`/`.png`, fases baseline → jamming → recovery →
 end; horários do nome em UTC, das sessões em horário local UTC-3):
@@ -38,4 +39,4 @@ end; horários do nome em UTC, das sessões em horário local UTC-3):
   `rekey_failed`, `loss_of_sync`) — é o gráfico "validação end to end" com
   a metade final em branco.
 - `session-20260924-*`: re-pareamento pós-perda quebrado — ver
-  `openspec/changes/pairing-handshake-hardening/design.md`.
+  `openspec/changes/archive/2026-09-24-pairing-handshake-hardening/design.md`.
