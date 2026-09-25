@@ -63,9 +63,21 @@
       máscara nunca chega a zero canais habilitados. **Confirmado**: 13
       `rekey_tx` de blacklist, 18 `rekey_ack` confirmados, máscara final
       aplicada `mask=0xFFFB` (14 dos 16 canais habilitados — nunca zerou).
-- [ ] 4.4 Registrar `plr_window` antes e depois da mitigação e confirmar
+- [x] 4.4 Registrar `plr_window` antes e depois da mitigação e confirmar
       queda visível (critério de "self-healing" para a monografia) —
       esses números alimentam o cenário C de `scenario-automation`.
+      **Validado em 2026-09-25 (bateria `logs/battery-20260925-041711`,
+      jammer `targeted` PA_LOW, sessão `session-20260925-010250`)**, com os
+      fixes de `pairing-handshake-hardening`, `hop-resync` e da enxurrada
+      de controle (`blacklist-decay` 4.6): no cenário C, `plr_window` do
+      escravo teve picos de 22-32% nos primeiros 20 s de jamming; a
+      primeira máscara foi aplicada em s=20 (8 no total até s=75) e de
+      s≥30 em diante a média caiu para **0,4%** (42 janelas, quase todas
+      0%), **sem nenhuma queda de enlace**. Mesmo jamming sem mitigação
+      (cenário B): picos de 28-64% o tempo todo, média 11,8% depois de
+      s=30. Observação: a mitigação atuou só por blacklist — o analisador
+      não alertou (ver `spectrum-attack-classification` 3.x), então não
+      houve troca de seed nesta validação.
       **Tentado em 2026-09-23, não passava**: a mitigação disparou
       corretamente (4.1-4.3), mas ~5s depois o enlace caiu de vez
       (`loss_of_sync`, 2x) e ficou preso tentando repareear pelo resto da
