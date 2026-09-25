@@ -97,6 +97,22 @@
       registrado para a monografia**: a ordem de salto é previsível (só a
       fase depende da seed), então um jammer que siga a tabela na mesma
       ordem acompanha o enlace.
+      **2ª rodada, jammer `adaptive` (2026-09-25 01:47-01:56,
+      `logs/battery-20260925-042708`)** — fase de jamming: A 0,5% miss /
+      32,4 frag/s (de 46) / 0 quedas; B 17,9% / 12,6 / 1; C 14,4% / 14,8 /
+      0. Também aqui A > C > B. O `adaptive` não consegue manter a trava nem
+      no canal fixo do cenário A (só 46 de 202 travas em ch 10): o enlace
+      transmite pacotes curtos com ciclo de trabalho baixo, o
+      sensoriamento de 3 amostras perde a maioria e solta; e o Wi-Fi em
+      ch 27 continua atraindo travas. **Conclusão metodológica**: nesta
+      bancada nenhum dos modos de jammer disponíveis reproduz a ordem
+      A < B < C do guia — o resultado depende do modelo de atacante. Um
+      canal fixo limpo com retransmissão a cada 25 ms resiste a jammers que
+      só o atingem por instantes; um jammer *permanente* no canal fixo
+      (que nenhum modo atual implementa) derrubaria A trivialmente, e é
+      esse o cenário que justifica FHSS. Para a monografia: apresentar os
+      resultados por modelo de jammer, e decidir (com o orientador) se
+      vale acrescentar um modo "canal fixo" ao jammer para o cenário A.
 - [ ] 4.3 Exportar os gráficos finais (`logs/battery-<ts>.png`, já gerado
       por `plot_battery.py`) para uso na monografia. Depende de 4.2 rodar
       com dados reais primeiro.
