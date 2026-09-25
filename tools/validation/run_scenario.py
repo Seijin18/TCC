@@ -106,14 +106,15 @@ def main():
         help="comando enviado para ligar o jammer (default: 'jam on')",
     )
     ap.add_argument(
-        "--jammer-mode", choices=["sweep", "targeted"], default="sweep",
+        "--jammer-mode", choices=["sweep", "targeted", "adaptive"], default="sweep",
         help="modo do jammer, enviado como 'mode <x>' antes de ligar "
         "(default: sweep). IMPORTANTE: 'sweep' varre só 2-80 MHz, que "
         "cobre apenas 8 dos 16 canais de HOPPING_CHANNELS -- alvo_avg "
         "(media sobre os 16) tem teto estrutural de ~50%%, abaixo do "
         "LIMIAR_ALVO=70%% do analisador, entao o alerta NUNCA dispara em "
         "sweep não importa a potência/tempo. Use 'targeted' (cobre os 16 "
-        "canais direto) para de fato disparar alert_on/rekey.",
+        "canais direto) para de fato disparar alert_on/rekey ou 'adaptive' "
+        "(detecta energia nos 16 HOPPING_CHANNELS, tranca no em uso, re-verifica a ~150 ms).",
     )
     ap.add_argument(
         "--jammer-power", choices=["min", "low", "high", "max"], default=None,

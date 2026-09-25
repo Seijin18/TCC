@@ -133,9 +133,11 @@ def main():
     ap.add_argument("--jammer-board", default="placa_b")
     ap.add_argument("--jammer-cmd", default="jam on")
     ap.add_argument(
-        "--jammer-mode", choices=["sweep", "targeted"], default="targeted",
+        "--jammer-mode", choices=["sweep", "targeted", "adaptive"], default="targeted",
         help="default 'targeted' -- 'sweep' não cobre os 16 canais de HOPPING_CHANNELS "
-        "e não é comparável entre os 3 cenários da mesma forma (ver run_scenario.py)",
+        "e não é comparável entre os 3 cenários da mesma forma (ver run_scenario.py); "
+        "'adaptive' detecta energia nos 16 HOPPING_CHANNELS e tranca no canal em uso, "
+        "re-verificando a cada ~150 ms (jammer reativo, justo entre cenários A/B/C)",
     )
     ap.add_argument("--jammer-power", choices=["min", "low", "high", "max"], default="high")
     ap.add_argument(

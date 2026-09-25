@@ -71,6 +71,32 @@
       **Bloqueado**: precisa de placa_b (escravo+jammer) conectada — não
       disponível nesta sessão (só placa_a aparece em
       `/dev/serial/by-id`).
+      **1ª rodada completa (2026-09-25 01:37-01:46,
+      `logs/battery-20260925-041711.{json,png}`, jammer `targeted` PA_LOW,
+      30/90/30 s)** — fase de jamming:
+
+      | Cenário | miss % | frag/s | quedas |
+      |---|---|---|---|
+      | A (canal fixo 10) | 0,0 | 46,5 | 0 |
+      | B (hopping, sem mitigação) | 16,7 | 14,2 | 1 |
+      | C (hopping + mitigação) | 4,6 | 30,9 | 0 |
+
+      C > B como esperado (mitigação reduz a perda de 16,7% para 4,6% e
+      dobra o throughput; já no baseline a blacklist tira os canais do
+      Wi-Fi: 4,7% vs 10,4%). **Mas A > C, o contrário do guia** — e o
+      motivo é do *jammer*, não do sistema: o modo `targeted` percorre
+      `HOPPING_CHANNELS` na ordem da tabela (60 ms por canal), e a
+      sequência de salto também percorre a tabela na mesma ordem
+      (`get_next_active_channel` = `(seed + counter) % ativos` — a seed só
+      desloca a fase). Um jammer round-robin colide sistematicamente com um
+      salto round-robin, enquanto o canal fixo só é atingido 1/16 do tempo
+      e a retransmissão a cada 25 ms do mestre dentro da janela do hop
+      absorve isso. Conclusão: `targeted` não é um atacante justo para o
+      cenário A; repetir com o jammer reativo `adaptive` (ataca o canal
+      que o enlace estiver usando, fixo ou não). **Achado de projeto
+      registrado para a monografia**: a ordem de salto é previsível (só a
+      fase depende da seed), então um jammer que siga a tabela na mesma
+      ordem acompanha o enlace.
 - [ ] 4.3 Exportar os gráficos finais (`logs/battery-<ts>.png`, já gerado
       por `plot_battery.py`) para uso na monografia. Depende de 4.2 rodar
       com dados reais primeiro.
