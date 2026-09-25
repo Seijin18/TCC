@@ -8,6 +8,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "../../shared/hopping.h"
+#include "../../shared/control_policy.h"
 #include "../../shared/protocol.h"
 #include "../../shared/pairing.h"
 #include "../../shared/telemetry.h"
@@ -683,22 +684,28 @@ static uint16_t compute_candidate_mask()
                                 g_hop_counter, CHANNEL_FAIL_THRESHOLD, RECOVERY_COOLDOWN_HOPS);
 }
 
+// blacklist-decay (achado de bancada 2026-09-24): mascara-alvo EFETIVA --
+// o valor ja agendado (ainda nao aplicado por apply_scheduled_changes())
+// quando houver, senao a mascara ja aplicada. Usada por
+// decide_control_proposal() (shared/control_policy.h) pra nunca reproposta
+// algo identico ao que ja esta a caminho.
+static uint16_t effective_channel_mask()
+{
+    return g_mask_apply_scheduled ? g_mask_apply_value : g_channel_mask;
+}
+
 static void maybe_enqueue_control()
 {
-    if (g_control_pending != 0)
-        return;
-    // scenario-automation, Cenário A: modo fixo mede o baseline SEM
-    // nenhuma adaptação -- nenhum reseed nem reavaliação de blacklist
-    // enquanto ativo.
-    if (g_fixed_channel_mode)
-        return;
-    // scenario-automation, Cenário B: hopping continua normal, mas sem
-    // reação a ataque -- mede o quanto o FHSS sozinho (sem detecção nem
-    // blacklist) já ajuda, isolado do ganho adicional da mitigação ativa.
-    if (!g_mitigation_enabled)
+    uint16_t candidate = compute_candidate_mask();
+    ControlProposalDecision decision = decide_control_proposal(
+        g_control_pending != 0, g_fixed_channel_mode, g_mitigation_enabled,
+        g_seed_apply_scheduled, g_mask_apply_scheduled, g_reseed_needed,
+        candidate, effective_channel_mask());
+
+    if (decision.kind == ControlProposalKind::kNone)
         return;
 
-    if (g_reseed_needed)
+    if (decision.kind == ControlProposalKind::kSeed)
     {
         g_control_pending = MSG_CTRL_SEED;
         g_control_seed_value = (uint16_t)random(0, 101);
@@ -709,15 +716,12 @@ static void maybe_enqueue_control()
         return;
     }
 
-    uint16_t candidate = compute_candidate_mask();
-    if (candidate != g_channel_mask)
-    {
-        g_control_pending = MSG_CTRL_BLACKLIST;
-        g_control_mask_value = candidate;
-        g_control_apply_at = g_hop_counter + CONTROL_RETRY_HOPS + CONTROL_APPLY_MARGIN;
-        g_control_retries_left = CONTROL_RETRY_HOPS;
-        tlm_printf("mestre", "rekey_tx", "kind=blacklist;mask=0x%04X;apply=%lu", g_control_mask_value, g_control_apply_at);
-    }
+    // ControlProposalKind::kBlacklist
+    g_control_pending = MSG_CTRL_BLACKLIST;
+    g_control_mask_value = decision.mask_value;
+    g_control_apply_at = g_hop_counter + CONTROL_RETRY_HOPS + CONTROL_APPLY_MARGIN;
+    g_control_retries_left = CONTROL_RETRY_HOPS;
+    tlm_printf("mestre", "rekey_tx", "kind=blacklist;mask=0x%04X;apply=%lu", g_control_mask_value, g_control_apply_at);
 }
 
 // scenario-automation: throughput = fragmentos confirmados / segundo,
