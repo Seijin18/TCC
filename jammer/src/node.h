@@ -7,6 +7,10 @@
 #include <cstring>
 #include "../../shared/hopping.h"
 #include "../../shared/telemetry.h"
+// jammer-emission-check (tarefa 3.1): RF24Diag/tlm_radio_regs para
+// diagnosticar variante (P vs clone nao-P) do(s) radio(s) do jammer no
+// boot -- ver shared/radio_diag.h e escravo/src/node.h:411 (mesmo padrao).
+#include "../../shared/radio_diag.h"
 
 #define PIN_CE_VSPI 22
 #define PIN_CSN_VSPI 21
@@ -50,8 +54,12 @@ static const uint32_t JAM_TARGETED_HOLD_MS = 60;
 static SPIClass vspi(VSPI);
 static SPIClass hspi(HSPI);
 
-static RF24 jammer_radio(PIN_CE_VSPI, PIN_CSN_VSPI);
-static RF24 jammer_radio2(PIN_CE_HSPI, PIN_CSN_HSPI);
+// jammer-emission-check 3.1: RF24Diag (nao RF24) para poder ler os
+// registradores via tlm_radio_regs() -- mesma troca de tipo (sem mudanca
+// de comportamento) que mestre_radio/escravo_radio ja usam, ver
+// shared/radio_diag.h.
+static RF24Diag jammer_radio(PIN_CE_VSPI, PIN_CSN_VSPI);
+static RF24Diag jammer_radio2(PIN_CE_HSPI, PIN_CSN_HSPI);
 
 static bool has_radio2 = false;
 
@@ -360,6 +368,16 @@ static void jammer_setup()
     }
 
     tlm_event("jammer", "boot");
+    // jammer-emission-check 3.1: dump dos registradores + variante do(s)
+    // radio(s) no boot, pra comparar isPVariant()/RF_SETUP contra o
+    // criterio de emissao real medido na tarefa 2 (design.md).
+    tlm_radio_regs("jammer", jammer_radio, "boot");
+    if (has_radio2)
+        tlm_radio_regs("jammer", jammer_radio2, "boot_r2");
+    tlm_printf("jammer", "variant", "p=%d;p2=%d;radios=%d",
+               jammer_radio.isPVariant(),
+               has_radio2 ? jammer_radio2.isPVariant() : -1,
+               has_radio2 ? 2 : 1);
 
     if (!g_jam_enabled)
     {

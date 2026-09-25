@@ -28,28 +28,73 @@ três de uma vez:
 | Confundidor | Onde vive | Some em 94-125? |
 |---|---|---|
 | Wi-Fi real da bancada | ~ch 26-45 | sim (fora da faixa) |
-| Tráfego do próprio enlace | onde o mestre está saltando | sim, se **enlace desligado** |
+| Tráfego do próprio enlace | onde o mestre está saltando | sim, com enlace em `mode fixed` (ch 10) |
 | Sweep do jammer (2-80) | 2-80 MHz | sim (faixa não coberta pelo sweep) |
 
 O modo `targeted` **hita** os 7 canais altos (é a tabela inteira). Então:
-enlace OFF + jammer targeted + olhar só 94-125 ⇒ qualquer energia ali é do
-jammer e de mais nada. Não existe comando de "canal fixo" no firmware atual;
-targeted percorrendo os 16 é suficiente porque a energia acumula nesses 7 ao
-longo de muitos sweeps.
+enlace preso no canal 10 + jammer targeted + olhar só 94-125 ⇒ qualquer
+energia ali é do jammer e de mais nada.
+
+### Correção do método original (revisão 2026-09-25): NÃO desligar o enlace
+
+O plano inicial (task 2.1) mandava "desligar o enlace" para o mestre não
+poluir a faixa. Isso está **errado** contra o firmware atual e produziria um
+falso "não irradia":
+
+1. **Não existe comando "link off".** O mestre só aceita `seed`,
+   `mode fixed|hopping`, `mitigation on|off`, `reset`, `regs`
+   (`mestre/src/node.h`).
+2. **O jammer só emite com o enlace confirmado.** Na placa combinada, o
+   jammer só liga a portadora quando o escravo reporta `ready`
+   (`jammer/src/node.h`, `g_jammer_ready_source`); esse flag cai em todo
+   `loss_of_sync` (`escravo/src/node.h`, `notify_ready(false)`). Sem enlace,
+   `jam on` fica só esperando — nada é transmitido.
+3. **Mestre despareado polui a própria faixa alta.** Sem par, o mestre fica
+   sondando os `PAIRING_CANDIDATES = {76,90,96,101,108,114,119,124}`
+   (`shared/protocol.h`), seis deles a 1-3 canais da faixa 94-125.
+
+**Método corrigido**: manter o enlace **pareado** e pôr os dois lados em
+`mode fixed` (trava o enlace no `TEST_FIXED_CHANNEL = HOPPING_CHANNELS[0] =
+10`, fora da faixa de teste). O jammer só checa o enlace **ao iniciar** a
+portadora; uma vez ligado, continua emitindo mesmo que o enlace caia depois.
+Se o enlace **cair** durante a fase ON (o escravo é co-locado com o jammer),
+isso por si só já é evidência de que o jammer irradia — registrar esses
+`loss_of_sync` e computá-los no veredito.
 
 ## Critério de decisão (o que conta como "irradia")
 
-Para cada canal em {94,100,105,110,115,120,125}, calcular a média da coluna
-correspondente do `spectrum.csv` nas linhas da fase OFF e nas da fase ON.
+### Por que "ON ≥ 2× OFF" não serve
 
-- **Irradia**: pelo menos um dos 7 canais sobe de forma clara ON vs OFF
-  (proposta de limiar: ON ≥ 2× OFF **e** ON acima do ruído de fundo médio da
-  faixa 94-125 na fase OFF). Registrar o delta por canal.
-- **Não irradia / fraco demais**: nenhum dos 7 sobe além do ruído.
+Na faixa 94-125 o OFF é ~0, então "ON ≥ 2× OFF" passa com um único hit
+espúrio. Pior: em `targeted`, um rádio só está num canal por vez — segura
+cada canal ~60 ms e percorre os 16, enquanto o analisador amostra cada canal
+~1x por sweep (~0,9 s). Logo, mesmo irradiando forte, **cada** canal alto só
+acende em ~6% dos sweeps (~12% se a placa B tiver o segundo rádio do jammer).
+São ~4 hits por canal em 60 s. Um limiar por-canal absoluto interpretaria
+isso como ruído.
 
-Guardar os números crus (média por canal, por fase) no relatório —
-independentemente do veredito, eles entram no TCC como caracterização do
-atacante.
+### Critério corrigido (revisão 2026-09-25)
+
+Fases de **120 s** cada (não 60 s), para acumular contagem estatística.
+Fatiar `spectrum.csv` por epoch em OFF e ON e computar:
+
+1. **Por canal** {94,100,105,110,115,120,125}: média da atividade e fração de
+   sweeps com atividade > 0, OFF vs ON (tabela vai pro TCC de qualquer jeito).
+2. **Combinado nos 7 canais**: fração de sweeps com **qualquer** atividade > 0
+   nos 7, OFF vs ON. Este é o discriminante principal.
+3. **`loss_of_sync` durante ON vs OFF**: queda do enlace co-locado na fase ON
+   é evidência direta de emissão.
+
+**Veredito "irradia"** se qualquer um valer:
+- fração combinada ON claramente acima da OFF (esta ~0), consistente com o
+  ~6-12% esperado, com ≥ 1 canal cuja média ON supera nitidamente a OFF; **ou**
+- o enlace cai (`loss_of_sync`) na fase ON e não na OFF.
+
+**"Não irradia / fraco demais"**: fração combinada ON indistinguível da OFF
+**e** enlace estável nas duas fases.
+
+Guardar os números crus (média + fração por canal, por fase) no relatório —
+independentemente do veredito, entram no TCC como caracterização do atacante.
 
 ## Ramo condicional depois do veredito
 

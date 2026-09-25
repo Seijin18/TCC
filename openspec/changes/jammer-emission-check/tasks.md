@@ -10,36 +10,50 @@
 
 ## 2. Teste de isolamento — o jammer irradia? (sem firmware, decisivo)
 
-- [ ] 2.1 Desligar o enlace para o mestre não poluir a faixa: `echo
-      "placa_a link off" >> logs/cmd.in` (ou o comando equivalente que
-      `run_battery.py` usa para o cenário sem tráfego; se não houver, resetar
-      só o escravo/deixar o mestre sem par). Confirmar em `logs/state.json`
-      que não há `msg_done`/`ack` novos.
+> Método corrigido na revisão 2026-09-25 (ver `design.md`, "Correção do
+> método original"): **NÃO desligar o enlace** — sem enlace o jammer nem
+> emite (só liga com `ready`) e o mestre despareado polui a faixa alta
+> sondando os `PAIRING_CANDIDATES`. Em vez disso, manter o enlace pareado e
+> os dois lados em `mode fixed` (trava em ch 10, fora de 94-125). Automatizado
+> em `tools/validation/emission_check.py`.
+
+- [ ] 2.1 Confirmar que o enlace está pareado (`state.json`: `msg_done`
+      recente nos dois lados). Travar em canal fixo fora da faixa:
+      `echo "placa_a mode fixed" >> logs/cmd.in`; `echo "placa_b mode fixed"
+      >> logs/cmd.in`. Aguardar assentar e confirmar que o enlace continua
+      vivo (novos `msg_done`).
 - [ ] 2.2 Garantir jammer OFF e anotar o epoch: `echo "placa_b jam off" >>
-      logs/cmd.in`. Coletar **60 s** de `spectrum.csv` como fase OFF.
+      logs/cmd.in`. Coletar **120 s** de `spectrum.csv` como fase OFF.
 - [ ] 2.3 `echo "placa_b mode targeted" >> logs/cmd.in`; `echo "placa_b power
       max" >> logs/cmd.in`; `echo "placa_b jam on" >> logs/cmd.in`. Confirmar
-      `@jammer;...e=jam_state_on` e `[JAMMER] Potencia: MAX` no log. Coletar
-      **60 s** como fase ON.
-- [ ] 2.4 `echo "placa_b jam off" >> logs/cmd.in`; `echo "placa_b power low"
-      >> logs/cmd.in`. Religar o enlace e confirmar em `state.json` que volta
-      a parear (senão, deixar registrado).
-- [ ] 2.5 Analisar `spectrum.csv`: para cada canal em
-      {94,100,105,110,115,120,125}, média da coluna na fase OFF e na fase ON
-      (fatiar por epoch). Aplicar o critério do `design.md` ("Critério de
-      decisão"). **Registrar a tabela média-por-canal-por-fase e o veredito
-      (irradia / não irradia)** no `ROADMAP.md` e no fim deste tasks.md.
+      `@jammer;...e=jam_state_on` no log. Coletar **120 s** como fase ON,
+      **anotando qualquer `loss_of_sync`** no trecho (queda do escravo
+      co-locado = evidência de emissão).
+- [ ] 2.4 Restaurar: `echo "placa_b jam off" >> logs/cmd.in`; `echo "placa_b
+      power low" >> logs/cmd.in`; `echo "placa_a mode hopping" >> logs/cmd.in`;
+      `echo "placa_b mode hopping" >> logs/cmd.in`. Confirmar que o enlace
+      volta ao hopping normal.
+- [ ] 2.5 Analisar `spectrum.csv` (via `emission_check.py analyze`): tabela
+      média + fração de sweeps por canal {94,100,105,110,115,120,125}, OFF vs
+      ON; fração combinada nos 7; contagem de `loss_of_sync` por fase. Aplicar
+      o critério do `design.md` ("Critério corrigido"). **Registrar a tabela e
+      o veredito (irradia / não irradia)** no `ROADMAP.md` e no fim deste
+      tasks.md.
 
 ## 3. Diagnóstico de variante no boot do jammer (firmware — barato, sempre útil)
 
-- [ ] 3.1 Em `jammer/src/node.h`, no boot (após o `isChipConnected()`),
+- [x] 3.1 Em `jammer/src/node.h`, no boot (após o `isChipConnected()`),
       chamar `tlm_radio_regs("jammer", jammer_radio, "boot")` (e para
       `jammer_radio2` se `has_radio2`), espelhando o que
       `escravo/src/node.h:411` já faz. Incluir `shared/radio_diag.h` se ainda
       não estiver.
-- [ ] 3.2 Parar o logger (`pgrep -f "[t]ools/logger/main.py" | xargs -r
-      kill`), `.venv/bin/pio run -e placa_b -t upload`, subir o logger de
-      novo. (Placa A não é reflashada aqui.)
+- [ ] 3.2 Reflash da placa B (task 1.1 diz "não reiniciar o logger", mas o
+      flash **exige** parar as seriais — é a exceção necessária; depois o
+      enlace só precisa re-parear): parar o logger (`pgrep -f
+      "[t]ools/logger/main.py" | xargs -r kill`), `.venv/bin/pio run -e
+      placa_b -t upload`, subir o logger de novo. (Placa A não é reflashada
+      aqui.) Fazer o teste 2 (sem firmware) **antes** deste reflash, para não
+      perturbar a bancada entre a medição decisiva e sua análise.
 - [ ] 3.3 Ler a telemetria `@jammer;...e=regs;...` do boot e registrar
       `isPVariant` e `RF_SETUP` do(s) rádio(s) do jammer.
 

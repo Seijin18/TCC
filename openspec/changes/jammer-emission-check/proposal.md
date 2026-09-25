@@ -29,6 +29,12 @@ Num clone **não-P**, ele apenas seta `CONT_WAVE`+`PLL_LOCK` e sobe CE com o
 TX FIFO vazio, o que em muitos clones produz portadora fraca, intermitente ou
 ausente. O firmware nunca registrou qual variante o rádio do jammer reporta.
 
+> Ressalva (revisão 2026-09-25): esta hipótese pode não se sustentar — a
+> maioria dos clones NRF24 reporta como P, e um chip genuinamente não-P nem
+> teria modo de portadora contínua. A leitura de registradores no boot
+> (Tarefa 3) resolve isso empiricamente de qualquer forma; tratá-la como
+> diagnóstico, não como causa já estabelecida.
+
 Sem responder "o jammer irradia?" primeiro, qualquer resultado de bateria é
 ambíguo: "mitigação venceu o ataque" e "não havia ataque" são
 indistinguíveis nos dados.
