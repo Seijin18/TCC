@@ -31,6 +31,14 @@
       paralelo, confirmar visualmente no heatmap que o modo `targeted`
       concentra energia só nos 16 canais da tabela, diferente do padrão
       disperso do `sweep`.
+      **Tentativa 2026-09-24 16:01 (PA_LOW, inconclusiva)**: 30 s base →
+      40 s `targeted` → 40 s `sweep`, comparando `logs/spectrum.csv`:
+      nos dois modos a atividade subiu ~2,3× por igual (16 canais da
+      tabela 1,7 → ~3,8; demais 2-80 4,5 → ~10), e o pico em todas as
+      fases, inclusive a base, é ch 38-45 (Wi-Fi real perto da bancada).
+      Em PA_LOW, na posição atual das placas, o analisador não separa o
+      padrão do jammer do Wi-Fi. Repetir com `power high` (sintaxe correta
+      é `power <min|low|high|max>`, não `jam power ...`).
 - [x] 3.3 Rodar mestre+escravo com PLR (`plr-metric`) sob jammer targeted e
       confirmar que o PLR sobe de forma comparável ao sweep — serve de
       baseline para o cenário B da Fase 5. **Confirmado em 2026-09-18**
