@@ -68,7 +68,14 @@
       **Retune determinístico (CE baixo → RF_CH → CE alto) em
       hopCarrier() após resultados não reprodutíveis do targeted em
       2026-09-25; revalidar reprodutibilidade com duas baterias
-      seguidas.**
+      seguidas.** Resultado (`logs/battery-20260925-045843`/`-050631`):
+      B e C reprodutíveis entre as duas rodadas (7,2/6,8% e 5,6/5,2%), mas
+      com perfil por canal quase igual ao sem jammer — o `targeted` em
+      PA_LOW, na posição atual, quase não afeta o enlace em salto; o
+      cenário A (canal fixo 10) continua não reprodutível (27,7% com 1
+      queda vs 0,0%). Sem enxergar a emissão real do jammer não dá para
+      separar "jammer fraco" de "jammer errático" — **precisa do analisador
+      ao lado do jammer (mover placas)**.
 - [x] 3.3 Rodar mestre+escravo com PLR (`plr-metric`) sob jammer targeted e
       confirmar que o PLR sobe de forma comparável ao sweep — serve de
       baseline para o cenário B da Fase 5. **Confirmado em 2026-09-18**

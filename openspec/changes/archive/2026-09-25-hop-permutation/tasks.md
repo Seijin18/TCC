@@ -15,7 +15,7 @@
       `resync_ok` ≈ `resync_park`).
       **2026-09-25 02:16-02:26**: 0 `loss_of_sync`, 41/41 resync, 2.913
       `msg_done`, 8,0% de miss (Wi-Fi em 27/34), 44 máscaras aplicadas.
-- [ ] 2.2 Bateria A/B/C com `targeted` (mesmos parâmetros da de
+- [x] 2.2 Bateria A/B/C com `targeted` (mesmos parâmetros da de
       2026-09-25 01:37): comparar a perda do cenário B com a anterior
       (16,7%).
       **1ª tentativa (`logs/battery-20260925-044627`), inconclusiva**: B
@@ -27,7 +27,17 @@
       produziu três ataques diferentes no mesmo dia: o jammer não é
       reprodutível, então a queda de B não pode ser atribuída a este
       change. Ver `targeted-jammer` (retune em modo portadora constante).
+      **Com o retune determinístico do jammer, duas baterias seguidas
+      (`logs/battery-20260925-045843`, `-050631`)**: B 7,2% / 6,8% e C
+      5,6% / 5,2% de miss no jamming — agora reprodutíveis, com perfil por
+      canal praticamente igual ao sem jammer (só o Wi-Fi em 34 se destaca).
+      Ou seja, nesta posição das placas o `targeted` em PA_LOW quase não
+      afeta o enlace em salto, e **não dá para medir o ganho da permutação
+      contra ele**. Fica como propriedade verificada por teste unitário (a
+      ordem depende da seed; cada canal uma vez por ciclo) e sem regressão
+      em bancada (2.1); a medição do ganho contra um atacante que siga a
+      tabela depende de um jammer caracterizado de perto.
 
 ## 3. Documentação
 
-- [ ] 3.1 Registrar resultado; ROADMAP; validar; arquivar.
+- [x] 3.1 Registrar resultado; ROADMAP; validar; arquivar.
