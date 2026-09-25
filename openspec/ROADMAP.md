@@ -6,6 +6,34 @@ verdade de contexto/dependências) — é a camada de "o que fazer agora, em que
 ordem" derivada dele. Atualizar esta lista conforme tasks forem fechadas ou
 changes forem arquivados.
 
+## Estado em 2026-09-25 (madrugada): validação sob ataque feita até onde dá remotamente
+
+Arquivados: `plr-metric`, `adaptive-rendezvous`,
+`pairing-handshake-hardening`, `hop-resync`, `hop-permutation`.
+Validados em bancada: enlace sem quedas em 10 min (dois soaks), self-healing
+da blacklist sob `targeted` (PLR 22-32% → 0,4%, sem queda —
+`dynamic-seed-blacklist` 4.4), `blacklist-decay` §4 inteira, placas sem
+reset por 8,5 h, telemetria sem entrelaçamento. Baterias A/B/C rodadas
+(ver `scenario-automation` 4.2): C > B de forma consistente; A > B/C com
+os jammers disponíveis — depende do modelo de atacante.
+
+**Pendências que exigem intervenção manual**:
+
+1. **Aproximar a placa A (analisador) do jammer (placa B)** — hoje o
+   analisador não enxerga o jammer nem em `power high`, só o Wi-Fi real
+   (ch ~26-45). Destrava `targeted-jammer` 3.2 (ver a emissão real de cada
+   modo — o `targeted` foi fraco/errático no enlace), `spectrum-attack-
+   classification` 3.1 (recalibrar falso positivo do Wi-Fi) e 3.3,
+   `two-board-topology` 6.2 e `dynamic-seed-blacklist` 4.5; arquivar
+   `dynamic-seed-blacklist` libera o arquivamento de `blacklist-decay` (já
+   100% validado, mas seu delta modifica um requisito daquele).
+2. **Conferência visual do dashboard Tkinter** (`telemetry-logging` 4.4,
+   5.2).
+3. **Decisão de metodologia A/B/C** (`scenario-automation` 4.2/4.3): qual
+   modelo de jammer define "o mesmo jamming" para o cenário A — nenhum modo
+   atual fica parado no canal fixo; um modo "canal fixo" derrubaria A
+   trivialmente.
+
 ## Sessão 2026-09-24/25 (noite): enlace estável sem jammer — `hop-resync` + enxurrada de controle
 
 Com o pareamento consertado, apareceu o próximo defeito: **com o jammer
