@@ -344,7 +344,10 @@ static void reset_to_scanning()
     g_hops_since_rx = 0;
     g_seed_apply_scheduled = false;
     g_mask_apply_scheduled = false;
-    g_channel_mask = 0xFFFF;
+    // jamming-mitigation-hardening: NÃO zerar a máscara aqui -- de qualquer
+    // forma a LinkProbeV2 do mestre re-pareado traz a máscara persistida e o
+    // escravo a adota; manter evita uma janela de discordância. (Se o mestre
+    // for reiniciado limpo, sua sonda virá com 0xFFFF e o escravo adota.)
     // hop-resync: qualquer estacionamento em curso nao faz mais sentido
     // depois de voltar a escanear (o proximo estacionamento so pode
     // acontecer depois de um novo enlace confirmado).
@@ -669,6 +672,28 @@ static void escravo_advance_hop()
     apply_scheduled_changes();
 }
 
+// jamming-mitigation-hardening: canal (posição na tabela) que o escravo
+// suspeita jammed -- muitos misses recentes E nenhum sucesso recente, entre os
+// canais ainda ativos na máscara. É a evidência LIMPA que o mestre não tem
+// (o mestre confunde jamming com dessincronismo). Reportado no FragmentAck.
+static const uint8_t SUSPECT_MISS_MIN = 2;
+static uint8_t escravo_suspect_channel()
+{
+    int best = -1;
+    uint8_t best_miss = SUSPECT_MISS_MIN;
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+    {
+        if ((g_channel_mask & (1u << i)) == 0)
+            continue; // já banido -- não re-reportar
+        if (g_resync_channel_ok[i] == 0 && g_resync_channel_miss[i] >= best_miss)
+        {
+            best_miss = g_resync_channel_miss[i];
+            best = i;
+        }
+    }
+    return best < 0 ? SUSPECT_NONE : (uint8_t)best;
+}
+
 // pairing-handshake-hardening (D3, tarefa 3.5): monta e envia o LinkAckV2
 // que ecoa {nonce, seed} da sonda recebida -- usado tanto na primeira sonda
 // válida (SCANNING -> PROVISIONAL) quanto no re-ack idempotente (mesmo
@@ -690,7 +715,7 @@ static bool escravo_send_ack_for(const LinkProbeV2 &probe, bool &dropped_for_tes
         return false;
     }
 
-    LinkAckV2 ack = {MSG_LINK_ACK, PAIRING_PROTO_VER, probe.nonce, probe.seed};
+    LinkAckV2 ack = {MSG_LINK_ACK, PAIRING_PROTO_VER, probe.nonce, probe.seed, probe.mask};
     escravo_radio.stopListening();
     // radio_send() em vez de write(): ver shared/protocol.h (bug de
     // retry-forever em RF24::write() nesta versao da lib) -- o mestre pode
@@ -777,6 +802,7 @@ static void escravo_loop()
                     {
                         g_session_nonce = probe.nonce;
                         g_seed = probe.seed;
+                        g_channel_mask = probe.mask; // jamming-mitigation-hardening: adota a blacklist persistida
 
                         bool dropped_for_test = false;
                         bool sent = escravo_send_ack_for(probe, dropped_for_test);
@@ -861,6 +887,7 @@ static void escravo_loop()
                         bool is_new_session = (decision == PAIR_ADOPT_NEW);
                         g_session_nonce = probe.nonce;
                         g_seed = probe.seed;
+                        g_channel_mask = probe.mask; // jamming-mitigation-hardening: adota a blacklist persistida
 
                         bool dropped_for_test = false;
                         bool sent = escravo_send_ack_for(probe, dropped_for_test);
@@ -1130,6 +1157,7 @@ static void escravo_loop()
                         ack.msg_id = pkt.msg_id;
                         ack.fragment_index = pkt.fragment_index;
                         ack.complete = complete ? 1 : 0;
+                        ack.suspect_idx = escravo_suspect_channel(); // jamming-mitigation-hardening
 
                         escravo_radio.stopListening();
                         radio_send(escravo_radio, &ack, sizeof(ack));

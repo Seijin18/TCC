@@ -369,6 +369,33 @@ static unsigned long g_hop_start_at = 0;
 static uint8_t g_current_channel = PAIRING_CANDIDATES[0];
 static uint32_t g_hops_since_ack = 0;
 
+// jamming-mitigation-hardening: só atribui falha de canal (para blacklist)
+// quando a perda é ISOLADA -- o hop imediatamente anterior teve ack, ou seja
+// g_hops_since_ack == 1 logo após o incremento deste miss. Um jammer de canal
+// fixo produz exatamente isso: sucessos nos canais limpos e um miss isolado
+// no canal atacado. Já um dessincronismo (escravo estacionado) produz uma
+// RAJADA de misses -- do 2º em diante g_hops_since_ack > 1 e não atribuímos,
+// evitando contaminar canais inocentes (achado 2026-09-25: parks em ch 46/82
+// banindo canais que não estavam jammed). O miss ainda conta para
+// g_hops_since_ack/LOSS_HOPS; só não vira evidência de canal ruim.
+static const uint32_t ATTRIB_MAX_HOPS_SINCE_ACK = 1;
+
+// jamming-mitigation-hardening: índice do canal que o escravo reportou como
+// suspeito de jamming no último FragmentAck (SUSPECT_NONE = nenhum). É a
+// evidência autoritativa (o escravo enxerga o canal jammed de forma limpa);
+// consumida logo após o ack_ok para forçar o ban do canal certo.
+static uint8_t g_rx_suspect_idx = SUSPECT_NONE;
+
+// jamming-mitigation-hardening: histerese anti-thrash. Cada troca de máscara
+// abre uma breve janela em que mestre e escravo podem ficar em canais
+// diferentes (sincronização por apply_at_hop), causando misses -> mais bans
+// -> mais trocas (ciclo vicioso observado: mediana de 6-8 canais banidos
+// oscilando). Depois de aplicar uma máscara, o mestre não propõe outra troca
+// por MASK_HYSTERESIS_HOPS hops -- tempo do enlace estabilizar antes de
+// reavaliar. Assim converge para banir só o canal atacado e fica estável.
+static uint32_t g_last_mask_change_hop = 0;
+static const uint32_t MASK_HYSTERESIS_HOPS = 16;
+
 // ---- dynamic-seed-blacklist: máscara de canais ativos e evidência própria ----
 static uint16_t g_channel_mask = 0xFFFF;
 static uint8_t g_channel_fail[TABLE_SIZE] = {0};
@@ -539,6 +566,7 @@ static bool try_establish_link()
     probe.ver = PAIRING_PROTO_VER;
     probe.nonce = g_pair_nonce;
     probe.seed = g_seed;
+    probe.mask = g_channel_mask; // jamming-mitigation-hardening: blacklist persiste
 
     mestre_radio.setChannel(g_pair_channel);
     mestre_radio.stopListening();
@@ -649,6 +677,7 @@ static bool wait_fragment_ack(uint8_t expected_fragment, bool &all_complete, uin
         if (ack.type == MSG_FRAGMENT_ACK && ack.msg_id == g_msg_id && ack.fragment_index == expected_fragment)
         {
             all_complete = (ack.complete != 0);
+            g_rx_suspect_idx = ack.suspect_idx; // jamming-mitigation-hardening
             return true;
         }
     }
@@ -741,6 +770,13 @@ static void maybe_enqueue_control()
     if (decision.kind == ControlProposalKind::kNone)
         return;
 
+    // jamming-mitigation-hardening: histerese anti-thrash -- não propõe nova
+    // troca de máscara logo após aplicar uma (deixa o enlace estabilizar).
+    // Não afeta seed/reseed (que é resposta a alerta, mais raro e disruptivo).
+    if (decision.kind == ControlProposalKind::kBlacklist &&
+        (g_hop_counter - g_last_mask_change_hop) < MASK_HYSTERESIS_HOPS)
+        return;
+
     if (decision.kind == ControlProposalKind::kSeed)
     {
         g_control_pending = MSG_CTRL_SEED;
@@ -805,6 +841,7 @@ static void apply_scheduled_changes()
         uint16_t prev_mask = g_channel_mask;
         g_channel_mask = g_mask_apply_value;
         g_mask_apply_scheduled = false;
+        g_last_mask_change_hop = g_hop_counter; // jamming-mitigation-hardening: histerese
         // blacklist-decay: prev= permite tools/logger e plot_scenario.py
         // distinguirem visualmente exclusão (bits somem) de reinclusão
         // (bits voltam) sem precisar rastrear estado próprio.
@@ -971,12 +1008,18 @@ static void reset_to_pairing()
     g_control_pending = 0;
     g_seed_apply_scheduled = false;
     g_mask_apply_scheduled = false;
-    g_channel_mask = 0xFFFF;
-    memset(g_channel_fail, 0, sizeof(g_channel_fail));
-    // blacklist-decay: g_hop_counter volta a 0 acima -- sem isto,
-    // hop_counter - blacklisted_since[i] usaria valores da sessão anterior
-    // e faria wraparound (unsigned), tornando todos os canais "elegíveis"
-    // pra reinclusão instantaneamente (ver design.md, risco de underflow).
+    // jamming-mitigation-hardening: NÃO zerar a blacklist num reset causado
+    // por jamming -- sob um jammer forte o enlace re-pareia toda hora, e
+    // zerar aqui fazia a máscara oscilar sem nunca convergir para banir o
+    // canal atacado (achado de bancada 2026-09-25, jammer-emission-hardware:
+    // mitigação recuperava só ~17%). Mantemos g_channel_mask/g_channel_fail;
+    // como g_hop_counter voltou a 0, blacklisted_since precisa voltar a 0
+    // também (senão hop_counter - blacklisted_since faz underflow unsigned e
+    // reincluiria tudo na hora -- ver blacklist-decay). Com os dois em 0, o
+    // cooldown de recuperação recomeça do início da nova sessão: o canal
+    // banido continua banido por RECOVERY_COOLDOWN_HOPS e só então é
+    // re-testado (dá chance de recuperar se o jammer saiu). A máscara viaja
+    // na LinkProbeV2, então o escravo re-pareado adota o mesmo conjunto.
     memset(g_channel_blacklisted_since, 0, sizeof(g_channel_blacklisted_since));
     reset_throughput_window();
     tlm_event("mestre", "loss_of_sync");
@@ -1223,8 +1266,15 @@ static void mestre_loop()
     {
         guarded_printf("[MESTRE] Falha de envio no hop=%lu canal=%u frag=%u\n", g_hop_counter, g_current_channel, g_current_fragment);
         g_hops_since_ack++;
+        // jamming-mitigation-hardening: só atribui falha a um canal quando a
+        // perda é ISOLADA (enlace saudável, poucos hops sem ack). Durante um
+        // dessincronismo (escravo estacionado/desalinhado) o mestre erra em
+        // vários canais que NÃO estão jammed -- atribuir ali contamina canais
+        // inocentes e faz a máscara oscilar (achado 2026-09-25: mediana de 6
+        // canais banidos, muitos errados). Fora da janela saudável, o miss
+        // ainda conta para g_hops_since_ack/LOSS_HOPS, mas não vira ban.
         uint8_t idx = find_channel_index(channel);
-        if (g_channel_fail[idx] < 255)
+        if (g_hops_since_ack <= ATTRIB_MAX_HOPS_SINCE_ACK && g_channel_fail[idx] < 255)
             g_channel_fail[idx]++;
         g_hop_counter++;
         apply_scheduled_changes();
@@ -1249,6 +1299,18 @@ static void mestre_loop()
         g_hops_since_ack = 0;
         if (g_channel_fail[idx] > 0)
             g_channel_fail[idx]--;
+
+        // jamming-mitigation-hardening: o escravo (evidência limpa) reportou
+        // um canal jammed neste ack -- força esse canal ao limiar de ban.
+        // maybe_enqueue_control() propaga a máscara nova aos dois lados. É o
+        // caminho AUTORITATIVO de ban (o blind attribution do mestre fica só
+        // como reforço, com limiar alto para não contaminar inocentes).
+        if (g_rx_suspect_idx < TABLE_SIZE && (g_channel_mask & (1u << g_rx_suspect_idx)))
+        {
+            if (g_channel_fail[g_rx_suspect_idx] < CHANNEL_FAIL_THRESHOLD)
+                g_channel_fail[g_rx_suspect_idx] = CHANNEL_FAIL_THRESHOLD;
+        }
+        g_rx_suspect_idx = SUSPECT_NONE;
 
         // D5 (tarefa 4.3): primeiro FragmentAck depois do pareamento
         // confirma que o candidato sustenta dado de verdade, não só o
@@ -1278,7 +1340,9 @@ static void mestre_loop()
     else
     {
         g_hops_since_ack++;
-        if (g_channel_fail[idx] < 255)
+        // jamming-mitigation-hardening: idem !any_sent -- atribui só se a
+        // perda for isolada (enlace saudável), não durante dessincronismo.
+        if (g_hops_since_ack <= ATTRIB_MAX_HOPS_SINCE_ACK && g_channel_fail[idx] < 255)
             g_channel_fail[idx]++;
         tlm_printf("mestre", "miss", "ch=%u;frag=%u", channel, g_current_fragment);
         guarded_printf("[MESTRE] Timeout ACK no hop=%lu, frag=%u sera reenviada no proximo salto.\n", g_hop_counter, g_current_fragment + 1);

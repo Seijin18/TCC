@@ -199,7 +199,7 @@ static const uint32_t LOSS_HOPS = 25;
 // e o minimo que ainda deixa uma falha ISOLADA (recupera sozinha no proximo
 // hop, ver design.md "Mecanismo": caso "fragmento perdido") se resolver
 // antes de estacionar.
-static const uint8_t RESYNC_MISS_HOPS = 2;
+static const uint8_t RESYNC_MISS_HOPS = 6;
 // D2: estacionamento dura no maximo (TABLE_SIZE + 2) hops do mestre --
 // TABLE_SIZE cobre um ciclo completo do round-robin sobre a mascara de
 // canais ativa (o mestre passa pelo canal estacionado em no maximo
@@ -215,7 +215,12 @@ static_assert(RESYNC_MISS_HOPS * HOP_TIMEOUT_MS + RESYNC_PARK_MAX_MS < LOSS_HOPS
               "orcamento de ressincronizacao (RESYNC_MISS_HOPS + estacionamento) precisa terminar antes do mestre declarar LOSS_HOPS");
 
 // dynamic-seed-blacklist
-static const uint8_t CHANNEL_FAIL_THRESHOLD = 5; // g_channel_fail >= isso -> candidato a blacklist
+// jamming-mitigation-hardening: baixado de 5 para 3 -- com a atribuição de
+// falha agora restrita a perdas isoladas (ATTRIB_MAX_HOPS_SINCE_ACK em
+// mestre/src/node.h), quase só o canal realmente jammed acumula falha, então
+// um limiar menor bane o atacante mais rápido (antes do enlace colapsar) sem
+// o risco antigo de banir canais inocentes por rajada de dessincronismo.
+static const uint8_t CHANNEL_FAIL_THRESHOLD = 3; // ban rapido; escravo (suspect_idx) da a evidencia limpa, attribution gate evita inocentes
 // blacklist-decay: hops que um canal precisa passar excluído antes de ser
 // reincluído às cegas (ver shared/hopping.h update_channel_mask() e
 // design.md "Cooldown por hop_counter"). Ordem de grandeza inicial, a
@@ -240,6 +245,12 @@ struct __attribute__((packed)) LinkProbeV2
     uint8_t ver;
     uint16_t nonce;
     uint16_t seed;
+    // jamming-mitigation-hardening: a blacklist persiste através do
+    // re-pareamento (o mestre não zera a máscara num reset causado por
+    // jamming). Para o escravo re-pareado saltar no MESMO conjunto de
+    // canais, a máscara viaja na própria sonda -- sem isto, o mestre
+    // saltaria em 15 canais e o escravo em 16, dessincronizando.
+    uint16_t mask;
 };
 
 struct __attribute__((packed)) LinkAckV2
@@ -248,6 +259,7 @@ struct __attribute__((packed)) LinkAckV2
     uint8_t ver;
     uint16_t nonce;
     uint16_t seed;
+    uint16_t mask; // eco da máscara da sonda (confirmação)
 };
 
 struct __attribute__((packed)) FragmentPacket
@@ -267,7 +279,17 @@ struct __attribute__((packed)) FragmentAck
     uint16_t msg_id;
     uint8_t fragment_index;
     uint8_t complete;
+    // jamming-mitigation-hardening: o ESCRAVO é quem tem evidência limpa de
+    // qual canal está jammed -- ele nunca recebe nesse canal enquanto recebe
+    // normalmente nos outros. O mestre, vendo só os próprios misses, não
+    // distingue "canal jammed" de "escravo dessincronizado". Então o escravo
+    // reporta aqui o índice (posição em HOPPING_CHANNELS) do canal que
+    // suspeita jammed (0xFF = nenhum), e o mestre usa isso como evidência
+    // autoritativa para banir o canal certo, sem contaminar os inocentes.
+    uint8_t suspect_idx;
 };
+
+static const uint8_t SUSPECT_NONE = 0xFF;
 
 // dynamic-seed-blacklist: mesmo tamanho (11 bytes, desde hop-resync tarefa
 // 1.2a -- antes 7) que ControlBlacklistPacket -- os dois so aparecem quando
