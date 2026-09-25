@@ -65,6 +65,10 @@
       em aberto só a verificação visual pedida aqui (energia concentrada
       nos 16 canais): exige o analisador perto do jammer — **precisa mover
       placas (intervenção manual)**.
+      **Retune determinístico (CE baixo → RF_CH → CE alto) em
+      hopCarrier() após resultados não reprodutíveis do targeted em
+      2026-09-25; revalidar reprodutibilidade com duas baterias
+      seguidas.**
 - [x] 3.3 Rodar mestre+escravo com PLR (`plr-metric`) sob jammer targeted e
       confirmar que o PLR sobe de forma comparável ao sweep — serve de
       baseline para o cenário B da Fase 5. **Confirmado em 2026-09-18**

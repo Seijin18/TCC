@@ -166,9 +166,27 @@ static void startCarrier()
     guarded_println("[JAMMER] Emissao CW ativa. '.' = heartbeat a cada 1 s\n");
 }
 
+// Achado de bancada (targeted-jammer, retune deterministico, 2026-09-25):
+// o mesmo modo targeted produziu ataques muito diferentes (70-100% de miss
+// em uma bateria, ~15% em outra, so o canal fixo 10 acertando em uma
+// terceira) sem nenhuma mudanca de codigo entre elas. Suspeita confirmada:
+// com a portadora constante ja ativa (startConstCarrier() forcou CONT_WAVE
+// + PLL_LOCK e deixou CE em nivel alto), escrever RF_CH direto com
+// r.setChannel(channel) e CE ainda alto nao reafina o sintetizador de forma
+// confiavel nesses clones de nRF24 -- a portadora podia ficar presa na
+// frequencia antiga de forma nao deterministica. RF24::reUseTX() (chamada
+// internamente por startConstCarrier() em variantes "+") usa exatamente o
+// mesmo padrao ce(LOW) -> ... -> ce(HIGH) para reemitir com seguranca, o
+// que confirma que alternar CE em volta da escrita do canal e compativel
+// com REUSE_TX_PL/CONT_WAVE (o latch de REUSE_TX_PL so e limpo por
+// FLUSH_TX/W_TX_PAYLOAD, nunca por CE baixo, entao nao precisa ser
+// reemitido aqui). Retune deterministico: CE baixo -> RF_CH -> CE alto ->
+// dwell de assentamento.
 static void hopCarrier(RF24 &r, uint8_t channel)
 {
+    r.ce(LOW);
     r.setChannel(channel);
+    r.ce(HIGH);
     delayMicroseconds(PLL_DWELL_US);
 }
 
