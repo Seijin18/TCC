@@ -9,6 +9,7 @@
 #include "../../shared/hopping.h"
 #include "../../shared/protocol.h"
 #include "../../shared/pairing.h"
+#include "../../shared/resync.h"
 #include "../../shared/telemetry.h"
 #include "../../shared/radio_diag.h"
 
@@ -133,6 +134,25 @@ static unsigned long channel_deadline_start = 0;
 static unsigned long hop_start_at = 0;
 static uint8_t current_channel = PAIRING_CANDIDATES[0];
 static uint32_t g_hops_since_rx = 0;
+
+// ---- hop-resync: estacionamento (design.md D1/D2) ----
+// Canal do ultimo FragmentPacket ou pacote de controle valido recebido --
+// candidato a canal pra estacionar se a defasagem persistir (D1). So e lido
+// depois de RESYNC_MISS_HOPS timeouts consecutivos, o que so acontece depois
+// de pelo menos uma recepcao valida ja ter confirmado o enlace -- o valor
+// inicial (primeiro candidato de pareamento) nunca chega a ser usado de
+// verdade.
+static uint8_t g_last_good_channel = PAIRING_CANDIDATES[0];
+// Timeouts de hop CONSECUTIVOS sem nenhuma recepcao valida (fragmento ou
+// controle) -- zerado por qualquer sucesso, em qualquer estado (parado ou
+// nao). Ver resync_should_park() em shared/resync.h.
+static uint8_t g_resync_miss_count = 0;
+static bool g_resync_parked = false;
+static unsigned long g_resync_park_start = 0;
+// hop_counter do proprio escravo no instante em que entrou em PARKED --
+// vira "hop_before" do evento resync_ok (a diferenca pro hop_after adotado
+// mostra se o escravo estava adiantado ou atrasado, ver proposal.md).
+static uint32_t g_resync_hop_before = 0;
 
 // ---- Seed ----
 // pairing-handshake-hardening: g_seed agora é adotado diretamente do campo
@@ -306,6 +326,11 @@ static void reset_to_scanning()
     g_seed_apply_scheduled = false;
     g_mask_apply_scheduled = false;
     g_channel_mask = 0xFFFF;
+    // hop-resync: qualquer estacionamento em curso nao faz mais sentido
+    // depois de voltar a escanear (o proximo estacionamento so pode
+    // acontecer depois de um novo enlace confirmado).
+    g_resync_parked = false;
+    g_resync_miss_count = 0;
     reset_pair_cycle_counters();
     notify_ready(false);
     tlm_event("escravo", "loss_of_sync");
@@ -854,9 +879,74 @@ static void escravo_loop()
     // avançaria hop_counter em 2 em vez de 1 e dessincronizaria os dois
     // lados. Um pacote que chegue bem no instante do timeout só é visto
     // na iteração seguinte (delay de loop(), irrelevante no ESP32).
-    if (millis() - channel_deadline_start >= HOP_TIMEOUT_MS)
+    //
+    // hop-resync (tarefa 1.2, design.md D1/D2): o `if` do timeout se divide
+    // em dois casos -- ESTACIONADO (g_resync_parked) só contabiliza um hop
+    // "virtual" por tempo, sem trocar de canal nem chamar
+    // escravo_advance_hop(); NÃO ESTACIONADO é o caminho de sempre, agora
+    // também contando timeouts consecutivos pra decidir se deve estacionar.
+    // Nos dois casos o `else` (recepção) roda igual sempre que o timeout não
+    // estourou nesta iteração -- é assim que o escravo continua escutando
+    // sem interrupção enquanto estacionado.
+    if (g_resync_parked)
+    {
+        if (millis() - channel_deadline_start >= HOP_TIMEOUT_MS)
+        {
+            // D2: nada válido chegou nesta janela -- conta 1 hop "virtual"
+            // pra PLR/g_hops_since_rx continuarem honestos, mas SEM chamar
+            // escravo_advance_hop() (que trocaria de canal): o escravo
+            // continua parado em current_channel (== g_last_good_channel)
+            // até um pacote válido chegar ou o orçamento esgotar.
+            g_window_expected++;
+            g_session_expected++;
+            g_hops_since_rx++;
+            if (g_window_expected >= g_window_size)
+            {
+                log_plr_window();
+                g_window_expected = 0;
+                g_window_received = 0;
+            }
+            channel_deadline_start = millis();
+
+            if (resync_park_expired((uint32_t)(millis() - g_resync_park_start), RESYNC_PARK_MAX_MS) ||
+                g_hops_since_rx >= LOSS_HOPS)
+            {
+                // Orçamento de estacionamento esgotado sem nada válido --
+                // mesmo caminho de perda de sempre (o static_assert do
+                // orçamento em shared/protocol.h garante que
+                // RESYNC_PARK_MAX_MS sempre vence antes de LOSS_HOPS; a
+                // checagem de g_hops_since_rx fica por simetria/defesa).
+                reset_to_scanning();
+                return;
+            }
+        }
+    }
+    else if (millis() - channel_deadline_start >= HOP_TIMEOUT_MS)
     {
         escravo_advance_hop();
+        g_resync_miss_count++;
+        if (resync_should_park(g_resync_miss_count, RESYNC_MISS_HOPS))
+        {
+            // D1: RESYNC_MISS_HOPS timeouts consecutivos sem nada válido --
+            // para de avançar por conta própria e estaciona no último canal
+            // em que recebeu algo válido, escutando continuamente até o
+            // mestre passar por ali de novo (round-robin sobre a máscara
+            // ativa, no máximo active_count hops, ver
+            // get_next_active_channel() em shared/hopping.h) ou o
+            // orçamento (D2) esgotar.
+            g_resync_parked = true;
+            g_resync_hop_before = hop_counter;
+            g_resync_park_start = millis();
+            current_channel = g_last_good_channel;
+            escravo_radio.setChannel(current_channel);
+            // Mesmo settle/flush de escravo_advance_hop() após setChannel()
+            // (RX FIFO pode reter payload do canal anterior -- ver
+            // comentário lá).
+            delayMicroseconds(500);
+            escravo_radio.flush_rx();
+            channel_deadline_start = millis();
+            tlm_printf("escravo", "resync_park", "ch=%u;hop=%lu", current_channel, hop_counter);
+        }
         if (g_hops_since_rx >= LOSS_HOPS)
         {
             reset_to_scanning();
@@ -888,6 +978,19 @@ static void escravo_loop()
                         // escolhido é exatamente o mesmo que o mestre vai
                         // calcular ao avançar o dele.
                         hop_counter = pkt.hop_counter;
+
+                        // hop-resync (tarefa 1.2): qualquer recepção válida
+                        // zera a contagem de timeouts consecutivos e marca
+                        // este canal como o "último bom" -- candidato a
+                        // estacionar se a defasagem persistir de novo. Se o
+                        // escravo estava estacionado, sai do estacionamento
+                        // aqui (o resync_ok é logado mais abaixo, DEPOIS do
+                        // ack -- ver comentário do achado de bancada logo
+                        // abaixo).
+                        g_resync_miss_count = 0;
+                        g_last_good_channel = current_channel;
+                        bool frag_was_parked = g_resync_parked;
+                        g_resync_parked = false;
 
                         // Achado de bancada: nenhum guarded_printf/tlm_printf
                         // roda antes do ACK ser enviado (só depois, mais
@@ -955,6 +1058,19 @@ static void escravo_loop()
                             guarded_printf("[ESCRAVO] Enlace confirmado (primeiro fragmento recebido) em ch=%u.\n", current_channel);
                             notify_ready(true);
                         }
+                        if (frag_was_parked)
+                        {
+                            // hop-resync (tarefa 1.3): loga DEPOIS do ack (H6,
+                            // ver tasks.md de pairing-handshake-hardening
+                            // 1.8) -- hop_before é o contador do próprio
+                            // escravo no instante em que estacionou,
+                            // hop_after é o que acabou de ser adotado deste
+                            // fragmento (a diferença mostra se o escravo
+                            // estava adiantado ou atrasado, ver proposal.md).
+                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu",
+                                       g_last_good_channel, g_resync_hop_before, pkt.hop_counter,
+                                       (unsigned long)(millis() - g_resync_park_start));
+                        }
                         if (is_new_message)
                             guarded_printf("[ESCRAVO] Nova mensagem msg_id=%u com %u fragmentos\n", pkt.msg_id, pkt.total_fragments);
                         if (fragment_stored)
@@ -984,6 +1100,24 @@ static void escravo_loop()
                     {
                         ControlSeedPacket pkt;
                         memcpy(&pkt, raw, sizeof(pkt));
+
+                        // hop-resync (tarefa 1.2a, design.md D3a): adota o
+                        // contador de hop do mestre também a partir de
+                        // pacote de controle -- mesma correção de deriva que
+                        // o FragmentPacket já faz (ver ramo MSG_FRAGMENT
+                        // acima). Necessário porque, enquanto há controle
+                        // pendente, o mestre manda o pacote de controle NO
+                        // LUGAR do fragmento em todo hop até ser ackado (ver
+                        // send_pending_control_if_any() em mestre/src/node.h)
+                        // -- um escravo estacionado pode nunca ver um
+                        // FragmentPacket, então sem isto não teria de onde
+                        // sair do estacionamento.
+                        hop_counter = pkt.hop_counter;
+                        g_resync_miss_count = 0;
+                        g_last_good_channel = current_channel;
+                        bool seed_was_parked = g_resync_parked;
+                        g_resync_parked = false;
+
                         g_seed_apply_scheduled = true;
                         g_seed_apply_value = pkt.new_seed;
                         g_seed_apply_at = pkt.apply_at_hop;
@@ -1011,11 +1145,29 @@ static void escravo_loop()
                         // mestre também avança o dele imediatamente após
                         // enviar um pacote de controle (ver mestre_loop()).
                         escravo_advance_hop();
+                        if (seed_was_parked)
+                        {
+                            // hop-resync (tarefa 1.3): loga DEPOIS do ack,
+                            // mesma regra do ramo MSG_FRAGMENT acima (H6).
+                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu",
+                                       g_last_good_channel, g_resync_hop_before, pkt.hop_counter,
+                                       (unsigned long)(millis() - g_resync_park_start));
+                        }
                     }
                     else if (ctrl_type == MSG_CTRL_BLACKLIST)
                     {
                         ControlBlacklistPacket pkt;
                         memcpy(&pkt, raw, sizeof(pkt));
+
+                        // hop-resync (tarefa 1.2a): mesma adoção do
+                        // hop_counter do mestre que o ramo MSG_CTRL_SEED
+                        // acima -- ver comentário lá.
+                        hop_counter = pkt.hop_counter;
+                        g_resync_miss_count = 0;
+                        g_last_good_channel = current_channel;
+                        bool blacklist_was_parked = g_resync_parked;
+                        g_resync_parked = false;
+
                         g_mask_apply_scheduled = true;
                         g_mask_apply_value = pkt.mask;
                         g_mask_apply_at = pkt.apply_at_hop;
@@ -1028,6 +1180,14 @@ static void escravo_loop()
                         // Mesmo achado do ramo MSG_CTRL_SEED acima.
                         g_hop_received_flag = true;
                         escravo_advance_hop();
+                        if (blacklist_was_parked)
+                        {
+                            // hop-resync (tarefa 1.3): loga DEPOIS do ack
+                            // (H6), mesma regra dos ramos acima.
+                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu",
+                                       g_last_good_channel, g_resync_hop_before, pkt.hop_counter,
+                                       (unsigned long)(millis() - g_resync_park_start));
+                        }
                     }
                     else
                     {

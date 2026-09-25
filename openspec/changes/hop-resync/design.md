@@ -82,6 +82,24 @@ hops ≤ o novo contador antes de calcular o próximo canal (mesmo
 (controle perdido), a defasagem de máscara persiste — fora do escopo
 (já coberto por `LOSS_HOPS`/re-pareamento).
 
+## Implementado
+
+- D2 (`RESYNC_PARK_MAX_MS`/`static_assert`): `shared/protocol.h` não incluía
+  `shared/hopping.h` (só os consumidores o faziam, em ordens variadas --
+  `shared/pairing.h`, por exemplo, inclui só `protocol.h`), então `TABLE_SIZE`
+  não estava visível no ponto onde o `static_assert` precisa dele. Em vez de
+  depender da ordem de include de cada consumidor, `protocol.h` passou a
+  incluir `hopping.h` diretamente (sem risco de ciclo -- `hopping.h` não
+  depende de nada de `protocol.h`), tornando-o autossuficiente.
+- Tarefa 1.4: as duas decisões de estacionamento ("estacionar agora?" e
+  "orçamento esgotou?") saíram como funções puras em `shared/resync.h`
+  (`resync_should_park()`/`resync_park_expired()`), testadas em
+  `test/test_resync/`. A contabilidade de hops "virtuais" durante o
+  estacionamento (D2) ficou inline em `escravo/src/node.h` -- mexe em vários
+  contadores globais de PLR e `millis()`, não ganha nada em virar função pura
+  (só trocaria efeito colateral direto por uma lista grande de parâmetros por
+  referência).
+
 ## Riscos
 
 - Canal "último bom" ter virado ruim (jammer mudou de alvo): o mestre

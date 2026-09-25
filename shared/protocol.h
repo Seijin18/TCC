@@ -15,6 +15,13 @@
 typedef uint8_t byte;
 #endif
 
+// hop-resync (tarefa 1.1): RESYNC_PARK_MAX_MS abaixo depende de TABLE_SIZE
+// (shared/hopping.h) -- incluido aqui (em vez de exigir que todo consumidor
+// de protocol.h inclua hopping.h antes) porque hopping.h nao depende de
+// nada deste header (sem risco de inclusao circular) e nem todo consumidor
+// atual segue essa ordem (ex.: shared/pairing.h inclui só protocol.h).
+#include "hopping.h"
+
 static const byte masterAddress[6] = "MSTR1";
 static const byte slaveAddress[6] = "SLV01";
 
@@ -182,6 +189,31 @@ static const uint16_t SEED_DEFAULT = 42;
 // o primeiro encontro e a recuperacao apos falha).
 static const uint32_t LOSS_HOPS = 25;
 
+// hop-resync (tarefa 1.1, design.md D1/D2): defasagem de 1 canal entre
+// mestre e escravo (ack perdido logo apos um fragmento recebido -- ver
+// proposal.md "Mecanismo") nao se corrige sozinha enquanto nenhum pacote
+// chega em nenhum dos dois lados. Depois de RESYNC_MISS_HOPS timeouts de
+// hop CONSECUTIVOS sem nada valido, o escravo para de saltar por conta
+// propria e estaciona no ultimo canal em que recebeu algo valido -- ver
+// escravo_advance_hop()/escravo_loop() em escravo/src/node.h. 2 hops (440ms)
+// e o minimo que ainda deixa uma falha ISOLADA (recupera sozinha no proximo
+// hop, ver design.md "Mecanismo": caso "fragmento perdido") se resolver
+// antes de estacionar.
+static const uint8_t RESYNC_MISS_HOPS = 2;
+// D2: estacionamento dura no maximo (TABLE_SIZE + 2) hops do mestre --
+// TABLE_SIZE cobre um ciclo completo do round-robin sobre a mascara de
+// canais ativa (o mestre passa pelo canal estacionado em no maximo
+// active_count <= TABLE_SIZE hops, ver get_next_active_channel() em
+// shared/hopping.h), +2 de folga.
+static const uint32_t RESYNC_PARK_MAX_MS = (uint32_t)(TABLE_SIZE + 2) * HOP_TIMEOUT_MS;
+
+// D2: orcamento verificado em compilacao -- a ressincronizacao completa
+// (hops ate estacionar + tempo estacionado) tem que terminar antes do
+// mestre desistir por LOSS_HOPS, senao o mestre re-pareia enquanto o
+// escravo ainda estaria tentando se recuperar sozinho.
+static_assert(RESYNC_MISS_HOPS * HOP_TIMEOUT_MS + RESYNC_PARK_MAX_MS < LOSS_HOPS * HOP_TIMEOUT_MS,
+              "orcamento de ressincronizacao (RESYNC_MISS_HOPS + estacionamento) precisa terminar antes do mestre declarar LOSS_HOPS");
+
 // dynamic-seed-blacklist
 static const uint8_t CHANNEL_FAIL_THRESHOLD = 5; // g_channel_fail >= isso -> candidato a blacklist
 // blacklist-decay: hops que um canal precisa passar excluído antes de ser
@@ -237,14 +269,23 @@ struct __attribute__((packed)) FragmentAck
     uint8_t complete;
 };
 
-// dynamic-seed-blacklist: mesmo tamanho (7 bytes) que ControlBlacklistPacket
-// -- os dois so aparecem quando ha controle pendente (nunca simultaneos), e
-// o campo `type` (primeiro byte dos dois) desambigua no recebedor.
+// dynamic-seed-blacklist: mesmo tamanho (11 bytes, desde hop-resync tarefa
+// 1.2a -- antes 7) que ControlBlacklistPacket -- os dois so aparecem quando
+// ha controle pendente (nunca simultaneos), e o campo `type` (primeiro byte
+// dos dois) desambigua no recebedor.
+//
+// hop-resync (tarefa 1.2a, design.md D3a): ganham `hop_counter` -- enquanto
+// ha controle pendente, o mestre manda o pacote de controle NO LUGAR do
+// fragmento em todo hop ate ser ackado (send_pending_control_if_any() em
+// mestre/src/node.h), entao um escravo estacionado (ver RESYNC_MISS_HOPS
+// acima) pode nunca ver um FragmentPacket -- sem este campo nao teria de
+// onde adotar o contador de hop do mestre pra sair do estacionamento.
 struct __attribute__((packed)) ControlSeedPacket
 {
     uint8_t type; // MSG_CTRL_SEED
     uint16_t new_seed;
     uint32_t apply_at_hop;
+    uint32_t hop_counter; // hop-resync (tarefa 1.2a): hop corrente do mestre no envio
 };
 
 struct __attribute__((packed)) ControlBlacklistPacket
@@ -252,6 +293,7 @@ struct __attribute__((packed)) ControlBlacklistPacket
     uint8_t type; // MSG_CTRL_BLACKLIST
     uint16_t mask;
     uint32_t apply_at_hop;
+    uint32_t hop_counter; // hop-resync (tarefa 1.2a): hop corrente do mestre no envio
 };
 
 struct __attribute__((packed)) ControlAck

@@ -792,6 +792,13 @@ static bool send_pending_control_if_any(bool &acked_out)
         pkt.type = MSG_CTRL_SEED;
         pkt.new_seed = g_control_seed_value;
         pkt.apply_at_hop = g_control_apply_at;
+        // hop-resync (tarefa 1.2a, design.md D3a): hop corrente do mestre --
+        // um escravo estacionado (RESYNC_MISS_HOPS, shared/protocol.h) pode
+        // nunca ver um FragmentPacket enquanto há controle pendente (este
+        // pacote vai NO LUGAR do fragmento em todo hop até ser ackado), e
+        // precisa deste campo pra adotar o contador e sair do
+        // estacionamento (ver escravo/src/node.h).
+        pkt.hop_counter = g_hop_counter;
 
         mestre_radio.stopListening();
         radio_send(mestre_radio, &pkt, sizeof(pkt));
@@ -811,6 +818,8 @@ static bool send_pending_control_if_any(bool &acked_out)
         pkt.type = MSG_CTRL_BLACKLIST;
         pkt.mask = g_control_mask_value;
         pkt.apply_at_hop = g_control_apply_at;
+        // hop-resync (tarefa 1.2a): mesmo motivo do ramo MSG_CTRL_SEED acima.
+        pkt.hop_counter = g_hop_counter;
 
         mestre_radio.stopListening();
         radio_send(mestre_radio, &pkt, sizeof(pkt));

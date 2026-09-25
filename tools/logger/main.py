@@ -57,6 +57,9 @@ EVENT_RE = re.compile(r"^@(?P<src>[^;]+);t=(?P<t>\d+);e=(?P<event>[^;]*)(?P<rest
 # aqui, pelo mesmo motivo de "regs"/"pair_stats" -- são raros e são
 # exatamente os eventos que dizem se o re-ack idempotente e a confirmação
 # por dado estão funcionando em bancada.
+# hop-resync (tarefa 1.3): "resync_park"/"resync_ok" pelo mesmo motivo --
+# raros (só ocorrem quando o escravo estaciona) e são exatamente a
+# instrumentação que confirma o mecanismo em bancada (proposal.md).
 ROUTINE_EVENTS = {"hop", "ack", "miss", "pair_scan", "latency"}
 
 CSV_MIN_FIELDS = 100
@@ -171,6 +174,12 @@ class StateStore:
             elif event in ("rekey_tx", "rekey_ack", "rekey_apply", "rekey_failed"):
                 node.setdefault("last_rekey", {})
                 node["last_rekey"] = {"phase": event, **fields}
+            elif event in ("resync_park", "resync_ok"):
+                # hop-resync (tarefa 1.3): último estacionamento/recuperação
+                # de sincronismo de salto -- "phase" distingue os dois (só
+                # resync_ok tem hop_before/hop_after/ms, ver
+                # escravo/src/node.h).
+                node["last_resync"] = {"phase": event, **fields}
             elif event == "regs":
                 # pairing-handshake-hardening (tarefa 1.6): guarda o último
                 # dump de registradores por nó -- inclui "why" (boot/loss/
