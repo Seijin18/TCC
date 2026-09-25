@@ -154,6 +154,25 @@ static unsigned long g_resync_park_start = 0;
 // mostra se o escravo estava adiantado ou atrasado, ver proposal.md).
 static uint32_t g_resync_hop_before = 0;
 
+// hop-resync (tarefa 1.5, achado de bancada 2026-09-24): qualidade de
+// recepcao recente POR POSICAO na tabela (HOPPING_CHANNELS), nao por canal
+// mais recente -- a 1a versao (D1) estacionava sempre em
+// g_last_good_channel, mas no caso "ack perdido" esse "ultimo canal bom" E'
+// justamente o canal ruim cujo ack se perdeu (a causa da propria
+// defasagem): soak de bancada (tasks.md 2.1) deu 9 de 11 estacionamentos em
+// ch 34 (colado no Wi-Fi) e 0 resync_ok, todos expirando. Contadores
+// saturantes (nunca passam de 0xFF) com decaimento simples a cada
+// RESYNC_QUALITY_DECAY_HOPS hops REAIS (nunca durante hops "virtuais" do
+// estacionamento, ver escravo_advance_hop()) -- historico recente pesa mais
+// que antigo (o Wi-Fi ambiente muda de canal com o tempo) sem precisar de
+// float/EWMA de verdade. Indexados por posicao na tabela (nao pelo valor do
+// canal) pra bater com o `mask`/`fallback_idx` que resync_pick_park_channel()
+// (shared/resync.h) espera.
+static uint8_t g_resync_channel_ok[TABLE_SIZE] = {0};
+static uint8_t g_resync_channel_miss[TABLE_SIZE] = {0};
+static uint8_t g_resync_quality_hops = 0;
+static const uint8_t RESYNC_QUALITY_DECAY_HOPS = 64;
+
 // ---- Seed ----
 // pairing-handshake-hardening: g_seed agora é adotado diretamente do campo
 // `seed` da LinkProbeV2 aceita (ver g_link_state acima) -- o antigo
@@ -556,6 +575,22 @@ static void process_escravo_serial()
     }
 }
 
+// hop-resync (tarefa 1.5): posicao de `channel` em HOPPING_CHANNELS -- usada
+// pra indexar g_resync_channel_ok/miss por posicao na tabela (nao pelo valor
+// do canal). HOPPING_CHANNELS nao tem valores repetidos, entao a busca acha
+// exatamente um indice pra qualquer canal que ja veio dali
+// (current_channel/g_last_good_channel sempre vieram de
+// get_next_active_channel() ou de HOPPING_CHANNELS diretamente).
+static uint8_t channel_table_index(uint8_t channel)
+{
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+    {
+        if (HOPPING_CHANNELS[i] == channel)
+            return i;
+    }
+    return 0; // nao deveria acontecer -- guarda defensiva
+}
+
 static void escravo_advance_hop()
 {
     g_window_expected++;
@@ -570,6 +605,40 @@ static void escravo_advance_hop()
     {
         g_hops_since_rx++;
     }
+
+    // hop-resync (tarefa 1.5): atualiza a qualidade de recepcao do canal QUE
+    // ACABOU DE TERMINAR (current_channel, antes de trocar mais abaixo) --
+    // ok se recebeu algo valido, miss se estourou por timeout. So conta
+    // hops REAIS -- esta funcao nunca roda pros hops "virtuais" do
+    // estacionamento (ver ramo ESTACIONADO em escravo_loop()), entao a
+    // amostra reflete de verdade o comportamento do canal, nao o tempo que
+    // o escravo passou parado nele.
+    uint8_t quality_idx = channel_table_index(current_channel);
+    if (g_hop_received_flag)
+    {
+        if (g_resync_channel_ok[quality_idx] < 0xFF)
+            g_resync_channel_ok[quality_idx]++;
+    }
+    else
+    {
+        if (g_resync_channel_miss[quality_idx] < 0xFF)
+            g_resync_channel_miss[quality_idx]++;
+    }
+    g_resync_quality_hops++;
+    if (g_resync_quality_hops >= RESYNC_QUALITY_DECAY_HOPS)
+    {
+        // Decaimento simples e deterministico: divide os dois contadores de
+        // TODOS os canais por 2 a cada RESYNC_QUALITY_DECAY_HOPS hops reais
+        // -- historico recente pesa mais que antigo, sem precisar de
+        // float/EWMA de verdade (ver comentario na declaracao dos arrays).
+        for (uint8_t i = 0; i < TABLE_SIZE; i++)
+        {
+            g_resync_channel_ok[i] >>= 1;
+            g_resync_channel_miss[i] >>= 1;
+        }
+        g_resync_quality_hops = 0;
+    }
+
     g_hop_received_flag = false;
 
     if (g_window_expected >= g_window_size)
@@ -895,8 +964,10 @@ static void escravo_loop()
             // D2: nada válido chegou nesta janela -- conta 1 hop "virtual"
             // pra PLR/g_hops_since_rx continuarem honestos, mas SEM chamar
             // escravo_advance_hop() (que trocaria de canal): o escravo
-            // continua parado em current_channel (== g_last_good_channel)
-            // até um pacote válido chegar ou o orçamento esgotar.
+            // continua parado em current_channel (o canal escolhido por
+            // qualidade na entrada do estacionamento, tarefa 1.5 -- não é
+            // sempre g_last_good_channel) até um pacote válido chegar ou o
+            // orçamento esgotar.
             g_window_expected++;
             g_session_expected++;
             g_hops_since_rx++;
@@ -928,16 +999,35 @@ static void escravo_loop()
         if (resync_should_park(g_resync_miss_count, RESYNC_MISS_HOPS))
         {
             // D1: RESYNC_MISS_HOPS timeouts consecutivos sem nada válido --
-            // para de avançar por conta própria e estaciona no último canal
-            // em que recebeu algo válido, escutando continuamente até o
-            // mestre passar por ali de novo (round-robin sobre a máscara
-            // ativa, no máximo active_count hops, ver
-            // get_next_active_channel() em shared/hopping.h) ou o
+            // para de avançar por conta própria e estaciona, escutando
+            // continuamente até o mestre passar por ali de novo
+            // (round-robin sobre a máscara ativa, no máximo active_count
+            // hops, ver get_next_active_channel() em shared/hopping.h) ou o
             // orçamento (D2) esgotar.
             g_resync_parked = true;
             g_resync_hop_before = hop_counter;
             g_resync_park_start = millis();
-            current_channel = g_last_good_channel;
+
+            // hop-resync (tarefa 1.5, achado de bancada): NÃO estaciona mais
+            // cegamente em g_last_good_channel -- no caso "ack perdido"
+            // (proposal.md "Mecanismo"), a ÚLTIMA recepção válida acontece
+            // exatamente no canal ruim cujo ack se perdeu (é a causa da
+            // própria defasagem), então repetir esse canal repete a falha
+            // (soak de bancada, tasks.md 2.1: 9 de 11 estacionamentos em ch
+            // 34, colado no Wi-Fi, 0 resync_ok). Escolhe em vez disso, entre
+            // os canais habilitados, o de melhor qualidade de recepção
+            // recente (g_resync_channel_ok/miss, ver shared/resync.h) --
+            // cai de volta em g_last_good_channel só se nenhum canal
+            // habilitado tiver recepção alguma registrada.
+            uint8_t fallback_idx = channel_table_index(g_last_good_channel);
+            uint8_t park_idx = resync_pick_park_channel(g_resync_channel_ok, g_resync_channel_miss,
+                                                         g_channel_mask, fallback_idx);
+            // Mesma fórmula de score de resync_pick_park_channel() --
+            // recalculada aqui só pra telemetria (a função devolve só o
+            // índice escolhido).
+            int16_t park_score = (int16_t)g_resync_channel_ok[park_idx] - 2 * (int16_t)g_resync_channel_miss[park_idx];
+
+            current_channel = HOPPING_CHANNELS[park_idx];
             escravo_radio.setChannel(current_channel);
             // Mesmo settle/flush de escravo_advance_hop() após setChannel()
             // (RX FIFO pode reter payload do canal anterior -- ver
@@ -945,7 +1035,7 @@ static void escravo_loop()
             delayMicroseconds(500);
             escravo_radio.flush_rx();
             channel_deadline_start = millis();
-            tlm_printf("escravo", "resync_park", "ch=%u;hop=%lu", current_channel, hop_counter);
+            tlm_printf("escravo", "resync_park", "ch=%u;hop=%lu;score=%d", current_channel, hop_counter, park_score);
         }
         if (g_hops_since_rx >= LOSS_HOPS)
         {

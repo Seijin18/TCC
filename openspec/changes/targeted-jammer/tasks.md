@@ -39,6 +39,22 @@
       Em PA_LOW, na posição atual das placas, o analisador não separa o
       padrão do jammer do Wi-Fi. Repetir com `power high` (sintaxe correta
       é `power <min|low|high|max>`, não `jam power ...`).
+      **Repetido 2026-09-25 00:17 com `power high`**: nenhuma mudança
+      entre base, `targeted` e `sweep` (16 canais 3,3/3,3/3,1; demais 2-80
+      4,5/4,5/4,9). Comparando com as fases de jamming de 2026-09-23
+      (`scenario-20260923-042225`/`-045128`) no mesmo `spectrum.csv`: o
+      "rastro" do jammer visto pelo analisador era um bloco fixo de ~6
+      canais em ch 36-44 (~70%), não a banda 2-80 nem os 16 canais da
+      tabela — e o teste de 16:01 mostrou o mesmo bloco (38-45) tanto em
+      `targeted` quanto em `sweep`. **Hipótese em aberto (validade do
+      teste)**: `hopCarrier()` só chama `setChannel()` com o modo de
+      portadora constante ativo (`CONT_WAVE`+`PLL_LOCK`, CE alto); nestes
+      clones isso pode não re-sintonizar, e o jammer ficaria numa
+      frequência fixa independentemente do modo (`senseChannel()` do modo
+      `adaptive` é o único caminho que faz stop → setChannel → start).
+      Teste direto proposto: pôr o analisador (placa A) colado no jammer e
+      comparar `sweep` contra uma versão de `hopCarrier()` que faz
+      `stopConstCarrier()`/`startConstCarrier(power, ch)` a cada troca.
 - [x] 3.3 Rodar mestre+escravo com PLR (`plr-metric`) sob jammer targeted e
       confirmar que o PLR sobe de forma comparável ao sweep — serve de
       baseline para o cenário B da Fase 5. **Confirmado em 2026-09-18**

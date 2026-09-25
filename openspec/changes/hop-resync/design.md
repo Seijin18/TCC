@@ -99,6 +99,24 @@ hops ≤ o novo contador antes de calcular o próximo canal (mesmo
   contadores globais de PLR e `millis()`, não ganha nada em virar função pura
   (só trocaria efeito colateral direto por uma lista grande de parâmetros por
   referência).
+- Tarefa 1.5 (achado de bancada, soak de 2.1): a 1ª versão (D1) estacionava
+  sempre em `g_last_good_channel` -- mas o soak com jammer desligado deu 11
+  `resync_park`, **0 `resync_ok`**, 9 de 11 em ch 34 (colado no Wi-Fi
+  28-38), todos expirando. Causa: no caso "ack perdido" (ver "Mecanismo"
+  acima), a ÚLTIMA recepção válida acontece EXATAMENTE no canal ruim cujo
+  ack se perdeu -- é a causa da própria defasagem -- então
+  `g_last_good_channel` aponta pro pior canal disponível, e a única passada
+  do mestre por ele (~220 ms a cada ~16 hops) falha de novo. Correção: o
+  escravo agora mantém `g_resync_channel_ok[]`/`g_resync_channel_miss[]`
+  (por posição em `HOPPING_CHANNELS`, saturando em 0xFF, decaindo por 2 a
+  cada `RESYNC_QUALITY_DECAY_HOPS` (64) hops REAIS -- nunca durante hops
+  "virtuais" do estacionamento) e escolhe o canal de estacionamento com
+  `resync_pick_park_channel()` (`shared/resync.h`, pura, testada em
+  `test/test_resync/`): score `ok - 2×miss` entre os canais habilitados com
+  `ok > 0`, empate por menor `miss` e depois por menor índice (de graça, pela
+  ordem de busca crescente), sem candidato ⇒ cai de volta em
+  `g_last_good_channel`. `resync_park` ganhou o campo `score=` do canal
+  escolhido.
 
 ## Riscos
 

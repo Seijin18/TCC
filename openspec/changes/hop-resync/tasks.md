@@ -35,7 +35,7 @@
       mestre por ele (~220 ms a cada ~16 hops) falha de novo. Correção
       planejada (tarefa 1.5): escolher o canal de estacionamento pela
       qualidade de recepção recente por canal, não pelo mais recente.
-- [ ] 1.5 *(achado de 2.1)* Escolha do canal de estacionamento por
+- [x] 1.5 *(achado de 2.1)* Escolha do canal de estacionamento por
       qualidade: contadores ok/miss por posição da tabela com decaimento
       simples; função pura `resync_pick_park_channel(ok, miss, mask,
       fallback)` em `shared/resync.h` (score tipo `ok - 2×miss`, só canais
