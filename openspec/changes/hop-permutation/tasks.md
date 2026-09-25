@@ -1,13 +1,13 @@
 ## 1. Implementação
 
-- [ ] 1.1 `shared/hopping.h`: xorshift32 + Fisher-Yates; `get_next_active_channel()`
+- [x] 1.1 `shared/hopping.h`: xorshift32 + Fisher-Yates; `get_next_active_channel()`
       devolve `ativos[perm_seed[counter % n]]` (design.md D1-D3), mesma
       assinatura e mesma guarda de `mask == 0`.
-- [ ] 1.2 Testes nativos: determinismo; cada canal ativo exatamente uma
+- [x] 1.2 Testes nativos: determinismo; cada canal ativo exatamente uma
       vez por ciclo; seeds diferentes ⇒ ordens diferentes (para a maioria
       das seeds); máscara respeitada; seed 0 não degenera na ordem da
       tabela; revisar testes existentes que assumem ordem da tabela.
-- [ ] 1.3 `pio run` (todos os envs) e `pio test` verdes.
+- [x] 1.3 `pio run` (todos os envs) e `pio test` verdes.
 
 ## 2. Validação em bancada
 

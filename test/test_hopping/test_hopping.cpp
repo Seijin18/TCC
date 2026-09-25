@@ -105,15 +105,164 @@ static void test_get_next_channel_different_seeds_offset_sequence(void)
     TEST_ASSERT_TRUE_MESSAGE(any_difference, "seeds distintas produziram exatamente a mesma sequencia de canais");
 }
 
-// --- get_next_active_channel (dynamic-seed-blacklist) --------------------
+// --- get_next_active_channel (dynamic-seed-blacklist / hop-permutation) --
 
-static void test_get_next_active_channel_full_mask_matches_get_next_channel(void)
+// hop-permutation (tarefa 1.2): antes deste change, mascara cheia (0xFFFF)
+// se comportava identico a get_next_channel (so deslocamento de fase, mesma
+// ordem da tabela). Isso deixou de valer de proposito -- a ordem agora e
+// uma permutacao derivada da seed (ver proposal.md/design.md do change).
+// Os testes abaixo substituem aquela equivalencia pelas propriedades que
+// de fato importam agora: determinismo, cobertura exata de um ciclo,
+// mascara respeitada, seeds diferentes gerando ordens diferentes (nao so
+// rotacoes) e seed 0/1 nao degenerando na ordem da tabela.
+
+static void test_get_next_active_channel_is_deterministic(void)
 {
-    // Mascara cheia (0xFFFF) deve se comportar identico a get_next_channel.
-    for (uint16_t seed = 0; seed < 5; seed++)
-        for (uint32_t counter = 0; counter < TABLE_SIZE * 2; counter++)
-            TEST_ASSERT_EQUAL_UINT8(get_next_channel(seed, counter),
-                                     get_next_active_channel(seed, counter, 0xFFFF));
+    // Mesma seed + mesmo contador + mesma mascara -> sempre o mesmo canal
+    // (mestre e escravo dependem disso pra calcular a mesma sequencia).
+    uint16_t masks[] = {0xFFFF, 0x00FF, (uint16_t)((1u << 1) | (1u << 4) | (1u << 9))};
+    for (uint8_t m = 0; m < 3; m++)
+        for (uint16_t seed = 0; seed < 5; seed++)
+            for (uint32_t counter = 0; counter < 20; counter++)
+                TEST_ASSERT_EQUAL_UINT8(get_next_active_channel(seed, counter, masks[m]),
+                                         get_next_active_channel(seed, counter, masks[m]));
+}
+
+// Verifica que, para uma dada (seed, mascara), cada canal ativo aparece
+// exatamente uma vez a cada `active_count` hops consecutivos -- a mesma
+// garantia que hop-resync depende pro orcamento de estacionamento
+// (RESYNC_PARK_MAX_MS), agora expressa em cima do conjunto ativo (nao mais
+// da tabela inteira/ordem original).
+static void assert_each_active_channel_once_per_cycle(uint16_t seed, uint16_t mask)
+{
+    uint8_t active_indices[TABLE_SIZE];
+    uint8_t active_count = 0;
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+        if (mask & (1u << i))
+            active_indices[active_count++] = i;
+
+    bool seen[TABLE_SIZE] = {false};
+    for (uint32_t counter = 0; counter < active_count; counter++)
+    {
+        uint8_t ch = get_next_active_channel(seed, counter, mask);
+        bool matched = false;
+        for (uint8_t i = 0; i < active_count; i++)
+        {
+            if (HOPPING_CHANNELS[active_indices[i]] == ch)
+            {
+                TEST_ASSERT_FALSE_MESSAGE(seen[i], "canal ativo repetido dentro de um ciclo");
+                seen[i] = true;
+                matched = true;
+            }
+        }
+        TEST_ASSERT_TRUE_MESSAGE(matched, "get_next_active_channel retornou canal fora do conjunto ativo");
+    }
+    for (uint8_t i = 0; i < active_count; i++)
+        TEST_ASSERT_TRUE_MESSAGE(seen[i], "canal ativo nunca visitado em um ciclo completo");
+}
+
+static void test_get_next_active_channel_each_active_channel_once_per_cycle(void)
+{
+    // Mascara cheia (16 ativos).
+    for (uint16_t seed = 0; seed < 10; seed++)
+        assert_each_active_channel_once_per_cycle(seed, 0xFFFF);
+
+    // 3 canais ativos (indices 1, 4, 9) -- caso de poucos canais ativos
+    // (ex. depois de blacklist).
+    uint16_t mask3 = (uint16_t)((1u << 1) | (1u << 4) | (1u << 9));
+    for (uint16_t seed = 0; seed < 10; seed++)
+        assert_each_active_channel_once_per_cycle(seed, mask3);
+
+    // 2 canais ativos (indices 0, 15).
+    uint16_t mask2 = (uint16_t)((1u << 0) | (1u << 15));
+    for (uint16_t seed = 0; seed < 10; seed++)
+        assert_each_active_channel_once_per_cycle(seed, mask2);
+}
+
+// hop-permutation (tarefa 1.2): confirma que a permutacao nao e so um
+// deslocamento de fase disfarcado -- compara a ordem ciclica de cada seed
+// contra a da seed 0 e exige que a maioria realmente produza uma ordem que
+// nao e uma rotacao da outra (uma simples rotacao teria o mesmo problema
+// que este change resolve: o jammer targeted, que anda na ordem da tabela,
+// alcancaria o enlace de novo bastando alinhar a fase).
+static bool sequence_is_rotation(const uint8_t a[], const uint8_t b[], uint8_t n)
+{
+    for (uint8_t shift = 0; shift < n; shift++)
+    {
+        bool match = true;
+        for (uint8_t i = 0; i < n; i++)
+        {
+            if (a[i] != b[(i + shift) % n])
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+            return true;
+    }
+    return false;
+}
+
+static void build_full_mask_cycle(uint16_t seed, uint8_t out[])
+{
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+        out[i] = get_next_active_channel(seed, i, 0xFFFF);
+}
+
+static void test_get_next_active_channel_different_seeds_are_not_rotations_for_most_seeds(void)
+{
+    uint8_t base[TABLE_SIZE];
+    build_full_mask_cycle(0, base);
+
+    uint16_t not_rotation_count = 0;
+    const uint16_t NUM_SEEDS = 101; // seeds 0..100
+    for (uint16_t seed = 1; seed < NUM_SEEDS; seed++)
+    {
+        uint8_t cycle[TABLE_SIZE];
+        build_full_mask_cycle(seed, cycle);
+        if (!sequence_is_rotation(base, cycle, TABLE_SIZE))
+            not_rotation_count++;
+    }
+
+    // Exige que a grande maioria das seeds 1..100 produza uma ordem que
+    // nao e apenas uma rotacao ciclica da ordem da seed 0.
+    TEST_ASSERT_TRUE_MESSAGE(not_rotation_count >= 90,
+                              "maioria das seeds deveria produzir uma ordem que nao e rotacao da seed 0");
+}
+
+static void test_get_next_active_channel_seed_zero_is_not_table_order(void)
+{
+    // Antes deste change, seed 0 devolvia exatamente a ordem da tabela
+    // (get_hop_channel/get_next_channel com seed 0 == HOPPING_CHANNELS na
+    // ordem original) -- a permutacao precisa quebrar isso.
+    bool any_difference = false;
+    for (uint32_t counter = 0; counter < TABLE_SIZE; counter++)
+    {
+        if (get_next_active_channel(0, counter, 0xFFFF) != HOPPING_CHANNELS[counter])
+        {
+            any_difference = true;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(any_difference, "seed 0 nao deveria degenerar na ordem da tabela");
+}
+
+static void test_get_next_active_channel_seed_one_is_not_table_order(void)
+{
+    // Seed 1 nao pode ser so um deslocamento de fase da tabela (quase-
+    // identidade) -- é exatamente o que hop_prng_seed_state() evita ao
+    // misturar a seed com uma constante antes de semear o xorshift32.
+    bool any_difference = false;
+    for (uint32_t counter = 0; counter < TABLE_SIZE; counter++)
+    {
+        if (get_next_active_channel(1, counter, 0xFFFF) != HOPPING_CHANNELS[(1 + counter) % TABLE_SIZE])
+        {
+            any_difference = true;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(any_difference, "seed 1 nao deveria produzir apenas um deslocamento de fase da tabela");
 }
 
 static void test_get_next_active_channel_only_returns_enabled_channels(void)
@@ -341,7 +490,11 @@ int main(int argc, char **argv)
     RUN_TEST(test_get_next_channel_returns_table_entries);
     RUN_TEST(test_get_next_channel_cycles_through_full_table_per_seed);
     RUN_TEST(test_get_next_channel_different_seeds_offset_sequence);
-    RUN_TEST(test_get_next_active_channel_full_mask_matches_get_next_channel);
+    RUN_TEST(test_get_next_active_channel_is_deterministic);
+    RUN_TEST(test_get_next_active_channel_each_active_channel_once_per_cycle);
+    RUN_TEST(test_get_next_active_channel_different_seeds_are_not_rotations_for_most_seeds);
+    RUN_TEST(test_get_next_active_channel_seed_zero_is_not_table_order);
+    RUN_TEST(test_get_next_active_channel_seed_one_is_not_table_order);
     RUN_TEST(test_get_next_active_channel_only_returns_enabled_channels);
     RUN_TEST(test_get_next_active_channel_single_channel_mask);
     RUN_TEST(test_get_next_active_channel_zero_mask_falls_back_to_full_table);
