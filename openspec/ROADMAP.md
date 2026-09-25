@@ -19,14 +19,28 @@ os jammers disponíveis — depende do modelo de atacante.
 
 **Pendências que exigem intervenção manual**:
 
-1. **Aproximar a placa A (analisador) do jammer (placa B)** — hoje o
-   analisador não enxerga o jammer nem em `power high`, só o Wi-Fi real
-   (ch ~26-45). Destrava `targeted-jammer` 3.2 (ver a emissão real de cada
-   modo — o `targeted` foi fraco/errático no enlace), `spectrum-attack-
-   classification` 3.1 (recalibrar falso positivo do Wi-Fi) e 3.3,
-   `two-board-topology` 6.2 e `dynamic-seed-blacklist` 4.5; arquivar
-   `dynamic-seed-blacklist` libera o arquivamento de `blacklist-decay` (já
-   100% validado, mas seu delta modifica um requisito daquele).
+1. **[RESOLVIDO PARCIALMENTE — o jammer não irradia observavelmente]**
+   `jammer-emission-check` rodou o teste de isolamento decisivo (2026-09-25):
+   enlace preso em `mode fixed` (ch 10), jammer `targeted`+`power max`, olhar
+   só a banda alta limpa (94-125). **Veredito: NÃO irradia.** ON ≤ OFF na
+   banda de teste (combinado OFF=0.008, ON=0.000) **e** zero `loss_of_sync`
+   no escravo co-locado a centímetros do jammer a `power max` — dois sinais
+   independentes concordam. Diagnóstico de boot: rádio do jammer é
+   **P-variant** (`p=1`, 1 rádio), então `startConstCarrier` já usa o caminho
+   de portadora sustentada; não é bug de firmware não-P. **Causa raiz
+   remanescente é de hardware** (antena/potência real do clone, ou clone que
+   mente `isPVariant`), e é isto que ainda exige intervenção manual. Nota:
+   distância NÃO é a causa — as placas já estão a 30-50 cm com linha de
+   visada limpa (usuário, 2026-09-25) e o escravo co-locado a centímetros do
+   jammer também não sente nada. O que resta investigar no hardware do
+   jammer: antena/conexão do módulo, potência real de saída do clone, clone
+   que reporta P mas não implementa CONT_WAVE, ou trocar o rádio; medir com
+   SDR/analisador de espectro externo. Enquanto o atacante não emitir de
+   fato, toda a
+   linha de validação sob ataque (`targeted-jammer` 3.2,
+   `spectrum-attack-classification` 3.1/3.3, `two-board-topology` 6.2,
+   `dynamic-seed-blacklist` 4.5, bateria A/B/C) fica **ambígua** — "mitigação
+   venceu" e "não havia ataque" são indistinguíveis.
 2. **Conferência visual do dashboard Tkinter** (`telemetry-logging` 4.4,
    5.2).
 3. **Decisão de metodologia A/B/C** (`scenario-automation` 4.2/4.3): qual
