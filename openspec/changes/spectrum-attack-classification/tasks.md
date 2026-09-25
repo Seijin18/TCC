@@ -44,6 +44,19 @@
       piso de ruído desta bancada mais alto que o assumido pelos valores
       default de `LIMIAR_ALVO`/`LIMIAR_CONCENTRACAO`. Ver
       `openspec/ROADMAP.md` para os números medidos.
+      **Repetido 2026-09-25 02:16-02:26 (10 min, jammer desligado,
+      detector CFAR por canal)**: **não passa** — o analisador manteve
+      `alert` ativo durante 95% do tempo, marcando ch 58 (`mask=0x0010`,
+      vizinho do Wi-Fi real que ocupa ch ~26-45 nesta bancada). Ao longo
+      do dia houve ~140 `alert_on` com o jammer desligado. Custo prático
+      pequeno: o reseed é disparado por borda, então foi 1 troca de seed em
+      10 min, sem nenhuma queda de enlace (soak de `hop-permutation` 2.1).
+      E, ao contrário, **nenhum alerta** nas fases com jammer ligado
+      (`hop-resync` 2.2, baterias A/B/C): com as placas na posição atual o
+      analisador (placa A) não enxerga o jammer (placa B), só o Wi-Fi. A
+      calibração (e a decisão de tratar "canal ocupado por Wi-Fi" como
+      alerta ou não) depende de reposicionar as placas — mesma dependência
+      de 3.3 e de `dynamic-seed-blacklist` 4.5.
 - [x] 3.2 Rodar com o `targeted-jammer` ativo e confirmar que o alerta é
       declarado dentro de poucos ciclos e mantido enquanto o ataque
       persistir. **Resolvido em 2026-09-23** com o baseline adaptativo
