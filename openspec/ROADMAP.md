@@ -19,28 +19,39 @@ os jammers disponíveis — depende do modelo de atacante.
 
 **Pendências que exigem intervenção manual**:
 
-1. **[RESOLVIDO PARCIALMENTE — o jammer não irradia observavelmente]**
-   `jammer-emission-check` rodou o teste de isolamento decisivo (2026-09-25):
-   enlace preso em `mode fixed` (ch 10), jammer `targeted`+`power max`, olhar
-   só a banda alta limpa (94-125). **Veredito: NÃO irradia.** ON ≤ OFF na
-   banda de teste (combinado OFF=0.008, ON=0.000) **e** zero `loss_of_sync`
-   no escravo co-locado a centímetros do jammer a `power max` — dois sinais
-   independentes concordam. Diagnóstico de boot: rádio do jammer é
-   **P-variant** (`p=1`, 1 rádio), então `startConstCarrier` já usa o caminho
-   de portadora sustentada; não é bug de firmware não-P. **Causa raiz
-   remanescente é de hardware** (antena/potência real do clone, ou clone que
-   mente `isPVariant`), e é isto que ainda exige intervenção manual. Nota:
-   distância NÃO é a causa — as placas já estão a 30-50 cm com linha de
-   visada limpa (usuário, 2026-09-25) e o escravo co-locado a centímetros do
-   jammer também não sente nada. O que resta investigar no hardware do
-   jammer: antena/conexão do módulo, potência real de saída do clone, clone
-   que reporta P mas não implementa CONT_WAVE, ou trocar o rádio; medir com
-   SDR/analisador de espectro externo. Enquanto o atacante não emitir de
-   fato, toda a
-   linha de validação sob ataque (`targeted-jammer` 3.2,
-   `spectrum-attack-classification` 3.1/3.3, `two-board-topology` 6.2,
-   `dynamic-seed-blacklist` 4.5, bateria A/B/C) fica **ambígua** — "mitigação
-   venceu" e "não havia ataque" são indistinguíveis.
+1. **[RESOLVIDO — o jammer FUNCIONA; era bug de firmware, não hardware]**
+   Re-validação do zero em 2026-09-25 (change `jammer-emission-hardware`),
+   corrigindo os vereditos anteriores (inclusive o "não irradia" de
+   `jammer-emission-check`, que estava **confundido**):
+   - **Transmissor do jammer funciona**: sonda dedicada `Tests/JammerTx`
+     (env `jam_tx_probe`, TX = módulo jammer HSPI, RX/RPD = módulo escravo
+     VSPI, co-locados na Placa B) leu **100%** de portadora a PA_MAX. O
+     `env:validacao` de 17/09, pela pinagem, testava o escravo como TX — nunca
+     o transmissor do jammer; por isso ninguém tinha confirmado a emissão.
+   - **Causa raiz do "não funciona"**: a portadora do clone **degrada ao longo
+     da sessão** — o mesmo `hold ch10` negava 100% e minutos depois parava, sem
+     mudar comando. O firmware não reinicializava o rádio antes de
+     `startConstCarrier`. **Corrigido** (`startCarrierOn`: stopConstCarrier →
+     powerUp → reconfig → startConstCarrier; re-arme no `loopHold`). Emissão
+     agora confiável/reprodutível (3/3 ciclos de 100% de negação).
+   - **Capacidade do jammer (1 rádio)**: parado (`mode hold`) em UM canal nega
+     ~95-100% do enlace FHSS para N=1..16 canais de hopping (um canal morto
+     colapsa o FHSS por cascata de loss_of_sync; NÃO é 1/N). Follower
+     (`adaptive`) → ~50% de throughput, sem colapso.
+   - **Mitigação — gap real**: sob ataque forte de canal fixo, a blacklist
+     recupera só ~17% (vs 1% sem mitigação). A máscara **oscila** porque o
+     dessincronismo corrompe a atribuição de falha por-canal — culpa canais
+     inocentes em vez de banir só o atacado. Isso **corrige** o "self-healing
+     validado" anterior (era com jammer fraco/degradado). Endurecer a
+     mitigação vira uma change nova.
+   - **Novidades de firmware/tooling**: `mode hold [ch]` (atacante determinístico
+     de canal fixo, serve ao Cenário A), comando `hopset <n>` (mestre, restringe
+     o hopping a N canais para caracterização), `Tests/JammerTx`.
+   - **Consequência**: as validações sob ataque anteriores (`targeted-jammer`
+     3.2, `spectrum-attack-classification` 3.1/3.3, `two-board-topology` 6.2,
+     `dynamic-seed-blacklist` 4.4/4.5, bateria A/B/C) precisam ser
+     **RE-RODADAS** com o jammer confiável — os números antigos usaram um
+     atacante que emitia de forma intermitente/fraca.
 2. **Conferência visual do dashboard Tkinter** (`telemetry-logging` 4.4,
    5.2).
 3. **Decisão de metodologia A/B/C** (`scenario-automation` 4.2/4.3): qual
