@@ -117,6 +117,45 @@ hops ≤ o novo contador antes de calcular o próximo canal (mesmo
   ordem de busca crescente), sem candidato ⇒ cai de volta em
   `g_last_good_channel`. `resync_park` ganhou o campo `score=` do canal
   escolhido.
+- Tarefa 1.6 (experimento): mesmo estacionando no canal de melhor qualidade
+  (1.5), o log do mestre mostra TX confirmado no canal estacionado (82/94/125,
+  limpos) durante toda a janela de park sem nenhum `resync_ok` do lado do
+  escravo -- consistente com a "surdez" pós-hop já vista em
+  pairing-handshake-hardening (registradores idênticos ao boot, só limpos por
+  `radio_reinit()`/reboot). A/B na entrada do park: contador de entradas
+  alterna entre variante "listen" (`startListening()` simples, reafirma CE
+  alto/PRIM_RX) e "reinit" (`radio_reinit()` completo, reprograma o canal
+  para o candidato de pareamento e depois reaplica o canal de park); dump de
+  registradores via `tlm_radio_regs(..., "park_pre")` antes de aplicar a
+  variante, e `fix=listen|reinit` adicionado a `resync_park` e `resync_ok`
+  (guardado em estático pra `resync_ok` reportar a variante do park corrente).
+- Tarefa 1.7 (experimento): mesmo com o escravo estacionado e reiniciado
+  (1.6), o log do mestre confirma TX no canal de park sem nenhuma recepção
+  do lado do escravo -- indício de que o rádio do MESTRE, não o do escravo,
+  é quem trava (TX NO_ACK só confirma FIFO esvaziada, não irradiação real);
+  após `loss_of_sync` os dois lados fazem `radio_reinit()` e o
+  reparelhamento funciona em ~2s. `mestre/src/node.h` ganhou
+  `maybe_reinit_radio_after_misses()`, chamada nos três pontos de
+  `mestre_loop()` onde `g_hops_since_ack` é atualizado (fragmento com envio
+  falho, fragmento com/sem ack, e controle via `send_pending_control_if_any`):
+  a cada 3 misses consecutivos (3, 9, 15, 21 -- sempre antes de
+  `LOSS_HOPS`=25) chama `radio_reinit()` sem tocar em `g_hop_counter`/
+  seed/máscara/fragmento corrente, com `tlm_radio_regs(..., "miss_pre")`
+  antes e telemetria `mestre_reinit` (`miss=`, `hop=`) depois -- o hop
+  seguinte já chama `setChannel()` por conta própria, então o canal de
+  pareamento em que `radio_reinit()` deixa o rádio é sobrescrito antes de
+  qualquer TX/RX.
+- Tarefa 1.8 (bug de bancada): `escravo_loop()` tinha
+  `if (g_resync_parked) { if (timed_out) {...} } else if (timed_out) {...}
+  else {...}` aninhado -- com `g_resync_parked==true` e `timed_out==false`
+  (o caso comum, toda iteração até o timeout estourar), nenhum dos dois
+  `if` internos disparava, e o `else` de recepção (`available()`/`read`)
+  nunca rodava enquanto estacionado. Corrigido calculando `timed_out` uma
+  única vez e testando `timed_out && g_resync_parked` / `timed_out` / `else`
+  no mesmo nível. Isso invalida as conclusões dos experimentos 1.6 e 1.7:
+  a "surdez" de rádio que motivou as variantes "listen"/"reinit" (1.6) e o
+  `radio_reinit()` do mestre por misses (1.7) não existia -- o escravo
+  estacionado simplesmente nunca chamava `available()`.
 
 ## Riscos
 

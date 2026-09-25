@@ -41,6 +41,35 @@
       fallback)` em `shared/resync.h` (score tipo `ok - 2×miss`, só canais
       habilitados com `ok > 0`, desempate determinístico) + testes nativos;
       `resync_park` ganha `score=`.
+- [x] 1.6 (experimento) A/B de recuperação do rádio na entrada do
+      estacionamento: mesmo com canal de qualidade escolhido (1.5), o log
+      do mestre confirma TX no canal estacionado (82/94/125, limpos)
+      durante a janela de park sem nenhuma recepção do lado do escravo (0
+      `resync_ok`) -- achado anterior (pairing-handshake-hardening) viu o
+      mesmo tipo de "surdez" pós-hop com registradores idênticos ao boot,
+      só limpa por `radio_reinit()` completo ou reboot; alterna
+      `startListening()` simples ("listen") vs. `radio_reinit()` completo
+      ("reinit") a cada entrada em park, com dump de registradores
+      (`tlm_radio_regs`, `why=park_pre`) antes de aplicar e `fix=` em
+      `resync_park`/`resync_ok` pra comparar qual variante recupera a
+      recepção.
+- [x] 1.7 (experimento) mestre reinicializa o rádio após 3 hops sem ack:
+      evidência de bancada 2026-09-25 -- mesmo com o escravo estacionado e
+      recém-reiniciado (1.6), ele não recebe nada enquanto o log do mestre
+      mostra TX no mesmo canal, sugerindo que é o rádio do MESTRE que trava
+      (TX NO_ACK "sucede" sem nada ser irradiado); `radio_reinit()` a cada 3
+      misses consecutivos (3, 9, 15, 21, sempre antes de `LOSS_HOPS`=25),
+      sem tocar no estado de salto.
+- [x] 1.8 (bug de bancada) escravo estacionado nunca lia o rádio: o
+      `if (g_resync_parked) { if (timed_out) {...} } else if (timed_out)
+      {...} else {...}` aninhado deixava o caso comum (parked==true,
+      timed_out==false) sem nenhum `if` que disparasse, então o `else` de
+      recepção (`available()`/`read`) jamais rodava enquanto estacionado;
+      corrigido calculando `timed_out` uma vez e testando
+      `timed_out && g_resync_parked` / `timed_out` / `else` no mesmo nível.
+      Isso invalida as conclusões dos experimentos 1.6/1.7 -- a "surdez"
+      pós-hop observada ali não era o rádio travado, era o escravo
+      estacionado simplesmente nunca chamando `available()`.
 - [ ] 2.2 Jammer `adaptive` e `targeted` por 2-3 min cada: registrar
       quedas, ressincronizações e PLR contra o mesmo teste sem este change
       (`targeted-jammer` 4.5, sessão 2026-09-24 15:39).
