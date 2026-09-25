@@ -47,10 +47,17 @@
 
 ## 6. Fechamento e re-execução da bateria
 
-- [ ] 6.1 Re-rodar as validações sob ataque que usavam o jammer antigo
-      (`dynamic-seed-blacklist` 4.4/4.5, `blacklist-decay` §4, `scenario-
-      automation` A/B/C, `spectrum-attack-classification` 3.1/3.3) com o jammer
-      confiável + mitigação endurecida; substituir os números antigos.
+- [x] 6.1 **Bateria A/B/C re-rodada com o jammer confiável** (`mode hold` ch10,
+      `power max`) — `run_battery.py --jammer-mode hold --jammer-power max`
+      (suporte a `hold` adicionado). Resultado (`battery-20260925-165233`,
+      sessão `session-20260925-135209`, ambos copiados p/ `logs/working/`):
+      retenção sob jamming A=**0%** (colapso total, PLR 59%), B=**12%** (PLR 40%),
+      C=**25%** (PLR 25%) — ordem esperada C>B>A confirmada com ataque real, e
+      mitigação ≈2× o B. Gráfico de 3 painéis em `plot_battery.py` (agora com
+      barras de retenção por fase e quebra de linha em gaps). As demais
+      validações antigas (`dynamic-seed-blacklist` 4.4/4.5, `blacklist-decay`
+      §4, `spectrum` 3.1/3.3) ficam pendentes de re-rodar com o jammer confiável
+      (a bateria A/B/C já cobre o caso comparativo central).
 - [ ] 6.2 Se qualificar, copiar a sessão para `logs/working/` conforme
       `CLAUDE.md`. Atualizar `ROADMAP.md` e a memória `project-rf-status`.
 - [ ] 6.3 `openspec validate jamming-mitigation-hardening --strict` e arquivar

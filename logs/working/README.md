@@ -45,6 +45,34 @@ self-healing de `dynamic-seed-blacklist` 4.4 — dados na sessão
 (`targeted` após retune, reprodutíveis). Interpretação em
 `openspec/changes/scenario-automation/tasks.md` 4.2.
 
+> ⚠️ **RESSALVA (2026-09-25):** todas as baterias acima foram rodadas ANTES
+> do achado de `jammer-emission-hardware` — o jammer emitia de forma
+> intermitente/degradada (a portadora do clone caía ao longo da sessão sem
+> reinit do rádio). Por isso B e C "sem quedas" e o "self-healing" delas
+> refletem um atacante fraco, NÃO a defesa vencendo um ataque forte. Os
+> números devem ser lidos com essa ressalva. A bateria abaixo é a primeira
+> com o jammer confiável.
+
+### Bateria A/B/C com o jammer CONFIÁVEL (`jammer-emission-hardware` + `jamming-mitigation-hardening`)
+
+- `session-20260925-135209.jsonl` + `battery-20260925-165233.json`/`.png`
+  (mode=`hold` ch10, power=`max` — atacante forte de canal fixo, portadora
+  parada e reprodutível). Resultado por cenário (throughput na fase jamming /
+  baseline do mesmo cenário; PLR médio sob jamming):
+
+  | Cenário | retenção sob jamming | PLR jam | leitura |
+  |---|---|---|---|
+  | A (sem hopping) | **0%** (colapso total) | 59% | canal fixo negado por completo |
+  | B (FHSS, sem mitigação) | **12%** | 40% | hopping sobrevive parcialmente, mas dessincroniza |
+  | C (FHSS + mitigação) | **25%** | 25% | ~2× o B; menor PLR; recupera ao desligar o jammer |
+
+  Demonstra a ordem esperada C > B > A com um ataque real, e o valor da
+  mitigação endurecida (persistência de blacklist + detecção pelo escravo +
+  anti-park). NÃO é recuperação total: resta o desalinhamento de fase temporal
+  mestre/escravo sob jamming (ver `openspec/changes/jamming-mitigation-hardening/tasks.md`).
+  Gráfico: 3 painéis (throughput×tempo, latência×tempo, throughput por fase com
+  % de retenção).
+
 ## Referência, mas NÃO "funcionando corretamente" (ficou só em `logs/`)
 
 - `session-20260923-015103.jsonl` (+ `scenario-20260923-045128`): pipeline
