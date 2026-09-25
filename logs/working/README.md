@@ -33,6 +33,8 @@ end; horários do nome em UTC, das sessões em horário local UTC-3):
 
 | `session-20260925-004847.jsonl` | **601 s, um único pareamento, 0 `loss_of_sync`** | 2.612 | **soak com `hop-resync` + correção da enxurrada de controle** (jammer desligado, Wi-Fi real ativo em ch 28-45): 49/49 estacionamentos recuperados (`resync_ok`, mediana 2,2 s), 77 trocas de máscara aplicadas nos dois lados. Ainda com os experimentos 1.6/1.7 no firmware (removidos depois, sem efeito no resultado) |
 
+| `session-20260925-010250.jsonl` | 4 fases de 3 min sob o mesmo pareamento (quedas só em adaptive/sweep) | ~1.300 | **enlace sob ataque** (PA_LOW): off 0 quedas/9,5% miss; **targeted 0 quedas**, 43,6% miss, 69/70 resync, 86 máscaras aplicadas nos dois lados; adaptive 3 quedas; sweep 6 quedas (dessensibilização fora da faixa). Fases em `hop-resync/tasks.md` 2.2 |
+
 ## Referência, mas NÃO "funcionando corretamente" (ficou só em `logs/`)
 
 - `session-20260923-015103.jsonl` (+ `scenario-20260923-045128`): pipeline

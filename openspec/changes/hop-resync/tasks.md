@@ -78,10 +78,27 @@
       Isso invalida as conclusões dos experimentos 1.6/1.7 -- a "surdez"
       pós-hop observada ali não era o rádio travado, era o escravo
       estacionado simplesmente nunca chamando `available()`.
-- [ ] 2.2 Jammer `adaptive` e `targeted` por 2-3 min cada: registrar
+- [x] 2.2 Jammer `adaptive` e `targeted` por 2-3 min cada: registrar
       quedas, ressincronizações e PLR contra o mesmo teste sem este change
       (`targeted-jammer` 4.5, sessão 2026-09-24 15:39).
-- [ ] 2.3 Copiar as sessões que qualificarem para `logs/working/`.
+      **Resultado (2026-09-25 01:08-01:20, PA_LOW, 3 min por fase)**:
+
+      | Fase | miss % | quedas | resync ok/park | máscaras aplicadas | msg_done |
+      |---|---|---|---|---|---|
+      | off | 9,5 | 0 | 17/16 | 18 | 775 |
+      | targeted | 43,6 | 0 | 69/70 | 86 | 125 |
+      | adaptive | 20,8 | 3 | 26/30 | 19 | 356 |
+      | sweep 2-80 | 57,0 | 6 | 30/37 | 25 | 63 |
+
+      Antes deste change (sessão 2026-09-24 15:39, `adaptive`): 3 quedas em
+      65 s e 2 quedas em 20 s *sem* jammer. Agora o enlace sobrevive ao
+      `targeted` sem nenhuma queda. Perfil de miss por canal: no `sweep`
+      (só 2-80) os canais 94-125 também perdem 29-63% — dessensibilização
+      de campo próximo do escravo pelo jammer na mesma placa (ver
+      `targeted-jammer` 3.2/4.5), contra a qual blacklist não tem para
+      onde fugir.
+- [x] 2.3 Copiar as sessões que qualificarem para `logs/working/`.
+      `session-20260925-004847` (soak) e `session-20260925-010250` (modos do jammer).
 
 ## 3. Documentação
 

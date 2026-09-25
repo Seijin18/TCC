@@ -55,6 +55,16 @@
       Teste direto proposto: pôr o analisador (placa A) colado no jammer e
       comparar `sweep` contra uma versão de `hopCarrier()` que faz
       `stopConstCarrier()`/`startConstCarrier(power, ch)` a cada troca.
+      **Hipótese refutada pelo lado do enlace (2026-09-25 01:08-01:20)**:
+      o perfil de miss por canal do mestre é bem diferente entre modos —
+      `targeted` derruba 70-100% nos canais baixos da tabela (15-82) e
+      10-46% nos altos; `sweep` 44-100% em 10-82 e ainda 29-63% em 94-125
+      (fora da faixa varrida: dessensibilização de campo próximo, jammer a
+      centímetros do escravo na mesma placa). Logo o jammer re-sintoniza;
+      o "bloco fixo" visto pelo analisador era distância/Wi-Fi. Continua
+      em aberto só a verificação visual pedida aqui (energia concentrada
+      nos 16 canais): exige o analisador perto do jammer — **precisa mover
+      placas (intervenção manual)**.
 - [x] 3.3 Rodar mestre+escravo com PLR (`plr-metric`) sob jammer targeted e
       confirmar que o PLR sobe de forma comparável ao sweep — serve de
       baseline para o cenário B da Fase 5. **Confirmado em 2026-09-18**
@@ -75,9 +85,21 @@
       `ADAPTIVE_RECHECK_MS`, soltando e voltando a escanear se ficar
       quieto. Eventos de telemetria `adaptive_lock`/`adaptive_release`.
 - [x] 4.4 `pio run -e jammer -e placa_b` limpo.
-- [ ] 4.5 Validação em bancada: confirmar `adaptive_lock` disparando no
+- [x] 4.5 Validação em bancada: confirmar `adaptive_lock` disparando no
       canal realmente em uso pelo enlace (não em canais ociosos), e que
       `dynamic-seed-blacklist` ainda consegue escapar dele.
+      **Resultado (2026-09-25 01:14-01:17, com `hop-resync`)**: o
+      `adaptive_lock` dispara só em canais da tabela (todos usados pelo
+      enlace), mas trava principalmente em **ch 27 (93 de ~400 travas)** —
+      o canal colado no Wi-Fi real da bancada: o sensoriamento por energia
+      é enganado pelo ruído ambiente e não distingue o enlace do Wi-Fi.
+      Cada trava dura ~150-200 ms (o enlace já saltou), então na prática o
+      modo age como um seguidor reativo. Efeito no enlace: miss 20,8%
+      (vs 9,5% sem jammer), 3 quedas em 3 min, 26/30 ressincronizações —
+      o enlace escapa sozinho na maior parte das vezes (salto +
+      `hop-resync`); a blacklist aplicou 19 máscaras, sem reseed (o
+      analisador não alertou — ver `spectrum-attack-classification`).
+      Critério atendido com a ressalva do Wi-Fi.
       **Bloqueado em 2026-09-24**: a placa combinada só liga a portadora
       depois que o handshake mestre/escravo confirma pelo menos uma vez
       (`jammer_set_ready_source`) — a sessão encontrou dificuldade
