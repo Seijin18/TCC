@@ -1,11 +1,11 @@
 ## ADDED Requirements
 
 ### Requirement: Blacklist persiste através do re-pareamento sob jamming
-Quando um retorno ao pareamento é causado por jamming (perda de sincronismo com
-pelo menos um canal já acumulando falhas dominantes), o sistema DEVE (MUST)
-preservar o estado de blacklist (canais banidos e suas contagens/temporizadores
-de recuperação) através do re-pareamento, em vez de zerá-lo. O decaimento de
-blacklist continua responsável por reincluir os canais quando o jammer sai
+O sistema DEVE (MUST) preservar o estado de blacklist (canais banidos e suas
+contagens/temporizadores de recuperação) através de um re-pareamento causado
+por jamming, em vez de zerá-lo. Considera-se causado por jamming um retorno ao
+pareamento com pelo menos um canal já acumulando falhas dominantes. O decaimento
+de blacklist continua responsável por reincluir os canais quando o jammer sai
 (o ban não se torna permanente). Um reset limpo (boot ou comando do operador)
 continua zerando o estado.
 
@@ -45,11 +45,11 @@ estavam nesse canal (contador de hop coincidente).
   inocentes
 
 ### Requirement: Escalonamento para reseed quando a blacklist satura
-Quando a fração de canais banidos ultrapassa um limiar e o PLR permanece alto
-(indicando um atacante que a blacklist sozinha não contém — follower ou
-cobertura de vários canais), o sistema DEVE (MUST) escalonar para troca de seed
-(reseed), reembaralhando a sequência de salto, em vez de continuar banindo até
-quase esvaziar o conjunto de canais.
+O sistema DEVE (MUST) escalonar para troca de seed (reseed), reembaralhando a
+sequência de salto, quando a fração de canais banidos ultrapassa um limiar e o
+PLR permanece alto — em vez de continuar banindo até quase esvaziar o conjunto
+de canais. Esse caso indica um atacante que a blacklist sozinha não contém
+(follower ou cobertura de vários canais).
 
 #### Scenario: Reseed sob saturação de blacklist
 - **WHEN** a fração de canais banidos passa do limiar e o PLR continua alto
