@@ -3,9 +3,10 @@
 ### Requirement: Escravo recupera sincronismo de salto sem re-parear
 O escravo DEVE (MUST), depois de um número definido de hops consecutivos
 sem receber nenhum pacote válido, parar de avançar de canal por conta
-própria e escutar continuamente no último canal em que recebeu um
-fragmento válido, até receber um fragmento do mestre — adotando então o
-contador de hop desse fragmento e voltando a saltar normalmente — ou até
+própria e escutar continuamente num canal habilitado escolhido pela
+qualidade de recepção recente por canal (não simplesmente o último canal
+em que recebeu algo), até receber um pacote do mestre — adotando então o
+contador de hop desse pacote e voltando a saltar normalmente — ou até
 um limite de tempo que termina antes do mestre declarar perda de
 sincronismo.
 
@@ -13,9 +14,16 @@ sincronismo.
 - **WHEN** o escravo recebe um fragmento e avança, mas o ack se perde e o
   mestre continua no canal anterior até o fim da janela do hop, deixando
   os dois lados em canais diferentes nos hops seguintes
-- **THEN** após os hops sem recepção o escravo estaciona no último canal
-  bom, recebe o fragmento do mestre quando este passa por aquele canal, e
-  o enlace continua sem `loss_of_sync` nem re-pareamento
+- **THEN** após os hops sem recepção o escravo estaciona no canal de
+  melhor qualidade recente, recebe o pacote do mestre quando este passa
+  por aquele canal, e o enlace continua sem `loss_of_sync` nem
+  re-pareamento
+
+#### Scenario: Canal onde o ack se perdeu não é escolhido para estacionar
+- **WHEN** a última recepção válida do escravo aconteceu num canal com
+  histórico recente de muitas perdas
+- **THEN** o escravo estaciona em outro canal habilitado com melhor
+  histórico de recepção
 
 #### Scenario: Estacionamento sem sucesso cai no caminho de perda
 - **WHEN** o escravo está estacionado e nenhum fragmento válido chega

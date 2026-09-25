@@ -102,4 +102,4 @@
 
 ## 3. Documentação
 
-- [ ] 3.1 ROADMAP; sincronizar spec; validar; arquivar.
+- [x] 3.1 ROADMAP; sincronizar spec; validar; arquivar.
