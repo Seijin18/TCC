@@ -35,6 +35,16 @@ end; horários do nome em UTC, das sessões em horário local UTC-3):
 
 | `session-20260925-010250.jsonl` | 4 fases de 3 min sob o mesmo pareamento (quedas só em adaptive/sweep) | ~1.300 | **enlace sob ataque** (PA_LOW): off 0 quedas/9,5% miss; **targeted 0 quedas**, 43,6% miss, 69/70 resync, 86 máscaras aplicadas nos dois lados; adaptive 3 quedas; sweep 6 quedas (dessensibilização fora da faixa). Fases em `hop-resync/tasks.md` 2.2 |
 
+| `session-20260925-013616.jsonl` | 600 s de soak sem nenhuma queda + bateria A/B/C | 2.913 no soak | **soak com `hop-permutation`** (02:16-02:26): 0 `loss_of_sync`, 41/41 resync; depois bateria `targeted` `battery-20260925-044627` (não reprodutível — ver `targeted-jammer` 3.2) |
+| `session-20260925-015833.jsonl` | 2 baterias A/B/C seguidas | — | **baterias reprodutíveis** após o retune do jammer (`battery-20260925-045843`/`-050631`): B e C sem nenhuma queda sob `targeted`, C com 8 máscaras aplicadas por rodada |
+
+Baterias A/B/C (`battery-*.json`, fases com `scenario`; `.png` quando
+gerado): `battery-20260925-041711` (1ª, `targeted`; é a que mostra o
+self-healing de `dynamic-seed-blacklist` 4.4 — dados na sessão
+`20260925-010250`), `-042708` (`adaptive`), `-045843` e `-050631`
+(`targeted` após retune, reprodutíveis). Interpretação em
+`openspec/changes/scenario-automation/tasks.md` 4.2.
+
 ## Referência, mas NÃO "funcionando corretamente" (ficou só em `logs/`)
 
 - `session-20260923-015103.jsonl` (+ `scenario-20260923-045128`): pipeline
