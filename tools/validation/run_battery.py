@@ -98,7 +98,14 @@ def run_one_scenario(scenario, args):
     time.sleep(args.baseline)
 
     print(f"[battery] Cenário {scenario} / fase 'jamming': mode={args.jammer_mode}, {args.jam:.0f}s")
-    send_cmd(args.jammer_board, f"mode {args.jammer_mode}")
+    # jamming-mitigation-hardening: modo "hold" = portadora parada num canal
+    # fixo (atacante confiável, ver jammer-emission-hardware). Precisa do canal
+    # no comando; default = TEST_FIXED_CHANNEL (10), que é exatamente o canal do
+    # enlace no Cenário A e um dos 16 de hopping em B/C -- mesmo atacante nos 3.
+    if args.jammer_mode == "hold":
+        send_cmd(args.jammer_board, f"mode hold {args.jammer_hold_ch}")
+    else:
+        send_cmd(args.jammer_board, f"mode {args.jammer_mode}")
     time.sleep(0.2)
     if args.jammer_power:
         send_cmd(args.jammer_board, f"power {args.jammer_power}")
@@ -133,12 +140,14 @@ def main():
     ap.add_argument("--jammer-board", default="placa_b")
     ap.add_argument("--jammer-cmd", default="jam on")
     ap.add_argument(
-        "--jammer-mode", choices=["sweep", "targeted", "adaptive"], default="targeted",
-        help="default 'targeted' -- 'sweep' não cobre os 16 canais de HOPPING_CHANNELS "
-        "e não é comparável entre os 3 cenários da mesma forma (ver run_scenario.py); "
-        "'adaptive' detecta energia nos 16 HOPPING_CHANNELS e tranca no canal em uso, "
-        "re-verificando a cada ~150 ms (jammer reativo, justo entre cenários A/B/C)",
+        "--jammer-mode", choices=["sweep", "targeted", "adaptive", "hold"], default="targeted",
+        help="default 'targeted'. 'hold' = portadora parada num canal fixo "
+        "(--jammer-hold-ch, default 10) -- o atacante forte/confiável de "
+        "jammer-emission-hardware, mesmo canal do enlace no Cenário A. 'sweep' não "
+        "cobre os 16 canais; 'adaptive' é o follower reativo.",
     )
+    ap.add_argument("--jammer-hold-ch", type=int, default=10,
+                    help="canal RF do modo 'hold' (default 10 = TEST_FIXED_CHANNEL)")
     ap.add_argument("--jammer-power", choices=["min", "low", "high", "max"], default="high")
     ap.add_argument(
         "--scenarios", default="ABC",

@@ -88,6 +88,20 @@ def mean(values):
     return sum(values) / len(values) if values else float("nan")
 
 
+def phase_windows(phases):
+    """Retorna {phase_name: (start_epoch, end_epoch)} usando o start da fase
+    seguinte como fim (baseline->jamming->recovery->end)."""
+    ordered = [p for p in phases if p["name"] in ("baseline", "jamming", "recovery", "end")]
+    ordered.sort(key=lambda p: p["start_epoch"])
+    wins = {}
+    for i, p in enumerate(ordered):
+        if p["name"] == "end":
+            continue
+        end = ordered[i + 1]["start_epoch"] if i + 1 < len(ordered) else p["start_epoch"] + 1e9
+        wins[p["name"]] = (p["start_epoch"], end)
+    return wins
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else latest_battery_file()
     with open(path) as f:
@@ -98,7 +112,10 @@ def main():
     labels = battery.get("scenario_labels", {})
     by_scenario = phases_by_scenario(battery)
 
-    fig, (ax_thr, ax_lat) = plt.subplots(2, 1, figsize=(11, 8), sharex=False)
+    fig, (ax_thr, ax_lat, ax_bar) = plt.subplots(3, 1, figsize=(11, 12), sharex=False)
+    # jamming-mitigation-hardening: métricas por fase (baseline/jamming/
+    # recovery) por cenário, para o painel de barras e a retenção.
+    per_phase_thr = {}  # scenario -> {phase: mean throughput}
 
     print("=" * 78)
     print(f"Bateria comparativa: {path}")
@@ -125,7 +142,21 @@ def main():
         label = f"{scenario}: {labels.get(scenario, '')}"
 
         if thr:
-            xs, ys = zip(*sorted(thr))
+            # jamming-mitigation-hardening: quebra a linha onde há um GAP de
+            # dados (> 6 s sem evento de throughput) -- senão o plot conecta
+            # baseline e recovery por cima de uma fase de colapso (0 throughput,
+            # ex. Cenário A totalmente negado), desenhando uma linha reta falsa
+            # que parece "throughput normal durante o jamming".
+            pts = sorted(thr)
+            xs, ys = [], []
+            prev_t = None
+            for (t, y) in pts:
+                if prev_t is not None and (t - prev_t) > 6.0:
+                    xs.append(float("nan"))
+                    ys.append(float("nan"))  # NaN quebra a linha em matplotlib
+                xs.append(t)
+                ys.append(y)
+                prev_t = t
             ax_thr.plot(xs, ys, marker="o", markersize=3, color=color, label=label)
         if lat:
             xs, ys = zip(*sorted(lat))
@@ -142,6 +173,14 @@ def main():
             lat_during_jam = [v for t, v in lat if (jam_start - t_start) <= t <= (jam_end - t_start)]
             summary_rows.append((scenario, mean(plr_during_jam), mean(thr_during_jam), mean(lat_during_jam)))
 
+        # throughput médio por fase (para o painel de barras + retenção)
+        wins = phase_windows(phases)
+        ph_means = {}
+        for ph_name, (ws, we) in wins.items():
+            vals = [y for (ep, y) in [(t + t_start, y) for (t, y) in thr] if ws <= ep < we]
+            ph_means[ph_name] = mean(vals)
+        per_phase_thr[scenario] = ph_means
+
     ax_thr.set_ylabel("throughput (fragmentos confirmados/s)")
     ax_thr.set_title("Throughput × tempo (relativo ao início da baseline de cada cenário)")
     ax_thr.grid(alpha=0.3)
@@ -153,21 +192,62 @@ def main():
     ax_lat.grid(alpha=0.3)
     ax_lat.legend(loc="upper right", fontsize=8)
 
-    fig.suptitle("Cenários comparativos A/B/C: throughput e latência sob o mesmo jamming", fontsize=14, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    # -------- Painel de barras: throughput médio por fase, por cenário -------
+    phase_order = ["baseline", "jamming", "recovery"]
+    phase_labels = {"baseline": "baseline\n(sem jammer)", "jamming": "jamming\n(hold PA_MAX)", "recovery": "recovery\n(jammer off)"}
+    import numpy as np
+    x = np.arange(len(phase_order))
+    nscen = max(len(scenarios), 1)
+    width = 0.8 / nscen
+    for i, scenario in enumerate(scenarios):
+        ph = per_phase_thr.get(scenario, {})
+        vals = [ph.get(p, float("nan")) for p in phase_order]
+        vals = [0.0 if (v != v) else v for v in vals]  # NaN->0 para a barra
+        offs = x + (i - (nscen - 1) / 2) * width
+        bars = ax_bar.bar(offs, vals, width, color=SCENARIO_COLOR.get(scenario, "gray"),
+                          label=f"{scenario}: {labels.get(scenario, '')[:38]}")
+        # retenção sob jamming (jamming/baseline) anotada na barra de jamming.
+        # jam ausente (NaN) = colapso total (0 throughput) -> "0%".
+        base = ph.get("baseline")
+        jam = ph.get("jamming")
+        if base and base > 0:
+            ret = (100.0 * jam / base) if (jam is not None and jam == jam) else 0.0
+            ax_bar.annotate(f"{ret:.0f}%", (offs[1], vals[1]), textcoords="offset points",
+                            xytext=(0, 3), ha="center", fontsize=9, fontweight="bold",
+                            color=SCENARIO_COLOR.get(scenario, "gray"))
+    ax_bar.set_xticks(x)
+    ax_bar.set_xticklabels([phase_labels[p] for p in phase_order])
+    ax_bar.set_ylabel("throughput médio (frag/s)")
+    ax_bar.set_title("Throughput médio por fase (%=retenção sob jamming vs baseline do cenário)")
+    ax_bar.grid(alpha=0.3, axis="y")
+    ax_bar.legend(loc="upper right", fontsize=8)
+
+    jm = battery.get("jammer_mode")
+    jp = battery.get("jammer_power")
+    fig.suptitle(f"Bateria A/B/C sob jammer confiável (mode={jm}, power={jp})", fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
 
     ts = os.path.basename(path).replace("battery-", "").replace(".json", "")
     out_png = os.path.join(LOGS_DIR, f"battery-{ts}.png")
     fig.savefig(out_png, dpi=140)
     print(f"\nGráfico salvo em {out_png}\n")
 
-    print(f"{'Cenário':<10} {'PLR média sob jamming (%)':>26} {'throughput médio (f/s)':>24} {'latência média (ms)':>22}")
-    for scenario, plr_avg, thr_avg, lat_avg in summary_rows:
-        print(f"{scenario:<10} {plr_avg:>26.1f} {thr_avg:>24.2f} {lat_avg:>22.1f}")
+    print(f"{'Cenário':<8} {'base f/s':>10} {'jam f/s':>10} {'recov f/s':>10} {'retenção jam':>13} {'PLR jam %':>10} {'lat jam ms':>11}")
+    plr_by = {s: p for (s, p, _, _) in summary_rows}
+    lat_by = {s: l for (s, _, _, l) in summary_rows}
+    for scenario in scenarios:
+        ph = per_phase_thr.get(scenario, {})
+        base = ph.get("baseline", float("nan"))
+        jam = ph.get("jamming", float("nan"))
+        recov = ph.get("recovery", float("nan"))
+        jam_disp = 0.0 if jam != jam else jam  # NaN (colapso total) -> 0
+        ret = (100.0 * jam_disp / base) if (base and base > 0) else float("nan")
+        print(f"{scenario:<8} {base:>10.2f} {jam_disp:>10.2f} {recov:>10.2f} {ret:>12.0f}% "
+              f"{plr_by.get(scenario, float('nan')):>10.1f} {lat_by.get(scenario, float('nan')):>11.1f}")
     print(
-        "\nEsperado pelo guia: PLR/latência pioram e throughput cai de C -> B -> A "
-        "(C com self-healing deveria degradar menos que B, que por sua vez deveria "
-        "degradar menos que A, sem hopping nenhum)."
+        "\nLeitura: A (sem hopping) deve colapsar sob o hold no canal fixo; B (hopping "
+        "sem mitigação) sofre o dessincronismo; C (mitigação on) deve reter mais que B. "
+        "Retenção = throughput na fase jamming / baseline do mesmo cenário."
     )
 
 

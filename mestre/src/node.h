@@ -177,7 +177,7 @@ static bool g_mitigation_enabled = true;
 // mais abaixo) por serial -- fronteira limpa entre cenários da bateria
 // A/B/C sem precisar reiniciar a placa (zera g_channel_mask/g_channel_fail/
 // g_channel_blacklisted_since, força re-pareamento).
-static void reset_to_pairing();
+static void reset_to_pairing(bool clear_blacklist = false);
 
 // Comando runtime "seed <n>" -- só tem efeito antes do enlace fechar
 // (pairing-handshake-hardening, D3: a seed vai dentro da propria sonda, e
@@ -238,7 +238,12 @@ static void handle_mestre_command(char *line)
     else if (strcmp(line, "reset") == 0)
     {
         guarded_println("[MESTRE] Reset solicitado via comando -- voltando ao pareamento.");
-        reset_to_pairing();
+        // jamming-mitigation-hardening: reset LIMPO por comando do operador
+        // (boot de bancada, fronteira entre cenários da bateria) ZERA a
+        // blacklist -- ao contrário do reset causado por jamming, que a
+        // preserva. Sem isto, um cenário da bateria herdaria a blacklist do
+        // anterior.
+        reset_to_pairing(true);
     }
     else if (strcmp(line, "regs") == 0)
     {
@@ -986,8 +991,18 @@ static void radio_reinit()
     mestre_radio.stopListening();
 }
 
-static void reset_to_pairing()
+static void reset_to_pairing(bool clear_blacklist)
 {
+    // jamming-mitigation-hardening: reset por jamming PRESERVA a blacklist
+    // (clear_blacklist=false, default); reset limpo por comando do operador a
+    // ZERA (clear_blacklist=true). Ver o comando "reset" em
+    // handle_mestre_command() e o design da persistência.
+    if (clear_blacklist)
+    {
+        g_channel_mask = 0xFFFF;
+        memset(g_channel_fail, 0, sizeof(g_channel_fail));
+        memset(g_channel_blacklisted_since, 0, sizeof(g_channel_blacklisted_since));
+    }
     // D5 (tarefa 4.3): avalia o candidato ANTES de zerar as flags da
     // tentativa -- só conta falha quando houve ack válido aceito (evidência
     // de presença do escravo) e o enlace não chegou a confirmar dado real

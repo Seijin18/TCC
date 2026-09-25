@@ -530,6 +530,11 @@ static void process_escravo_pending_requests()
     {
         g_escravo_pending_reset = false;
         guarded_println("[ESCRAVO] Reset solicitado via comando -- voltando ao escaneamento.");
+        // jamming-mitigation-hardening: reset LIMPO por comando zera a máscara
+        // (o mestre re-pareado mandará 0xFFFF na sonda de qualquer forma, mas
+        // manter consistente evita janela de discordância). Reset por jamming
+        // (reset_to_scanning direto) preserva.
+        g_channel_mask = 0xFFFF;
         reset_to_scanning();
     }
     if (g_escravo_pending_drop_next_ack)
