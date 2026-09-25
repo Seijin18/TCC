@@ -956,45 +956,6 @@ static void reset_to_pairing()
     tlm_radio_regs("mestre", mestre_radio, "loss");
 }
 
-// hop-resync (tarefa 1.7, experimento): achado de bancada 2026-09-25 --
-// durante o salto ocorrem blackouts em que TODO hop do mestre falha em
-// TODO canal; o escravo estaciona (hop-resync) num canal limpo e, mesmo
-// depois de um power-cycle completo do rádio do ESCRAVO na entrada do
-// estacionamento (variante radio_reinit), continua sem receber nada,
-// enquanto o log do mestre mostra que ele está transmitindo fragmentos
-// exatamente naquele canal. Depois de um loss_of_sync os dois lados fazem
-// radio_reinit() e o reparelhamento funciona em ~2s -- hipótese: o rádio
-// do MESTRE fica preso num estado em que o TX "sucede" (envio NO_ACK só
-// confirma que a FIFO esvaziou, não que algo foi de fato
-// irradiado/recebido). Aplica-se aqui a mesma receita, cedo, sem esperar
-// os LOSS_HOPS (25) misses que forçam reset_to_pairing() (que também
-// reparearia do zero): a cada 3 hops consecutivos sem ack (3, 9, 15, 21 --
-// sempre antes de LOSS_HOPS), reinicializa só o rádio, sem tocar no
-// estado de salto (g_hop_counter/seed/mascara/fragmento corrente
-// continuam intactos -- só o registrador do rádio era suspeito). O hop
-// seguinte já chama setChannel() por conta própria (mestre_loop(), logo
-// no início de cada tentativa de hop), então o canal de pareamento em que
-// radio_reinit() deixa o rádio (setChannel(g_pair_channel) +
-// stopListening()) é inofensivo -- é sobrescrito antes de qualquer
-// TX/RX do próximo hop. Só se aplica durante o salto (nunca durante
-// pareamento): as três chamadas abaixo (caminho de controle e os dois
-// caminhos de fragmento em mestre_loop()) já estão depois do `return`
-// para `!g_link_established`.
-static void maybe_reinit_radio_after_misses()
-{
-    if (g_hops_since_ack == 0)
-        return;
-    if (g_hops_since_ack == 3 || (g_hops_since_ack > 3 && (g_hops_since_ack - 3) % 6 == 0))
-    {
-        tlm_radio_regs("mestre", mestre_radio, "miss_pre");
-        radio_reinit();
-        // Telemetria DEPOIS do reinit -- nesse ponto não há resposta
-        // pendente (nem ack de controle, nem de fragmento), então não há
-        // risco de o reinit apagar um estado ainda relevante pro hop atual.
-        tlm_printf("mestre", "mestre_reinit", "miss=%lu;hop=%lu", g_hops_since_ack, g_hop_counter);
-    }
-}
-
 static void mestre_setup()
 {
     Serial.begin(115200);
@@ -1185,7 +1146,6 @@ static void mestre_loop()
             g_hops_since_ack++;
         g_hop_counter++;
         apply_scheduled_changes();
-        maybe_reinit_radio_after_misses();
         if (g_hops_since_ack >= LOSS_HOPS)
             reset_to_pairing();
         return;
@@ -1233,7 +1193,6 @@ static void mestre_loop()
         g_hop_counter++;
         apply_scheduled_changes();
         note_hop_for_throughput(false);
-        maybe_reinit_radio_after_misses();
         if (g_hops_since_ack >= LOSS_HOPS)
             reset_to_pairing();
         return;
@@ -1293,7 +1252,6 @@ static void mestre_loop()
     g_hop_counter++;
     apply_scheduled_changes();
 
-    maybe_reinit_radio_after_misses();
     if (g_hops_since_ack >= LOSS_HOPS)
         reset_to_pairing();
 }

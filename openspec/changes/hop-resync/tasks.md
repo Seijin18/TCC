@@ -21,10 +21,14 @@
 
 ## 2. Validação em bancada
 
-- [ ] 2.1 Soak de 10 min com jammer desligado (Wi-Fi ambiente atual): meta
+- [x] 2.1 Soak de 10 min com jammer desligado (Wi-Fi ambiente atual): meta
       **0 `loss_of_sync`**; registrar quantos `resync_park`/`resync_ok`
       ocorreram e a distribuição de `hop_after - hop_before` (confirma o
       caso "ack perdido" = escravo adiantado).
+      **2026-09-25 00:52-01:02 (com 1.8)**: 0 loss_of_sync em 10 min, 49/49
+      resync_ok (mediana 2,2 s), 2.612 msg_done, 77 trocas de máscara
+      aplicadas nos dois lados. (Esta soak ainda rodou com os experimentos
+      1.6/1.7 presentes no firmware -- removidos depois, ver notas neles.)
       **1ª tentativa (2026-09-24 15:56-15:59, interrompida)**: 11
       `resync_park`, **0 `resync_ok`**, toda estacionada seguida de
       `loss_of_sync` ~4 s depois (limite do estacionamento). 9 de 11
@@ -53,6 +57,8 @@
       (`tlm_radio_regs`, `why=park_pre`) antes de aplicar e `fix=` em
       `resync_park`/`resync_ok` pra comparar qual variante recupera a
       recepção.
+      Removido após 1.8 (soak: as duas variantes recuperaram igual, 49/49)
+      -- experimento baseado em diagnóstico errado.
 - [x] 1.7 (experimento) mestre reinicializa o rádio após 3 hops sem ack:
       evidência de bancada 2026-09-25 -- mesmo com o escravo estacionado e
       recém-reiniciado (1.6), ele não recebe nada enquanto o log do mestre
@@ -60,6 +66,8 @@
       (TX NO_ACK "sucede" sem nada ser irradiado); `radio_reinit()` a cada 3
       misses consecutivos (3, 9, 15, 21, sempre antes de `LOSS_HOPS`=25),
       sem tocar no estado de salto.
+      Removido após 1.8 (soak: as duas variantes recuperaram igual, 49/49)
+      -- experimento baseado em diagnóstico errado.
 - [x] 1.8 (bug de bancada) escravo estacionado nunca lia o rádio: o
       `if (g_resync_parked) { if (timed_out) {...} } else if (timed_out)
       {...} else {...}` aninhado deixava o caso comum (parked==true,

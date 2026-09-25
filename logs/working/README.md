@@ -31,6 +31,8 @@ end; horários do nome em UTC, das sessões em horário local UTC-3):
 - `scenario-20260923-041413` → `20260923-011357`
 - `scenario-20260923-042225` → `20260923-012211`
 
+| `session-20260925-004847.jsonl` | **601 s, um único pareamento, 0 `loss_of_sync`** | 2.612 | **soak com `hop-resync` + correção da enxurrada de controle** (jammer desligado, Wi-Fi real ativo em ch 28-45): 49/49 estacionamentos recuperados (`resync_ok`, mediana 2,2 s), 77 trocas de máscara aplicadas nos dois lados. Ainda com os experimentos 1.6/1.7 no firmware (removidos depois, sem efeito no resultado) |
+
 ## Referência, mas NÃO "funcionando corretamente" (ficou só em `logs/`)
 
 - `session-20260923-015103.jsonl` (+ `scenario-20260923-045128`): pipeline

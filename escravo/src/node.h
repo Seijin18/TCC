@@ -173,21 +173,6 @@ static uint8_t g_resync_channel_miss[TABLE_SIZE] = {0};
 static uint8_t g_resync_quality_hops = 0;
 static const uint8_t RESYNC_QUALITY_DECAY_HOPS = 64;
 
-// hop-resync (tarefa 1.6, experimento): A/B do estado do radio na entrada
-// do estacionamento. Achado de bancada: o mestre confirma TX no canal
-// estacionado (canais limpos 82/94/125) durante a janela de estacionamento,
-// mas o escravo nao recebe nada -- 0 resync_ok em varios estacionamentos.
-// Achado anterior (change arquivado pairing-handshake-hardening) achou o
-// mesmo tipo de "surdez" pos-hop com registradores identicos ao boot, so
-// limpa por radio_reinit() (powerDown/powerUp + config completa) ou reboot.
-// Contador de entradas em park alterna a variante testada a cada
-// estacionamento: par -> "listen" (so reafirma CE alto/PRIM_RX via
-// startListening()), impar -> "reinit" (radio_reinit() completo). O nome da
-// variante do estacionamento CORRENTE fica guardado aqui pra resync_ok
-// poder reportar qual delas (se alguma) recuperou a recepcao.
-static uint32_t g_resync_park_entries = 0;
-static const char *g_resync_park_fix = "listen";
-
 // ---- Seed ----
 // pairing-handshake-hardening: g_seed agora é adotado diretamente do campo
 // `seed` da LinkProbeV2 aceita (ver g_link_state acima) -- o antigo
@@ -1046,49 +1031,24 @@ static void escravo_loop()
 
             current_channel = HOPPING_CHANNELS[park_idx];
 
-            // hop-resync (tarefa 1.6, experimento): dump de registradores
-            // ANTES de aplicar a variante -- comparar contra os `regs`
-            // why=park_pre de estacionamentos que depois deram resync_ok
-            // (variante "listen" bastou) vs. os que só destravaram com
-            // "reinit" mostra se o padrão é igual ao H4 de
-            // pairing-handshake-hardening (registradores == boot). Nenhuma
-            // resposta é esperada neste instante (não estamos entre um TX e
-            // o re-listen que aguarda reply), então logar aqui é seguro.
-            tlm_radio_regs("escravo", escravo_radio, "park_pre");
-
-            bool use_reinit = (g_resync_park_entries % 2) == 1;
-            g_resync_park_fix = use_reinit ? "reinit" : "listen";
-            g_resync_park_entries++;
-
-            if (use_reinit)
-            {
-                // Variante "reinit": radio_reinit() reprograma o rádio do
-                // zero (power-cycle lógico + config completa), mas deixa o
-                // canal no candidato de pareamento atual e já termina
-                // escutando -- por isso setChannel()/settle/flush_rx()
-                // rodam de novo DEPOIS, iguais ao caminho "listen" abaixo,
-                // pra realmente estacionar em current_channel.
-                radio_reinit();
-                escravo_radio.setChannel(current_channel);
-                delayMicroseconds(500);
-                escravo_radio.flush_rx();
-            }
-            else
-            {
-                // Variante "listen": mesmo settle/flush de
-                // escravo_advance_hop() após setChannel() (RX FIFO pode
-                // reter payload do canal anterior -- ver comentário lá), e
-                // então startListening() de novo só pra reafirmar CE
-                // alto/PRIM_RX -- sem tocar em mais nenhum registrador.
-                escravo_radio.setChannel(current_channel);
-                delayMicroseconds(500);
-                escravo_radio.flush_rx();
-                escravo_radio.startListening();
-            }
+            // hop-resync (tarefa 1.8): entrada no estacionamento -- mesmo
+            // settle/flush de escravo_advance_hop() após setChannel() (RX
+            // FIFO pode reter payload do canal anterior -- ver comentário
+            // lá). Sem startListening() extra: o rádio já está escutando
+            // (escravo_advance_hop() faz o mesmo, sem reafirmar CE/PRIM_RX).
+            // As variantes "listen"/"reinit" testadas aqui (tasks.md 1.6)
+            // eram bancada em cima de um diagnóstico errado -- a causa real
+            // da falta de resync_ok era o bug de 1.8 (escravo estacionado
+            // nunca lia o rádio, ver comentário em `timed_out` acima); com
+            // ele corrigido, nenhuma das duas variantes fez falta (soak:
+            // 49/49 resync_ok).
+            escravo_radio.setChannel(current_channel);
+            delayMicroseconds(500);
+            escravo_radio.flush_rx();
 
             channel_deadline_start = millis();
-            tlm_printf("escravo", "resync_park", "ch=%u;hop=%lu;score=%d;fix=%s",
-                       current_channel, hop_counter, park_score, g_resync_park_fix);
+            tlm_printf("escravo", "resync_park", "ch=%u;hop=%lu;score=%d",
+                       current_channel, hop_counter, park_score);
         }
         if (g_hops_since_rx >= LOSS_HOPS)
         {
@@ -1210,9 +1170,9 @@ static void escravo_loop()
                             // hop_after é o que acabou de ser adotado deste
                             // fragmento (a diferença mostra se o escravo
                             // estava adiantado ou atrasado, ver proposal.md).
-                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu;fix=%s",
+                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu",
                                        g_last_good_channel, g_resync_hop_before, pkt.hop_counter,
-                                       (unsigned long)(millis() - g_resync_park_start), g_resync_park_fix);
+                                       (unsigned long)(millis() - g_resync_park_start));
                         }
                         if (is_new_message)
                             guarded_printf("[ESCRAVO] Nova mensagem msg_id=%u com %u fragmentos\n", pkt.msg_id, pkt.total_fragments);
@@ -1292,9 +1252,9 @@ static void escravo_loop()
                         {
                             // hop-resync (tarefa 1.3): loga DEPOIS do ack,
                             // mesma regra do ramo MSG_FRAGMENT acima (H6).
-                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu;fix=%s",
+                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu",
                                        g_last_good_channel, g_resync_hop_before, pkt.hop_counter,
-                                       (unsigned long)(millis() - g_resync_park_start), g_resync_park_fix);
+                                       (unsigned long)(millis() - g_resync_park_start));
                         }
                     }
                     else if (ctrl_type == MSG_CTRL_BLACKLIST)
@@ -1327,9 +1287,9 @@ static void escravo_loop()
                         {
                             // hop-resync (tarefa 1.3): loga DEPOIS do ack
                             // (H6), mesma regra dos ramos acima.
-                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu;fix=%s",
+                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu",
                                        g_last_good_channel, g_resync_hop_before, pkt.hop_counter,
-                                       (unsigned long)(millis() - g_resync_park_start), g_resync_park_fix);
+                                       (unsigned long)(millis() - g_resync_park_start));
                         }
                     }
                     else

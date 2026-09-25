@@ -129,6 +129,9 @@ hops ≤ o novo contador antes de calcular o próximo canal (mesmo
   registradores via `tlm_radio_regs(..., "park_pre")` antes de aplicar a
   variante, e `fix=listen|reinit` adicionado a `resync_park` e `resync_ok`
   (guardado em estático pra `resync_ok` reportar a variante do park corrente).
+  **Removido após 1.8**: diagnóstico errado (ver 1.8 abaixo) -- soak de 2.1
+  com o bug já corrigido deu 49/49 `resync_ok` com as duas variantes
+  igualmente, então nenhuma delas fazia diferença de verdade.
 - Tarefa 1.7 (experimento): mesmo com o escravo estacionado e reiniciado
   (1.6), o log do mestre confirma TX no canal de park sem nenhuma recepção
   do lado do escravo -- indício de que o rádio do MESTRE, não o do escravo,
@@ -145,6 +148,9 @@ hops ≤ o novo contador antes de calcular o próximo canal (mesmo
   seguinte já chama `setChannel()` por conta própria, então o canal de
   pareamento em que `radio_reinit()` deixa o rádio é sobrescrito antes de
   qualquer TX/RX.
+  **Removido após 1.8**: mesmo diagnóstico errado do 1.6 -- soak de 2.1 com
+  o bug já corrigido deu 49/49 `resync_ok` sem nenhum reinit do mestre por
+  misses, então a função nunca chegou a fazer diferença de verdade.
 - Tarefa 1.8 (bug de bancada): `escravo_loop()` tinha
   `if (g_resync_parked) { if (timed_out) {...} } else if (timed_out) {...}
   else {...}` aninhado -- com `g_resync_parked==true` e `timed_out==false`
@@ -155,7 +161,13 @@ hops ≤ o novo contador antes de calcular o próximo canal (mesmo
   no mesmo nível. Isso invalida as conclusões dos experimentos 1.6 e 1.7:
   a "surdez" de rádio que motivou as variantes "listen"/"reinit" (1.6) e o
   `radio_reinit()` do mestre por misses (1.7) não existia -- o escravo
-  estacionado simplesmente nunca chamava `available()`.
+  estacionado simplesmente nunca chamava `available()`. Soak de 10 min com
+  o bug corrigido (2.1) confirmou: 0 `loss_of_sync`, 49/49 `resync_ok`
+  (mediana 2,2 s) -- os experimentos 1.6/1.7 foram então removidos (ver
+  notas neles acima). Entrada no estacionamento, na versão final, é só
+  `setChannel(current_channel); delayMicroseconds(500); flush_rx();` --
+  igual ao settle/flush de `escravo_advance_hop()`, sem `startListening()`
+  extra (o rádio já está escutando).
 
 ## Riscos
 
