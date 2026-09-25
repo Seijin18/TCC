@@ -78,6 +78,15 @@
 - [ ] 6.2 Confirmar no log serial do mestre que o alerta do analisador
       (via flag compartilhada) chega corretamente ao ligar/desligar o
       jammer em modo targeted.
+      **Parcial (2026-09-25)**: o caminho analisador → flag → mestre está
+      validado — 150 pares `analisador alert_on/off` → `mestre
+      alert_on/off` nas últimas 10 sessões, latência (relógio da placa)
+      mín 0 / mediana 53 / máx 224 ms, nenhum alerta perdido. O que falta
+      é o *gatilho* pedido: com as placas na posição atual o analisador
+      (placa A) não enxerga o jammer (placa B) — nem em `power high` —, e
+      todos esses alertas vieram do Wi-Fi real. **Precisa aproximar a
+      placa A do jammer (intervenção manual)**; mesma dependência de
+      `spectrum-attack-classification` 3.3 e `targeted-jammer` 3.2.
 - [x] 6.3 Rodar por uma sessão longa (vários minutos) e confirmar que não
       há reset por task watchdog nem crash de stack overflow em nenhuma
       das duas placas.
@@ -89,11 +98,21 @@
       44 resets registrados são todos `rst:0x1 (POWERON_RESET)` — gravação,
       pulso de RTS e reabertura da porta pelo logger — e nenhuma ocorrência
       de watchdog, `Guru Meditation`, brownout, `abort()` ou stack overflow.
-- [ ] 6.4 Medir PLR com o analisador/jammer da task secundária
+- [x] 6.4 Medir PLR com o analisador/jammer da task secundária
       ligado-e-parado vs. ligado-e-rodando, para isolar se alguma queda de
       PLR é causada por contenção de CPU em vez de RF real (ver Risks em
       `design.md`).
-- [ ] 6.5 (Duplicado — ver
+      **Resultado (2026-09-25, cenário A das duas baterias,
+      `logs/battery-20260925-041711`/`-042708`)**: em canal fixo (ch 10,
+      limpo de Wi-Fi) o enlace teve **0,0% de miss a ~46 fragmentos/s** em
+      todas as fases — com a task do analisador varrendo o tempo todo na
+      placa A e, na fase de jamming, a task do jammer ativa (saltando de
+      canal a cada 60 ms) na placa B. Não há perda atribuível a contenção
+      de CPU; as perdas medidas em hopping vêm de RF (Wi-Fi em 27/34,
+      jammer). A queda de throughput de A sob `adaptive` (46 → 32 frag/s,
+      com 0,5% de miss) é o jammer ocupando o canal, não CPU — em
+      `targeted` (que também roda a task) o throughput ficou em 46,5.
+- [x] 6.5 (Duplicado — ver
       `openspec/changes/spectrum-attack-classification/tasks.md` seção 3)
       A calibração de `LIMIAR_ALVO`/`LIMIAR_CONCENTRACAO`/`ATTACK_STREAK_N`
       é rastreada só lá, já com achados registrados em 2026-09-18 (piso de
