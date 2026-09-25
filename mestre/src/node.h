@@ -95,6 +95,7 @@ static bool g_link_established = false;
 // comentario no "else" abaixo); handle_mestre_command() só é definida mais
 // adiante no arquivo.
 static void handle_mestre_command(char *line);
+static bool try_handle_hopset(char *line);
 
 static bool is_all_digits(const char *s)
 {
@@ -246,6 +247,13 @@ static void handle_mestre_command(char *line)
         // o dump automático de boot/entrada em pareamento em bancada.
         tlm_radio_regs("mestre", mestre_radio, "cmd");
         guarded_println("[MESTRE] Registradores do radio despejados (e=regs;why=cmd).");
+    }
+    // jammer-emission-hardware (caracterizacao): "hopset <n>" forca o enlace a
+    // saltar so nos primeiros N canais da tabela -- ver handle_hopset() abaixo
+    // (definida depois das globais de controle que ela usa).
+    else if (try_handle_hopset(line))
+    {
+        // tratado em handle_hopset
     }
     else
     {
@@ -692,6 +700,34 @@ static uint16_t compute_candidate_mask()
 static uint16_t effective_channel_mask()
 {
     return g_mask_apply_scheduled ? g_mask_apply_value : g_channel_mask;
+}
+
+// jammer-emission-hardware (caracterizacao): forca uma mascara de N canais
+// (primeiros N bits da tabela) e a propaga pela MESMA maquinaria de blacklist
+// (control packet + ack + apply nos dois lados). Usar com "mitigation off"
+// para a blacklist automatica nao sobrescrever. Retorna true se tratou a linha.
+static bool try_handle_hopset(char *line)
+{
+    if (strncmp(line, "hopset ", 7) != 0)
+        return false;
+    int n = atoi(line + 7);
+    if (n < 1)
+        n = 1;
+    if (n > TABLE_SIZE)
+        n = TABLE_SIZE;
+    uint16_t m = (n >= TABLE_SIZE) ? 0xFFFF : (uint16_t)((1u << n) - 1);
+    if (g_control_pending == 0)
+    {
+        g_control_pending = MSG_CTRL_BLACKLIST;
+        g_control_mask_value = m;
+        g_control_apply_at = g_hop_counter + CONTROL_RETRY_HOPS + CONTROL_APPLY_MARGIN;
+        g_control_retries_left = CONTROL_RETRY_HOPS;
+        tlm_printf("mestre", "hopset_tx", "n=%d;mask=0x%04X;apply=%lu", n, m, g_control_apply_at);
+        guarded_printf("[MESTRE] hopset n=%d mask=0x%04X (propagando; use com mitigation off)\n", n, m);
+    }
+    else
+        guarded_println("[MESTRE] controle pendente; repita o hopset em ~1s");
+    return true;
 }
 
 static void maybe_enqueue_control()

@@ -67,10 +67,23 @@ enum JamMode
 {
     JAM_MODE_SWEEP,
     JAM_MODE_TARGETED,
-    JAM_MODE_ADAPTIVE
+    JAM_MODE_ADAPTIVE,
+    JAM_MODE_HOLD
 };
 
 static JamMode g_mode = JAM_MODE_SWEEP;
+
+// jammer-emission-hardware: modo "hold" -- portadora PARADA num unico canal
+// (sem saltar). Remove o confundidor de dwell do targeted (que fica so ~6%
+// do tempo em cada canal, dificil de detectar e fraco como ataque) e serve
+// de atacante deterministico de canal fixo para o Cenario A. Canal alto
+// default (125) fora do Wi-Fi da bancada; ajustavel por "mode hold <ch>".
+static uint8_t g_hold_channel = 125;
+static unsigned long g_hold_last_rearm = 0;
+// Re-arme periodico da portadora (tecnica "overdrive" de clones Si24R1 que
+// caem fora do CONT_WAVE -- ver design.md). Barato e inocuo mesmo em radios
+// P estaveis; garante emissao sustentada em modulos clone.
+static const unsigned long HOLD_REARM_MS = 2000;
 
 // adaptive-rendezvous / targeted-jammer (2026-09-24): modo "adaptive" --
 // em vez de round-robin cego pelos 16 HOPPING_CHANNELS (targeted) ou pela
@@ -159,18 +172,37 @@ static void configureJammerRadio(RF24 &r)
     r.stopListening();
 }
 
+// jammer-emission-hardware (achado de bancada 2026-09-25): a portadora deste
+// clone DEGRADA ao longo de uma sessao (varios jam on/off, troca de modo,
+// resets) -- o mesmo "mode hold 10" que negava 100%% da comunicacao parava de
+// negar minutos depois, sem mudanca de comando. A causa e o clone (Si24R1)
+// sair/perder o estado de CONT_WAVE. O probe Tests/JammerTx (que fazia
+// powerUp()+reconfig ANTES de startConstCarrier) sempre emitiu forte. Logo:
+// reinicializar o radio (stopConstCarrier -> powerUp -> reconfig) antes de
+// (re)armar a portadora torna a emissao confiavel e reprodutivel. Mesmo
+// padrao do radio_reinit() que consertou o escravo surdo.
 static void startCarrierOn(RF24 &r, uint8_t channel)
 {
+    r.stopConstCarrier();
+    r.powerUp();
+    delay(2);
+    configureJammerRadio(r);
     r.startConstCarrier(g_jam_power, channel);
 }
 
 static void startCarrier()
 {
-    startCarrierOn(jammer_radio, BT_CH_MIN);
+    // Em hold, ja iniciar no canal alvo (evita blip em BT_CH_MIN).
+    uint8_t ch0 = (g_mode == JAM_MODE_HOLD) ? g_hold_channel : BT_CH_MIN;
+    startCarrierOn(jammer_radio, ch0);
     if (has_radio2)
         startCarrierOn(jammer_radio2, BT_CH_MAX);
     g_carrier_started = true;
     tlm_event("jammer", "jam_state_on");
+    // jammer-emission-hardware (tarefa 2.4): telemetrar RF_SETUP com a
+    // emissao JA ativa a `power` corrente -- confirma potencia real (bit
+    // extra do Si24R1) durante jam on, nao so no boot.
+    tlm_radio_regs("jammer", jammer_radio, "jam_on");
     guarded_println("[JAMMER] Emissao CW ativa. '.' = heartbeat a cada 1 s\n");
 }
 
@@ -240,6 +272,18 @@ static void handleCommand(char *line)
         g_adaptive_scan_idx = 0;
         tlm_event("jammer", "jam_mode_adaptive");
         guarded_println("[MODE] adaptive");
+    }
+    // jammer-emission-hardware: "mode hold" (canal default) ou "mode hold <ch>"
+    else if (strncmp(line, "mode hold", 9) == 0)
+    {
+        int ch = (line[9]) ? atoi(line + 9) : g_hold_channel;
+        if (ch < 0 || ch > 125)
+            ch = g_hold_channel;
+        g_hold_channel = (uint8_t)ch;
+        g_mode = JAM_MODE_HOLD;
+        g_hold_last_rearm = 0; // forca re-arme/retune no proximo loop
+        tlm_printf("jammer", "jam_mode_hold", "ch=%u", g_hold_channel);
+        guarded_printf("[MODE] hold ch=%u\n", g_hold_channel);
     }
     else if (cmdMatches(line, "jam off"))
     {
@@ -511,6 +555,30 @@ static void loopAdaptive()
     }
 }
 
+// jammer-emission-hardware: modo hold -- portadora PARADA em g_hold_channel.
+// Ao contrario de loopTargeted/loopSweep, nao troca de canal a cada iteracao;
+// so garante que a portadora esta no canal alvo e a re-arma periodicamente
+// (anti drop-out de clone Si24R1). Concentra 100% da energia num canal --
+// melhor caso para deteccao e para negacao de comunicacao.
+static void loopHold()
+{
+    unsigned long now = millis();
+    if (now - g_hold_last_rearm >= HOLD_REARM_MS)
+    {
+        g_hold_last_rearm = now;
+        // Re-arma a portadora com REINICIALIZACAO completa (powerUp+reconfig,
+        // ver startCarrierOn) -- em bancada, so reescrever CONT_WAVE nao bastou
+        // para o clone que ja tinha degradado; o reinit completo recupera.
+        startCarrierOn(jammer_radio, g_hold_channel);
+    }
+    else
+    {
+        // Entre re-armes, so assegura o canal (retune deterministico via
+        // hopCarrier: CE baixo -> RF_CH -> CE alto -> dwell).
+        hopCarrier(jammer_radio, g_hold_channel);
+    }
+}
+
 static void jammer_loop()
 {
     static unsigned long last_print = 0;
@@ -536,6 +604,8 @@ static void jammer_loop()
         loopTargeted();
     else if (g_mode == JAM_MODE_ADAPTIVE)
         loopAdaptive();
+    else if (g_mode == JAM_MODE_HOLD)
+        loopHold();
     else
         loopSweep();
 
