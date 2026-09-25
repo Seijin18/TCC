@@ -78,9 +78,17 @@
 - [ ] 6.2 Confirmar no log serial do mestre que o alerta do analisador
       (via flag compartilhada) chega corretamente ao ligar/desligar o
       jammer em modo targeted.
-- [ ] 6.3 Rodar por uma sessão longa (vários minutos) e confirmar que não
+- [x] 6.3 Rodar por uma sessão longa (vários minutos) e confirmar que não
       há reset por task watchdog nem crash de stack overflow em nenhuma
       das duas placas.
+      **Resultado (2026-09-24/25)**: as duas placas rodaram sem nenhum
+      reboot da gravação de 15:56 até 00:24 (~8,5 h; sessões
+      `session-20260924-201057` … `-234554` com 0 eventos `boot`), com
+      salto, re-pareamentos e tráfego de controle contínuos. Varredura de
+      todos os 24 arquivos de sessão desde 2026-09-24 11:00 (~950 MB): os
+      44 resets registrados são todos `rst:0x1 (POWERON_RESET)` — gravação,
+      pulso de RTS e reabertura da porta pelo logger — e nenhuma ocorrência
+      de watchdog, `Guru Meditation`, brownout, `abort()` ou stack overflow.
 - [ ] 6.4 Medir PLR com o analisador/jammer da task secundária
       ligado-e-parado vs. ligado-e-rodando, para isolar se alguma queda de
       PLR é causada por contenção de CPU em vez de RF real (ver Risks em

@@ -59,11 +59,20 @@
 
 ## 5. Validação manual
 
-- [ ] 5.1 Rodar `tools/logger/main.py` sozinho (sem dashboard) com uma
+- [x] 5.1 Rodar `tools/logger/main.py` sozinho (sem dashboard) com uma
       placa ligada, confirmar `logs/session-*.jsonl` crescendo e
       `logs/state.json` atualizando.
+      Usado assim (headless, as duas placas) em toda a validação de
+      2026-09-24/25: dezenas de sessões, ~950 MB de JSONL, `state.json` e
+      `events.log` lidos o tempo todo durante os testes.
 - [ ] 5.2 Abrir e fechar o dashboard várias vezes durante uma sessão do
       logger, confirmar que o histórico em `logs/events.log` não se perde.
-- [ ] 5.3 Confirmar, numa placa combinada (two-board-topology), que os
+- [x] 5.3 Confirmar, numa placa combinada (two-board-topology), que os
       eventos das duas tasks (ex. mestre + analisador na Placa A) saem sem
       entrelaçamento de linha no JSONL.
+      **Resultado (sessões 2026-09-24 20:10 → 2026-09-25 01:0x, ~1,6 M
+      eventos)**: 0 linhas com marcador `@<src>;` no meio da linha e 0
+      linhas começando com `@` que o logger não conseguiu parsear. Única
+      exceção encontrada (e corrigida no logger em
+      `pairing-handshake-hardening` 5.6): o heartbeat `'.'` do jammer, sem
+      newline, grudava no início da próxima linha do escravo na placa B.
