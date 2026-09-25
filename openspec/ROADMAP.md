@@ -6,6 +6,34 @@ verdade de contexto/dependências) — é a camada de "o que fazer agora, em que
 ordem" derivada dele. Atualizar esta lista conforme tasks forem fechadas ou
 changes forem arquivados.
 
+## Sessão 2026-09-24/25 (noite): enlace estável sem jammer — `hop-resync` + enxurrada de controle
+
+Com o pareamento consertado, apareceu o próximo defeito: **com o jammer
+desligado o enlace caía a cada 11-30 s** (sempre recuperando por
+re-pareamento, o que mascarava o problema). Dois bugs reais:
+
+- **Defasagem permanente de salto** (`hop-resync`): um ack perdido num
+  canal ruidoso (ch 27/34, colados no Wi-Fi real da bancada) deixava o
+  escravo um canal adiantado para sempre. Correção: após 2 hops sem
+  recepção o escravo estaciona no canal de melhor qualidade recente e
+  espera o mestre passar (pacotes de controle passaram a carregar
+  `hop_counter` também). Na bancada, a primeira versão não recuperava
+  nada — o escravo estacionado **nunca lia o rádio** (cadeia `if/else`
+  errada); dois experimentos de "rádio surdo" feitos nesse meio tempo
+  partiram de diagnóstico errado e foram removidos.
+- **Enxurrada de controle** (`blacklist-decay` 4.6): a mesma máscara era
+  re-proposta a cada hop com `apply_at` sempre mais adiante — a troca
+  nunca acontecia e nenhum dado trafegava enquanto houvesse proposta.
+
+Resultado: soak de 10 min sem jammer com **0 `loss_of_sync`**, 49/49
+ressincronizações (mediana 2,2 s), 2.612 mensagens, 77 trocas de máscara
+aplicadas nos dois lados (`logs/working/session-20260925-004847.jsonl`).
+
+**Pendência de validade dos testes sob ataque** (`targeted-jammer` 3.2):
+o rastro do jammer no analisador parece o mesmo em qualquer modo; hipótese
+de o jammer não re-sintonizar em modo portadora constante — ver tasks.md
+de `targeted-jammer`.
+
 ## Sessão 2026-09-24 (tarde): re-pareamento consertado — `pairing-handshake-hardening`
 
 **O diagnóstico de "ruído de RF ambiente" registrado na seção abaixo
