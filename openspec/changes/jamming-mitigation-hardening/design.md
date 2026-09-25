@@ -87,3 +87,67 @@ Re-rodar A/B/C (scripts de `jammer-emission-hardware`, `mode hold` e
   reseed é mais disruptivo).
 - Não depender do alerta do analisador como único gatilho (sob colapso o
   alerta nem sempe dispara — visto no traço: `alert_on=0`).
+
+---
+
+## Investigação de time-sync (2026-09-25) — findings + plano, antes de tocar no loop de hopping
+
+Instrumentação read-only sobre a bateria `battery-20260925-165233` (Cenário C,
+fase jamming 75 s, `hold ch10` PA_MAX). Dados que reorientam o diagnóstico:
+
+### Achados
+
+1. **Cadência de hop do mestre vira bimodal sob jamming.** Baseline: 32 hops/s,
+   inter-hop mediano 20 ms, 5% de hops "lentos" (>150 ms). Jamming: 7,5 hops/s,
+   mediano ainda ~26 ms MAS p90=226 ms e **máx=12,5 s**, 38% de hops lentos.
+   Ou seja, a maioria dos hops é rápida (canal limpo), mas há uma cauda longa
+   de hops que travam a janela inteira (canal jammed) ou re-pareiam (segundos).
+2. **ch10 só é banido em +36 s** (metade da fase). Nos primeiros 36 s a máscara
+   mantém bit0 setado (0xBFFF→0x3FFF→0x3FF9→…) e **bane canais INOCENTES antes**
+   do ch10. Detecção lenta E errada.
+3. **A máscara oscila o tempo todo** (24 trocas em 75 s, 4-6 canais banidos), e
+   **ch10 é re-incluído periodicamente** (~a cada 27 s = RECOVERY_COOLDOWN_HOPS
+   200 / ~7,5 hops/s) e re-banido — disrupção recorrente.
+4. **Custo direto de tempo**: 12 `resync_park` (~0,6 s cada), 4 stalls de hop
+   >1 s, 1 `loss_of_sync` (re-pareamento) — ~10-15 s dos 75 s perdidos parado.
+5. **A deriva em si é pequena** (`resync_ok` hop_after-hop_before mediano 3,
+   máx 12): o escravo não se perde longe; o caro é o **custo por park** (0,6 s
+   pra reencontrar o mestre) e a frequência deles.
+
+### Cadeia de causa (revisada)
+
+Hop jammed → mestre gasta a janela toda tentando (cauda de 220 ms+) e/ou os dois
+lados perdem fase → **escravo estaciona** → e o park:
+- (a) **estrangula os FragmentAcks** — o sinal limpo do escravo ("nunca recebo no
+  ch10") viaja no FragmentAck, que só sai quando ele recebe; parado, ele quase
+  não manda ack, então o mestre demora a saber qual é o canal ruim (explica os
+  36 s);
+- (b) **corrompe a visão por-canal dos DOIS lados** — durante o park o escravo
+  também não recebe nos canais inocentes em que caiu, então eles viram "ok=0"
+  (suspeitos) e o mestre os bane;
+- (c) custa throughput diretamente.
+
+Ou seja, **persistência + detecção-pelo-escravo + attribution gate são todos
+derrotados pelo mesmo dessincronismo/park.** O park é a peça central.
+
+### Plano (cada item testável isolado, com rollback e soak sem-jammer)
+
+1. **Manter o mestre em fase no canal jammed** (maior alavanca): limitar as
+   tentativas por hop para o mestre abandonar um hop sem ack ~no mesmo instante
+   em que o escravo expira, em vez de queimar a janela inteira — reduz o offset
+   que dispara o park. Medir antes o instante exato de avanço dos dois lados.
+2. **Detecção de ch10 robusta a park e rápida**: (a) o escravo só conta
+   miss/ok de hops REAIS (não dos canais em que caiu durante o park — já é o
+   caso do g_resync_channel_*, confirmar), e (b) levar o `suspect_idx` também
+   nos ControlAck / num canal de retorno que não dependa de FragmentAck, pra o
+   sinal chegar mesmo com o enlace degradado. Meta: banir ch10 em poucos
+   segundos, não 36.
+3. **Cortar o churn de re-teste do ch10**: subir RECOVERY_COOLDOWN_HOPS (ou
+   re-inclusão condicionada a sondagem/energia) pra um canal jammed banido não
+   ser re-incluído às cegas a cada ~27 s.
+4. **Baratear o park**: orçamento menor / re-lock mais rápido.
+
+Teto teórico (jammer 1-canal, blacklist perfeita): ~94% (perde 1/16 enquanto
+banido). Alvo realista com 1-3: bem acima dos 25% atuais. Risco: itens 1 e 4
+tocam o núcleo do hopping/resync (estável há várias sessões) — soak sem jammer
+(0 loss) obrigatório a cada passo.
