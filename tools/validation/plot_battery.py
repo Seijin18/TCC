@@ -114,7 +114,7 @@ def main():
 
     fig, (ax_thr, ax_lat, ax_bar) = plt.subplots(3, 1, figsize=(11, 12), sharex=False)
     # jamming-mitigation-hardening: métricas por fase (baseline/jamming/
-    # recovery) por cenário, para o painel de barras e a retenção.
+    # recovery) por cenário, para o painel de barras e a taxa de sobrevivência.
     per_phase_thr = {}  # scenario -> {phase: mean throughput}
 
     print("=" * 78)
@@ -173,7 +173,7 @@ def main():
             lat_during_jam = [v for t, v in lat if (jam_start - t_start) <= t <= (jam_end - t_start)]
             summary_rows.append((scenario, mean(plr_during_jam), mean(thr_during_jam), mean(lat_during_jam)))
 
-        # throughput médio por fase (para o painel de barras + retenção)
+        # throughput médio por fase (para o painel de barras + taxa de sobrevivência)
         wins = phase_windows(phases)
         ph_means = {}
         for ph_name, (ws, we) in wins.items():
@@ -206,7 +206,7 @@ def main():
         offs = x + (i - (nscen - 1) / 2) * width
         bars = ax_bar.bar(offs, vals, width, color=SCENARIO_COLOR.get(scenario, "gray"),
                           label=f"{scenario}: {labels.get(scenario, '')[:38]}")
-        # retenção sob jamming (jamming/baseline) anotada na barra de jamming.
+        # taxa de sobrevivência sob jamming (jamming/baseline) anotada na barra de jamming.
         # jam ausente (NaN) = colapso total (0 throughput) -> "0%".
         base = ph.get("baseline")
         jam = ph.get("jamming")
@@ -218,7 +218,7 @@ def main():
     ax_bar.set_xticks(x)
     ax_bar.set_xticklabels([phase_labels[p] for p in phase_order])
     ax_bar.set_ylabel("throughput médio (frag/s)")
-    ax_bar.set_title("Throughput médio por fase (%=retenção sob jamming vs baseline do cenário)")
+    ax_bar.set_title("Throughput médio por fase (%=taxa de sobrevivência sob jamming vs baseline do cenário)")
     ax_bar.grid(alpha=0.3, axis="y")
     ax_bar.legend(loc="upper right", fontsize=8)
 
@@ -232,7 +232,7 @@ def main():
     fig.savefig(out_png, dpi=140)
     print(f"\nGráfico salvo em {out_png}\n")
 
-    print(f"{'Cenário':<8} {'base f/s':>10} {'jam f/s':>10} {'recov f/s':>10} {'retenção jam':>13} {'PLR jam %':>10} {'lat jam ms':>11}")
+    print(f"{'Cenário':<8} {'base f/s':>10} {'jam f/s':>10} {'recov f/s':>10} {'sobreviv.jam':>13} {'PLR jam %':>10} {'lat jam ms':>11}")
     plr_by = {s: p for (s, p, _, _) in summary_rows}
     lat_by = {s: l for (s, _, _, l) in summary_rows}
     for scenario in scenarios:
@@ -247,7 +247,7 @@ def main():
     print(
         "\nLeitura: A (sem hopping) deve colapsar sob o hold no canal fixo; B (hopping "
         "sem mitigação) sofre o dessincronismo; C (mitigação on) deve reter mais que B. "
-        "Retenção = throughput na fase jamming / baseline do mesmo cenário."
+        "Taxa de sobrevivência = throughput na fase jamming / baseline do mesmo cenário."
     )
 
 

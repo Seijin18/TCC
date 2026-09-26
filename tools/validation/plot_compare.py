@@ -3,8 +3,8 @@
 time-slotted-hopping: compara DUAS baterias A/B/C (ex.: event-driven vs
 time-slotted) num único gráfico. Lê dois logs/battery-*.json (cada um com o
 session .jsonl referenciado) e produz um PNG com:
-  - Painel 1: retenção sob jamming (msg_done/s jamming / baseline) por cenário
-    A/B/C, barras lado a lado das duas variantes.
+  - Painel 1: taxa de sobrevivência das mensagens sob jamming (msg_done/s
+    jamming / baseline) por cenário A/B/C, barras lado a lado das duas variantes.
   - Painel 2: throughput absoluto (msg_done/s) na fase jamming, por cenário.
   - Painel 3: throughput × tempo do Cenário C nas duas variantes sobrepostas,
     com a janela de jamming sombreada.
@@ -121,8 +121,8 @@ def main():
         ax1.text(i + w / 2, v + 1, f"{v:.0f}%", ha="center", va="bottom", fontsize=9)
     ax1.set_xticks(x)
     ax1.set_xticklabels(["A: sem hopping", "B: FHSS s/ mitig.", "C: mitigação completa"])
-    ax1.set_ylabel("Retenção sob jamming\n(msg/s jam ÷ baseline)")
-    ax1.set_title("Retenção sob jamming (hold ch10 PA_MAX) — maior é melhor")
+    ax1.set_ylabel("Taxa de sobrevivência\n(msg/s jam ÷ baseline)")
+    ax1.set_title("Taxa de sobrevivência das mensagens sob jamming (hold ch10 PA_MAX) — maior é melhor")
     ax1.set_ylim(0, 105)
     ax1.legend()
     ax1.grid(axis="y", alpha=0.3)
@@ -163,7 +163,7 @@ def main():
     # resumo textual
     print(f"\n{'cenário':<28}{args.a_label:>16}{args.b_label:>16}")
     for s in SCEN:
-        print(f"  {s} retenção            {ra[s][2]:>14.0f}%{rb[s][2]:>15.0f}%")
+        print(f"  {s} sobrevivência       {ra[s][2]:>14.0f}%{rb[s][2]:>15.0f}%")
     for s in SCEN:
         print(f"  {s} baseline msg/s      {ra[s][0]:>15.1f}{rb[s][0]:>16.1f}")
         print(f"  {s} jamming  msg/s      {phase_rate(pha,da,s,'jamming')[0]:>15.1f}{phase_rate(phb,db,s,'jamming')[0]:>16.1f}")
