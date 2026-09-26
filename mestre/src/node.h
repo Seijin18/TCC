@@ -371,6 +371,13 @@ static uint8_t g_current_fragment = 0;
 static uint8_t g_total_fragments = 0;
 static uint32_t g_hop_counter = 0;
 static unsigned long g_hop_start_at = 0;
+// time-slotted-hopping: false até o preâmbulo de sincronismo travar o relógio no
+// primeiro ack (bootstrap). Enquanto false, o mestre SEGURA o canal do slot 0 e
+// retransmite o fragmento 0; no primeiro ack, âncora = agora e começa o salto
+// por tempo. Sem isto, o skew de fase do handshake deixaria os dois lados em
+// slots (canais) diferentes permanentemente -- não há pacote pra corrigir se
+// eles nunca se encontram. Resetado em reset_to_pairing().
+static bool g_time_synced = false;
 static uint8_t g_current_channel = PAIRING_CANDIDATES[0];
 static uint32_t g_hops_since_ack = 0;
 
@@ -696,10 +703,10 @@ static bool wait_fragment_ack(uint8_t expected_fragment, bool &all_complete, uin
     return false;
 }
 
-static bool wait_control_ack(uint32_t expected_apply_at)
+static bool wait_control_ack(uint32_t expected_apply_at, uint32_t timeout_ms)
 {
     unsigned long start_wait = millis();
-    while (millis() - start_wait < ACK_TIMEOUT_MS)
+    while (millis() - start_wait < timeout_ms)
     {
         if (!mestre_radio.available())
             continue;
@@ -867,7 +874,7 @@ static void apply_scheduled_changes()
 // tentativa em particular foi confirmada (usado pelo chamador pra manter
 // g_hops_since_ack coerente -- ver achado de bancada 2026-09-24 no
 // comentário de reset_to_pairing() abaixo).
-static bool send_pending_control_if_any(bool &acked_out)
+static bool send_pending_control_if_any(bool &acked_out, uint32_t ack_wait_ms)
 {
     acked_out = false;
     if (g_control_pending == 0)
@@ -892,7 +899,7 @@ static bool send_pending_control_if_any(bool &acked_out)
         mestre_radio.stopListening();
         radio_send(mestre_radio, &pkt, sizeof(pkt));
         mestre_radio.startListening();
-        acked = wait_control_ack(g_control_apply_at);
+        acked = wait_control_ack(g_control_apply_at, ack_wait_ms);
 
         if (acked)
         {
@@ -913,7 +920,7 @@ static bool send_pending_control_if_any(bool &acked_out)
         mestre_radio.stopListening();
         radio_send(mestre_radio, &pkt, sizeof(pkt));
         mestre_radio.startListening();
-        acked = wait_control_ack(g_control_apply_at);
+        acked = wait_control_ack(g_control_apply_at, ack_wait_ms);
 
         if (acked)
         {
@@ -1025,6 +1032,7 @@ static void reset_to_pairing(bool clear_blacklist)
     g_link_established = false;
     g_camping = false;
     g_hop_counter = 0;
+    g_time_synced = false; // time-slotted-hopping: re-sincroniza no próximo pareamento
     g_hops_since_ack = 0;
     g_current_fragment = 0;
     g_control_pending = 0;
@@ -1190,189 +1198,192 @@ static void mestre_loop()
     if (millis() < g_hop_start_at)
         return;
 
-    // Hopping por evento, não por relógio periódico (ver "Correção" em
-    // openspec/changes/adaptive-rendezvous/design.md): cada chamada
-    // daqui pra baixo faz UMA tentativa de hop completa (bloqueante),
-    // que só termina por um dos dois motivos -- ack recebido (evento de
-    // sucesso) ou ATTEMPT_TIMEOUT_MS esgotado sem resposta (fallback: avança
-    // pro próximo canal mesmo assim -- e o fragmento não-ackado é reenviado lá,
-    // hop-ack-decoupling -- senão o enlace travaria num canal jamado). Não há mais nenhum relógio livre (`g_last_hop_time`)
-    // rodando contra o wall-clock -- o único estado que precisa concordar
-    // entre mestre e escravo é `g_hop_counter`/`hop_counter` (um inteiro,
-    // não um instante de tempo), e ele só muda por evento explícito dos
-    // dois lados: sucesso (os dois avançam pro MESMO próximo valor,
-    // porque o escravo resincroniza o dele a partir do `hop_counter` que
-    // veio no pacote) ou timeout independente em cada lado (cada um
-    // incrementa exatamente 1 por rodada, sem pular nem duplicar, então
-    // o valor inteiro não diverge mesmo sem os dois lados terminarem a
-    // rodada no mesmo instante real).
+    // time-slotted-hopping: o slot vem do TEMPO decorrido desde a âncora comum
+    // do pareamento (g_hop_start_at), não de eventos. Cada chamada trata UM slot
+    // por completo (bloqueante, como a era por-evento tratava um hop), mas o
+    // canal e as fronteiras vêm do relógio -- o escravo calcula o mesmo slot do
+    // mesmo tempo, então os dois estão no mesmo canal por construção, sem
+    // depender de pacote pra se realinhar. Dentro do slot o mestre transmite o
+    // fragmento corrente repetidamente (avançando o DADO só no ack -- split
+    // hop-ack-decoupling); ao fim do slot, salta no tempo.
+    // Ver openspec/changes/time-slotted-hopping/design.md.
+
+    // Preâmbulo de sincronismo (bootstrap): enquanto o relógio não travou,
+    // SEGURA o canal do slot 0 e retransmite o fragmento 0 até o primeiro ack.
+    // Nesse instante, âncora = agora (slot 0 começa aqui) -- os dois lados
+    // partem do mesmo evento (skew ~1 trânsito, << SLOT_MS), e daí em diante o
+    // salto é por tempo. Sem isto, o skew de fase do handshake deixaria os dois
+    // em canais diferentes permanentemente.
+    if (!g_time_synced)
+    {
+        uint8_t ch0 = g_fixed_channel_mode ? TEST_FIXED_CHANNEL : get_next_active_channel(g_seed, 0, g_channel_mask);
+        g_hop_counter = 0;
+        g_current_channel = ch0;
+        mestre_radio.setChannel(ch0);
+        delayMicroseconds(500);
+        mestre_radio.flush_rx();
+
+        FragmentPacket pkt;
+        fill_fragment(pkt, g_current_fragment);
+        mestre_radio.stopListening();
+        bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));
+        mestre_radio.startListening();
+        bool completed = false;
+        if (sent && wait_fragment_ack(g_current_fragment, completed, ATTEMPT_ACK_WAIT_MS))
+        {
+            g_hop_start_at = millis(); // âncora real do relógio: slot 0 começa agora
+            g_time_synced = true;
+            g_hops_since_ack = 0;
+            if (!g_pair_data_confirmed)
+            {
+                g_pair_data_confirmed = true;
+                note_candidate_result(true);
+            }
+            note_hop_for_throughput(true);
+            g_current_fragment++;
+            if (completed || g_current_fragment >= g_total_fragments)
+            {
+                tlm_event("mestre", "msg_done");
+                g_msg_id++;
+                g_current_fragment = 0;
+            }
+            tlm_printf("mestre", "time_sync", "ch=%u", ch0);
+        }
+        else
+        {
+            g_hops_since_ack++;
+            if (g_hops_since_ack >= LOSS_HOPS)
+                reset_to_pairing();
+        }
+        return;
+    }
+
+    uint32_t slot = current_slot(millis(), g_hop_start_at);
+    g_hop_counter = slot;
+
     maybe_enqueue_control();
 
-    // scenario-automation, Cenário A: modo fixo ignora seed/mascara e usa
-    // sempre o mesmo canal -- ver TEST_FIXED_CHANNEL em shared/hopping.h.
-    uint8_t channel = g_fixed_channel_mode ? TEST_FIXED_CHANNEL : get_next_active_channel(g_seed, g_hop_counter, g_channel_mask);
+    uint8_t channel = g_fixed_channel_mode ? TEST_FIXED_CHANNEL : get_next_active_channel(g_seed, slot, g_channel_mask);
     g_current_channel = channel;
     mestre_radio.setChannel(channel);
-    // Achado de bancada: sem esta espera, o PLL do NRF24 ainda nao
-    // assentou na nova frequencia quando o write() seguinte tenta
-    // transmitir -- ao contrario do pareamento (que so reescreve o
-    // MESMO canal a cada tentativa, nunca troca de fato), aqui o
-    // canal muda em TODO hop, às vezes por >100MHz de uma vez (ex.
-    // 125->15 na tabela). Os 130us do datasheet (suficientes para o
-    // pareamento e para o scan do analisador) não bastaram aqui —
-    // 100% de perda mesmo com o link sincronizado; 500us reduziu bem
-    // a perda nestes módulos.
-    delayMicroseconds(500);
-    // Hipotese ainda nao testada antes desta reescrita (ver "Correção" em
-    // openspec/changes/adaptive-rendezvous/design.md): RX FIFO pode reter
-    // payload do canal ANTERIOR apos setChannel() -- sem o flush, um ack
-    // velho parado ali poderia ser lido por wait_fragment_ack() como se
-    // fosse deste hop (msg_id/fragment_index poderiam coincidir, já que o
-    // mesmo fragmento é reenviado em canais sucessivos até ser confirmado).
-    mestre_radio.flush_rx();
+    delayMicroseconds(500);   // settle do PLL (500us, achado de bancada)
+    mestre_radio.flush_rx();  // descarta ack velho retido na FIFO do canal anterior
 
-    bool control_acked = false;
-    if (send_pending_control_if_any(control_acked))
+    // fim absoluto deste slot e orçamento de transmissão (até SLOT_GUARD_MS antes
+    // da fronteira, pra o envio não cruzar pro próximo slot).
+    unsigned long slot_end = g_hop_start_at + (uint32_t)(slot + 1) * SLOT_MS;
+    long tx_budget = (long)(slot_end - SLOT_GUARD_MS) - (long)millis();
+    if (tx_budget <= 0)
     {
-        // Achado de bancada (2026-09-24): faltava isto -- sem atualizar
-        // g_hops_since_ack aqui, um controle que falha pra sempre (ex.
-        // escravo já não está mais lá) nunca acumulava falhas o bastante
-        // pra disparar o fallback de LOSS_HOPS, e o mestre ficava preso
-        // reenviando a mesma proposta de blacklist/seed indefinidamente
-        // em vez de voltar a parear. Espelha o tratamento de ack/miss de
-        // fragmento logo abaixo.
-        if (control_acked)
-            g_hops_since_ack = 0;
-        else
-            g_hops_since_ack++;
-        g_hop_counter++;
-        apply_scheduled_changes();
-        if (g_hops_since_ack >= LOSS_HOPS)
-            reset_to_pairing();
+        // entrou tarde no slot (raro -- outro trabalho no loop() atrasou); não
+        // penaliza o canal, só espera a fronteira e sai.
+        while ((long)(slot_end - millis()) > 0)
+            ;
         return;
     }
 
-    FragmentPacket pkt;
-    fill_fragment(pkt, g_current_fragment);
-
-    // hop-ack-decoupling: UMA tentativa por canal (nao mais reenvio numa janela
-    // de 220 ms, que prendia o mestre num canal morto -- causa do teto de 25%).
-    // Envia o fragmento uma vez e espera o ack por ATTEMPT_TIMEOUT_MS. Sem ack:
-    // g_hop_counter avanca mesmo assim e o fragmento (g_current_fragment nao
-    // avanca sem ack) e reenviado no PROXIMO canal, onde o escravo esta -- o
-    // escravo deduplica pelo received_bitmap (SEQN). NAO se reenvia dentro da
-    // janela: cada reenvio e mais uma chance de o escravo avancar cedo (num
-    // envio cujo ack depois se perde) enquanto o mestre ainda esta no canal
-    // velho, o que DESSINCRONIZA (medido em bancada 2026-09-25: multi-send deu
-    // perda continua). O casamento de fase vem da janela de escuta LARGA do
-    // escravo (ESCRAVO_LISTEN_MS), que absorve o lead do mestre (telemetria
-    // pesada apos o ack), nao de varrer com reenvios.
     unsigned long attempt_started_at = millis();
-    bool ack_ok = false;
-    bool completed = false;
-    bool any_sent = false;
-
-    mestre_radio.stopListening();
-    bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));
-    mestre_radio.startListening();
-    if (sent)
-    {
-        any_sent = true;
-        ack_ok = wait_fragment_ack(g_current_fragment, completed, ATTEMPT_TIMEOUT_MS);
-    }
-
-    if (!any_sent)
-    {
-        guarded_printf("[MESTRE] Falha de envio no hop=%lu canal=%u frag=%u\n", g_hop_counter, g_current_channel, g_current_fragment);
-        g_hops_since_ack++;
-        // jamming-mitigation-hardening: só atribui falha a um canal quando a
-        // perda é ISOLADA (enlace saudável, poucos hops sem ack). Durante um
-        // dessincronismo (escravo estacionado/desalinhado) o mestre erra em
-        // vários canais que NÃO estão jammed -- atribuir ali contamina canais
-        // inocentes e faz a máscara oscilar (achado 2026-09-25: mediana de 6
-        // canais banidos, muitos errados). Fora da janela saudável, o miss
-        // ainda conta para g_hops_since_ack/LOSS_HOPS, mas não vira ban.
-        uint8_t idx = find_channel_index(channel);
-        if (g_hops_since_ack <= ATTRIB_MAX_HOPS_SINCE_ACK && g_channel_fail[idx] < 255)
-            g_channel_fail[idx]++;
-        g_hop_counter++;
-        apply_scheduled_changes();
-        note_hop_for_throughput(false);
-        if (g_hops_since_ack >= LOSS_HOPS)
-            reset_to_pairing();
-        return;
-    }
-
-    // Prints depois de já ter tentado o ack (não antes) -- ver
-    // comentário histórico: eles competem pelo mutex de telemetria
-    // com a task do analisador/jammer e não devem atrasar a janela
-    // de escuta do ack.
-
-    tlm_printf("mestre", "hop", "ch=%u;n=%lu;frag=%u", channel, g_hop_counter, g_current_fragment);
-    guarded_printf("[MESTRE] Hop=%lu canal=%u frag=%u/%u len=%u enviada.\n",
-                  g_hop_counter, g_current_channel, g_current_fragment + 1, g_total_fragments, pkt.payload_len);
-
     uint8_t idx = find_channel_index(channel);
-    if (ack_ok)
+    bool acked_any = false;
+    bool completed = false;
+
+    // controle pendente tem prioridade: vai NO LUGAR do fragmento neste slot,
+    // com a espera de ack limitada ao que resta do slot.
+    bool control_acked = false;
+    if (send_pending_control_if_any(control_acked, (uint32_t)tx_budget))
     {
-        g_hops_since_ack = 0;
-        if (g_channel_fail[idx] > 0)
-            g_channel_fail[idx]--;
-
-        // jamming-mitigation-hardening: o escravo (evidência limpa) reportou
-        // um canal jammed neste ack -- força esse canal ao limiar de ban.
-        // maybe_enqueue_control() propaga a máscara nova aos dois lados. É o
-        // caminho AUTORITATIVO de ban (o blind attribution do mestre fica só
-        // como reforço, com limiar alto para não contaminar inocentes).
-        if (g_rx_suspect_idx < TABLE_SIZE && (g_channel_mask & (1u << g_rx_suspect_idx)))
+        if (control_acked)
         {
-            if (g_channel_fail[g_rx_suspect_idx] < CHANNEL_FAIL_THRESHOLD)
-                g_channel_fail[g_rx_suspect_idx] = CHANNEL_FAIL_THRESHOLD;
-        }
-        g_rx_suspect_idx = SUSPECT_NONE;
-
-        // D5 (tarefa 4.3): primeiro FragmentAck depois do pareamento
-        // confirma que o candidato sustenta dado de verdade, não só o
-        // handshake -- ver note_candidate_result()/design.md D5. Só a
-        // PRIMEIRA vez nesta tentativa (as seguintes já são enlace
-        // confirmado, não uma nova evidência).
-        if (!g_pair_data_confirmed)
-        {
-            g_pair_data_confirmed = true;
-            note_candidate_result(true);
-        }
-
-        tlm_printf("mestre", "ack", "ch=%u;frag=%u", channel, g_current_fragment);
-        guarded_printf("[MESTRE] ACK recebido para frag=%u\n", g_current_fragment + 1);
-        uint32_t latency_ms = (uint32_t)(millis() - attempt_started_at);
-        tlm_printf("mestre", "latency", "ch=%u;frag=%u;ms=%lu", channel, g_current_fragment, latency_ms);
-        note_hop_for_throughput(true);
-        g_current_fragment++;
-        if (completed || g_current_fragment >= g_total_fragments)
-        {
-            guarded_println("[MESTRE] Mensagem completa confirmada pelo Escravo.");
-            tlm_event("mestre", "msg_done");
-            g_msg_id++;
-            g_current_fragment = 0;
+            g_hops_since_ack = 0;
+            acked_any = true;
         }
     }
     else
     {
-        g_hops_since_ack++;
-        // jamming-mitigation-hardening: idem !any_sent -- atribui só se a
-        // perda for isolada (enlace saudável), não durante dessincronismo.
-        if (g_hops_since_ack <= ATTRIB_MAX_HOPS_SINCE_ACK && g_channel_fail[idx] < 255)
-            g_channel_fail[idx]++;
-        tlm_printf("mestre", "miss", "ch=%u;frag=%u", channel, g_current_fragment);
-        guarded_printf("[MESTRE] Timeout ACK no hop=%lu, frag=%u sera reenviada no proximo salto.\n", g_hop_counter, g_current_fragment + 1);
-        note_hop_for_throughput(false);
+        // transmite o fragmento corrente até o fim do slot ou até o ack; no ack
+        // avança o DADO e segue com o próximo fragmento no MESMO slot (pipeline)
+        // -- o canal (slot) só muda na fronteira de tempo.
+        while ((long)(slot_end - SLOT_GUARD_MS) - (long)millis() > 0)
+        {
+            FragmentPacket pkt;
+            fill_fragment(pkt, g_current_fragment);
+            mestre_radio.stopListening();
+            bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));
+            mestre_radio.startListening();
+            if (!sent)
+                break;
+
+            long remaining = (long)(slot_end - SLOT_GUARD_MS) - (long)millis();
+            if (remaining <= 0)
+                break;
+            uint32_t w = (uint32_t)remaining;
+            if (w > ATTEMPT_ACK_WAIT_MS)
+                w = ATTEMPT_ACK_WAIT_MS;
+            bool ack_ok = wait_fragment_ack(g_current_fragment, completed, w);
+            if (!ack_ok)
+                continue; // sem ack nesta tentativa: tenta de novo enquanto houver slot
+
+            // --- ack recebido ---
+            acked_any = true;
+            g_hops_since_ack = 0;
+            if (g_channel_fail[idx] > 0)
+                g_channel_fail[idx]--;
+            // jamming-mitigation-hardening: o escravo reporta o canal jammed no
+            // ack -- força-o ao limiar de ban (caminho autoritativo).
+            if (g_rx_suspect_idx < TABLE_SIZE && (g_channel_mask & (1u << g_rx_suspect_idx)))
+            {
+                if (g_channel_fail[g_rx_suspect_idx] < CHANNEL_FAIL_THRESHOLD)
+                    g_channel_fail[g_rx_suspect_idx] = CHANNEL_FAIL_THRESHOLD;
+            }
+            g_rx_suspect_idx = SUSPECT_NONE;
+            if (!g_pair_data_confirmed)
+            {
+                g_pair_data_confirmed = true;
+                note_candidate_result(true);
+            }
+            note_hop_for_throughput(true);
+            uint32_t latency_ms = (uint32_t)(millis() - attempt_started_at);
+            tlm_printf("mestre", "ack", "ch=%u;frag=%u;ms=%lu", channel, g_current_fragment, latency_ms);
+            g_current_fragment++;
+            if (completed || g_current_fragment >= g_total_fragments)
+            {
+                tlm_event("mestre", "msg_done");
+                g_msg_id++;
+                g_current_fragment = 0;
+            }
+            attempt_started_at = millis(); // latência do próximo fragmento (pipeline)
+        }
     }
 
-    g_hop_counter++;
-    apply_scheduled_changes();
+    // --- contabiliza o slot (uma vez, na saída) ---
+    if (acked_any)
+    {
+        tlm_printf("mestre", "hop", "ch=%u;n=%lu;frag=%u", channel, g_hop_counter, g_current_fragment);
+    }
+    else
+    {
+        g_hops_since_ack++;
+        // atribui falha só se a perda for ISOLADA (jamming-mitigation-hardening):
+        // com salto por tempo o escravo nunca estaciona, então uma visita ao
+        // canal jammed é um miss isolado -- o gate mantém canais inocentes fora.
+        if (g_hops_since_ack <= ATTRIB_MAX_HOPS_SINCE_ACK && g_channel_fail[idx] < 255)
+            g_channel_fail[idx]++;
+        note_hop_for_throughput(false);
+        tlm_printf("mestre", "miss", "ch=%u;n=%lu;frag=%u", channel, g_hop_counter, g_current_fragment);
+    }
 
+    apply_scheduled_changes();
     if (g_hops_since_ack >= LOSS_HOPS)
+    {
         reset_to_pairing();
+        return;
+    }
+
+    // espera a fronteira do slot pra a próxima chamada cair no próximo slot (o
+    // escravo avança pela mesma fronteira de tempo -- lockstep sem relógio
+    // compartilhado). Spin curto: no máximo ~SLOT_GUARD_MS.
+    while ((long)(slot_end - millis()) > 0)
+        ;
 }
 
 #endif // MESTRE_NODE_H

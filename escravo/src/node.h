@@ -127,13 +127,21 @@ static void reset_pair_cycle_counters()
 }
 
 // ---- Estado de hopping ----
+// time-slotted-hopping: hop_counter é o número do SLOT, derivado do tempo
+// (current_slot(millis(), hop_start_at)); não é mais incrementado por evento.
 static uint32_t hop_counter = 0;
-// Hopping por evento: instante em que o escravo começou a escutar em
-// current_channel -- não um relógio periódico. Ver escravo_advance_hop().
-static unsigned long channel_deadline_start = 0;
-static unsigned long hop_start_at = 0;
+static unsigned long channel_deadline_start = 0; // (legado da era por-evento; mantido p/ código provisório)
+static unsigned long hop_start_at = 0;            // âncora T0 comum, fixada no pareamento
 static uint8_t current_channel = PAIRING_CANDIDATES[0];
 static uint32_t g_hops_since_rx = 0;
+// time-slotted-hopping: instante da última recepção válida -- perda de enlace é
+// por TEMPO sem RX (LINK_LOSS_MS), não mais por contagem de hops.
+static unsigned long g_last_valid_rx_ms = 0;
+// time-slotted-hopping: false até o preâmbulo de sincronismo (bootstrap). Enquanto
+// false, o escravo SEGURA o canal do slot 0 e escuta; no primeiro fragmento
+// válido ancora o relógio (hop_start_at) ao slot do mestre e entra no salto por
+// tempo. Resetado em reset_to_scanning().
+static bool g_time_synced = false;
 
 // ---- hop-resync: estacionamento (design.md D1/D2) ----
 // Canal do ultimo FragmentPacket ou pacote de controle valido recebido --
@@ -349,6 +357,13 @@ static void reset_to_scanning()
     g_link_state = ESCRAVO_SCANNING;
     hop_counter = 0;
     g_hops_since_rx = 0;
+    g_time_synced = false; // time-slotted-hopping: re-sincroniza no próximo pareamento
+    // time-slotted-hopping: invalida o canal corrente. O bloco SCANNING troca o
+    // canal do RÁDIO (candidatos de pareamento) sem atualizar current_channel;
+    // sem este reset, o guard `current_channel != ch0` no bootstrap pularia o
+    // setChannel e o escravo escutaria no canal de pareamento achando que está
+    // no ch0 do slot 0 (bug de bancada: avail=0 apesar de mestre transmitindo).
+    current_channel = 0xFF;
     g_seed_apply_scheduled = false;
     g_mask_apply_scheduled = false;
     // jamming-mitigation-hardening: NÃO zerar a máscara aqui -- de qualquer
@@ -606,8 +621,13 @@ static uint8_t channel_table_index(uint8_t channel)
     return 0; // nao deveria acontecer -- guarda defensiva
 }
 
-static void escravo_advance_hop()
+// time-slotted-hopping: salta para o slot `new_slot` (derivado do TEMPO, não de
+// um evento). Contabiliza antes o slot que ACABOU (PLR + qualidade do
+// current_channel, usando g_hop_received_flag), depois troca de canal. Substitui
+// escravo_advance_hop() da era por-evento -- não há mais park nem avanço no RX.
+static void escravo_hop_to(uint32_t new_slot)
 {
+    // --- contabiliza o slot que terminou ---
     g_window_expected++;
     g_session_expected++;
     if (g_hop_received_flag)
@@ -621,13 +641,8 @@ static void escravo_advance_hop()
         g_hops_since_rx++;
     }
 
-    // hop-resync (tarefa 1.5): atualiza a qualidade de recepcao do canal QUE
-    // ACABOU DE TERMINAR (current_channel, antes de trocar mais abaixo) --
-    // ok se recebeu algo valido, miss se estourou por timeout. So conta
-    // hops REAIS -- esta funcao nunca roda pros hops "virtuais" do
-    // estacionamento (ver ramo ESTACIONADO em escravo_loop()), entao a
-    // amostra reflete de verdade o comportamento do canal, nao o tempo que
-    // o escravo passou parado nele.
+    // qualidade de recepção do canal que acabou (base do suspect_idx) -- ok se
+    // recebeu algo válido neste slot, miss caso contrário.
     uint8_t quality_idx = channel_table_index(current_channel);
     if (g_hop_received_flag)
     {
@@ -642,10 +657,6 @@ static void escravo_advance_hop()
     g_resync_quality_hops++;
     if (g_resync_quality_hops >= RESYNC_QUALITY_DECAY_HOPS)
     {
-        // Decaimento simples e deterministico: divide os dois contadores de
-        // TODOS os canais por 2 a cada RESYNC_QUALITY_DECAY_HOPS hops reais
-        // -- historico recente pesa mais que antigo, sem precisar de
-        // float/EWMA de verdade (ver comentario na declaracao dos arrays).
         for (uint8_t i = 0; i < TABLE_SIZE; i++)
         {
             g_resync_channel_ok[i] >>= 1;
@@ -663,25 +674,30 @@ static void escravo_advance_hop()
         g_window_received = 0;
     }
 
-    hop_counter++;
-    // scenario-automation, Cenário A: espelha o modo fixo do mestre (ver
-    // mestre/src/node.h) -- mesmo TEST_FIXED_CHANNEL literal dos dois
-    // lados, sem depender de seed/mascara.
+    // --- troca para o canal do novo slot ---
+    hop_counter = new_slot;
+    // scenario-automation, Cenário A: modo fixo espelha o mestre (mesmo
+    // TEST_FIXED_CHANNEL literal, sem seed/máscara).
     current_channel = g_fixed_channel_mode ? TEST_FIXED_CHANNEL : get_next_active_channel(g_seed, hop_counter, g_channel_mask);
     escravo_radio.setChannel(current_channel);
-    // Achado de bancada: mesmo motivo do lado do mestre (ver
-    // mestre/src/node.h) -- 500us em vez dos 130us do datasheet.
-    delayMicroseconds(500);
-    // Hipotese ainda nao testada antes desta reescrita (ver "Correção" em
-    // design.md): RX FIFO pode reter payload do canal ANTERIOR apos
-    // setChannel() -- sem o flush, esse pacote velho seria lido como se
-    // tivesse chegado no canal novo. Agora que o hop e disparado por
-    // evento (podendo trocar de canal bem mais rapido que o antigo tick
-    // fixo de 220ms em caso de sucesso), essa janela de sobreposicao fica
-    // mais provavel de importar.
-    escravo_radio.flush_rx();
-    channel_deadline_start = millis();
+    delayMicroseconds(500); // settle do PLL (achado de bancada: 500us, não 130us)
+    escravo_radio.flush_rx(); // descarta payload do canal anterior retido na FIFO
     apply_scheduled_changes();
+}
+
+// time-slotted-hopping: reancora o relógio ao slot do mestre quando a deriva de
+// cristal escorregou (|slot_local - master_slot| >= 1). No caso comum (já
+// alinhados) não faz nada -- não perturba a fase. Recoloca hop_start_at pra que
+// current_slot(agora) == master_slot; não troca o canal (se recebemos o pacote,
+// current_channel já é o canal do master_slot). Substitui a adoção direta de
+// hop_counter da era por-evento, agora aplicada ao RELÓGIO.
+static void escravo_reanchor(uint32_t master_slot)
+{
+    if (hop_counter == master_slot)
+        return; // caso comum: já alinhados
+    hop_start_at = millis() - (uint32_t)master_slot * SLOT_MS;
+    hop_counter = master_slot;
+    tlm_printf("escravo", "reanchor", "master=%lu;ch=%u", (unsigned long)master_slot, current_channel);
 }
 
 // jamming-mitigation-hardening: canal (posição na tabela) que o escravo
@@ -970,392 +986,221 @@ static void escravo_loop()
         return;
     }
 
-    // Hopping por evento, não por relógio periódico (ver "Correção" em
-    // openspec/changes/adaptive-rendezvous/design.md e mestre_loop() em
-    // mestre/src/node.h): current_channel só muda quando (a) um
-    // fragmento/pacote de controle válido é recebido e ackado -- evento
-    // de sucesso, ver as chamadas a escravo_advance_hop() dentro do bloco
-    // de recepção abaixo, que resincronizam hop_counter a partir do valor
-    // recebido do mestre ANTES de avançar -- ou (b) ATTEMPT_TIMEOUT_MS esgota
-    // sem nada válido chegar neste canal (fallback logo abaixo: avança
-    // mesmo assim, senão o escravo ficaria preso pra sempre esperando num
-    // canal jamado).
-    //
-    // hop-resync (tarefa 1.2, design.md D1/D2): o timeout se divide em dois
-    // casos -- ESTACIONADO (g_resync_parked) só contabiliza um hop "virtual"
-    // por tempo, sem trocar de canal nem chamar escravo_advance_hop(); NÃO
-    // ESTACIONADO é o caminho de sempre, contando timeouts consecutivos pra
-    // decidir se deve estacionar.
-    //
-    // hop-resync (tarefa 1.8, bug de bancada): `timed_out` é calculado UMA
-    // vez só e testado nos três ramos abaixo (`timed_out && g_resync_parked`,
-    // depois `timed_out` sozinho, depois o `else` final de recepção) -- e
-    // não mais um `if (g_resync_parked) { if (timed_out) {...} } else if
-    // (timed_out) {...} else {...}` aninhado. Nessa versão antiga, com
-    // g_resync_parked==true e timed_out==false (o caso comum, a cada
-    // iteração até o timeout estourar), nenhum dos dois `if` internos
-    // disparava e o `else` de recepção (available()/read, mais abaixo)
-    // JAMAIS rodava -- um escravo estacionado nunca lia o rádio (achado de
-    // bancada: 0 resync_ok em dezenas de estacionamentos, mesmo com os dois
-    // rádios reinicializados). O comentário antigo aqui já afirmava
-    // (incorretamente) que o `else` de recepção rodava nos dois casos; com
-    // `timed_out` único isso finalmente é verdade.
-    // hop-ack-decoupling: janela de escuta por hop = ESCRAVO_LISTEN_MS (~60 ms),
-    // MAIOR que a janela do mestre (ATTEMPT_TIMEOUT_MS ~30 ms) de proposito --
-    // absorve o lead de fase do mestre (telemetria pesada apos o ack) sem
-    // atrasar o caminho de sucesso, que avanca por EVENTO (no RX valido, adota
-    // o hop_counter do pacote e o received_bitmap deduplica retransmissoes,
-    // reancorando a fase). Ver comentario de ESCRAVO_LISTEN_MS em protocol.h.
-    bool timed_out = (millis() - channel_deadline_start >= ESCRAVO_LISTEN_MS);
-    if (timed_out && g_resync_parked)
+    // time-slotted-hopping: o slot de hopping vem do TEMPO decorrido desde a
+    // âncora comum do pareamento (hop_start_at), não de eventos de ack/RX. Na
+    // fronteira do slot os dois lados saltam juntos (mesmo canal por
+    // construção, pois o canal é f(seed, slot, mask)); um slot jammed é só
+    // perdido -- no próximo os dois já estão num canal novo, alinhados. Não há
+    // mais park nem janela de escuta: o escravo reancora o relógio pelo
+    // hop_counter do pacote quando a deriva de cristal escorrega um slot.
+    // Ver openspec/changes/time-slotted-hopping/design.md.
+    if (!g_time_synced)
     {
-        // D2: nada válido chegou nesta janela -- conta 1 hop "virtual"
-        // pra PLR/g_hops_since_rx continuarem honestos, mas SEM chamar
-        // escravo_advance_hop() (que trocaria de canal): o escravo
-        // continua parado em current_channel (o canal escolhido por
-        // qualidade na entrada do estacionamento, tarefa 1.5 -- não é
-        // sempre g_last_good_channel) até um pacote válido chegar ou o
-        // orçamento esgotar.
-        g_window_expected++;
-        g_session_expected++;
-        g_hops_since_rx++;
-        if (g_window_expected >= g_window_size)
+        // preâmbulo de sincronismo: segura o canal do slot 0 e escuta; ancora no
+        // primeiro fragmento válido (tratado no bloco de recepção abaixo). Sem
+        // isto, o skew de fase do handshake deixaria os dois em canais diferentes.
+        uint8_t ch0 = g_fixed_channel_mode ? TEST_FIXED_CHANNEL : get_next_active_channel(g_seed, 0, g_channel_mask);
+        if (current_channel != ch0)
         {
-            log_plr_window();
-            g_window_expected = 0;
-            g_window_received = 0;
-        }
-        channel_deadline_start = millis();
-
-        if (resync_park_expired((uint32_t)(millis() - g_resync_park_start), RESYNC_PARK_MAX_MS) ||
-            g_hops_since_rx >= LOSS_HOPS)
-        {
-            // Orçamento de estacionamento esgotado sem nada válido --
-            // mesmo caminho de perda de sempre (o static_assert do
-            // orçamento em shared/protocol.h garante que
-            // RESYNC_PARK_MAX_MS sempre vence antes de LOSS_HOPS; a
-            // checagem de g_hops_since_rx fica por simetria/defesa).
-            reset_to_scanning();
-            return;
-        }
-    }
-    else if (timed_out)
-    {
-        escravo_advance_hop();
-        g_resync_miss_count++;
-        if (resync_should_park(g_resync_miss_count, RESYNC_MISS_HOPS))
-        {
-            // D1: RESYNC_MISS_HOPS timeouts consecutivos sem nada válido --
-            // para de avançar por conta própria e estaciona, escutando
-            // continuamente até o mestre passar por ali de novo
-            // (round-robin sobre a máscara ativa, no máximo active_count
-            // hops, ver get_next_active_channel() em shared/hopping.h) ou o
-            // orçamento (D2) esgotar.
-            g_resync_parked = true;
-            g_resync_hop_before = hop_counter;
-            g_resync_park_start = millis();
-
-            // hop-resync (tarefa 1.5, achado de bancada): NÃO estaciona mais
-            // cegamente em g_last_good_channel -- no caso "ack perdido"
-            // (proposal.md "Mecanismo"), a ÚLTIMA recepção válida acontece
-            // exatamente no canal ruim cujo ack se perdeu (é a causa da
-            // própria defasagem), então repetir esse canal repete a falha
-            // (soak de bancada, tasks.md 2.1: 9 de 11 estacionamentos em ch
-            // 34, colado no Wi-Fi, 0 resync_ok). Escolhe em vez disso, entre
-            // os canais habilitados, o de melhor qualidade de recepção
-            // recente (g_resync_channel_ok/miss, ver shared/resync.h) --
-            // cai de volta em g_last_good_channel só se nenhum canal
-            // habilitado tiver recepção alguma registrada.
-            uint8_t fallback_idx = channel_table_index(g_last_good_channel);
-            uint8_t park_idx = resync_pick_park_channel(g_resync_channel_ok, g_resync_channel_miss,
-                                                         g_channel_mask, fallback_idx);
-            // Mesma fórmula de score de resync_pick_park_channel() --
-            // recalculada aqui só pra telemetria (a função devolve só o
-            // índice escolhido).
-            int16_t park_score = (int16_t)g_resync_channel_ok[park_idx] - 2 * (int16_t)g_resync_channel_miss[park_idx];
-
-            current_channel = HOPPING_CHANNELS[park_idx];
-
-            // hop-resync (tarefa 1.8): entrada no estacionamento -- mesmo
-            // settle/flush de escravo_advance_hop() após setChannel() (RX
-            // FIFO pode reter payload do canal anterior -- ver comentário
-            // lá). Sem startListening() extra: o rádio já está escutando
-            // (escravo_advance_hop() faz o mesmo, sem reafirmar CE/PRIM_RX).
-            // As variantes "listen"/"reinit" testadas aqui (tasks.md 1.6)
-            // eram bancada em cima de um diagnóstico errado -- a causa real
-            // da falta de resync_ok era o bug de 1.8 (escravo estacionado
-            // nunca lia o rádio, ver comentário em `timed_out` acima); com
-            // ele corrigido, nenhuma das duas variantes fez falta (soak:
-            // 49/49 resync_ok).
-            escravo_radio.setChannel(current_channel);
+            current_channel = ch0;
+            hop_counter = 0;
+            escravo_radio.setChannel(ch0);
             delayMicroseconds(500);
             escravo_radio.flush_rx();
-
-            channel_deadline_start = millis();
-            tlm_printf("escravo", "resync_park", "ch=%u;hop=%lu;score=%d",
-                       current_channel, hop_counter, park_score);
-        }
-        if (g_hops_since_rx >= LOSS_HOPS)
-        {
-            reset_to_scanning();
-            return;
         }
     }
     else
     {
-        uint8_t current_pipe;
-        if (escravo_radio.available(&current_pipe))
+        uint32_t slot = current_slot(millis(), hop_start_at);
+        if (slot != hop_counter)
+            escravo_hop_to(slot);
+    }
+
+    // escuta o canal do slot corrente (roda em todo loop, não num else de timeout)
+    uint8_t current_pipe;
+    if (escravo_radio.available(&current_pipe))
+    {
+        if (current_pipe == 1)
         {
-            if (current_pipe == 1)
+            uint8_t dt_size = escravo_radio.getDynamicPayloadSize();
+
+            if (dt_size == sizeof(FragmentPacket))
             {
-                uint8_t dt_size = escravo_radio.getDynamicPayloadSize();
+                FragmentPacket pkt;
+                escravo_radio.read(&pkt, sizeof(pkt));
 
-                if (dt_size == sizeof(FragmentPacket))
+                if (pkt.type == MSG_FRAGMENT && pkt.total_fragments > 0 && pkt.total_fragments <= MAX_FRAGMENTS)
                 {
-                    FragmentPacket pkt;
-                    escravo_radio.read(&pkt, sizeof(pkt));
-
-                    if (pkt.type == MSG_FRAGMENT && pkt.total_fragments > 0 && pkt.total_fragments <= MAX_FRAGMENTS)
+                    // RX válido: marca o slot como recebido, reancora o relógio
+                    // se derivou, e atualiza o timer de perda por tempo. NADA de
+                    // print/telemetria antes do ACK (competem pelo mutex com o
+                    // analisador/jammer e atrasariam o ack).
+                    g_hop_received_flag = true;
+                    g_hops_since_rx = 0;
+                    g_last_valid_rx_ms = millis();
+                    g_last_good_channel = current_channel;
+                    if (!g_time_synced)
                     {
-                        g_hop_received_flag = true;
-                        // adaptive-rendezvous: adota o contador de hop do
-                        // mestre em vez de manter contagem própria --
-                        // corrige qualquer deriva entre os dois lados.
-                        // escravo_advance_hop() logo abaixo incrementa a
-                        // partir DESTE valor, então o próximo canal
-                        // escolhido é exatamente o mesmo que o mestre vai
-                        // calcular ao avançar o dele.
+                        // bootstrap: primeiro fragmento válido -- ancora o relógio
+                        // ao slot do mestre (agora = meio do slot pkt.hop_counter)
+                        // e entra no salto por tempo. Incondicional (o reanchor
+                        // normal só corrige slip, mas aqui hop_counter ainda pode
+                        // coincidir com o do mestre e não dispararia).
+                        hop_start_at = millis() - (uint32_t)pkt.hop_counter * SLOT_MS;
                         hop_counter = pkt.hop_counter;
+                        g_time_synced = true;
+                        g_last_valid_rx_ms = millis(); // arma o timer de perda só a partir do sync
+                        tlm_printf("escravo", "time_sync", "master=%lu;ch=%u", (unsigned long)pkt.hop_counter, current_channel);
+                    }
+                    else
+                    {
+                        escravo_reanchor(pkt.hop_counter);
+                    }
 
-                        // hop-resync (tarefa 1.2): qualquer recepção válida
-                        // zera a contagem de timeouts consecutivos e marca
-                        // este canal como o "último bom" -- candidato a
-                        // estacionar se a defasagem persistir de novo. Se o
-                        // escravo estava estacionado, sai do estacionamento
-                        // aqui (o resync_ok é logado mais abaixo, DEPOIS do
-                        // ack -- ver comentário do achado de bancada logo
-                        // abaixo).
-                        g_resync_miss_count = 0;
-                        g_last_good_channel = current_channel;
-                        bool frag_was_parked = g_resync_parked;
-                        g_resync_parked = false;
+                    bool is_new_message = (current_msg_id != pkt.msg_id);
+                    if (is_new_message)
+                        reset_message_state(pkt.msg_id, pkt.total_fragments);
 
-                        // Achado de bancada: nenhum guarded_printf/tlm_printf
-                        // roda antes do ACK ser enviado (só depois, mais
-                        // abaixo) -- eles competem pelo mesmo mutex de
-                        // telemetria que a task do jammer também usa, e um
-                        // print antes do ack podia atrasar o suficiente pra
-                        // mestre já ter desistido de esperar quando o ack
-                        // finalmente saía. Só o estado (reset de mensagem,
-                        // bitmap, contagem) é atualizado aqui.
-                        bool is_new_message = (current_msg_id != pkt.msg_id);
-                        if (is_new_message)
-                            reset_message_state(pkt.msg_id, pkt.total_fragments);
-
-                        bool fragment_stored = false;
-                        if (pkt.fragment_index < expected_total_fragments && pkt.payload_len <= FRAGMENT_DATA_SIZE)
+                    bool fragment_stored = false;
+                    if (pkt.fragment_index < expected_total_fragments && pkt.payload_len <= FRAGMENT_DATA_SIZE)
+                    {
+                        size_t offset = (size_t)pkt.fragment_index * FRAGMENT_DATA_SIZE;
+                        if (offset + pkt.payload_len <= MAX_MESSAGE_SIZE)
                         {
-                            size_t offset = (size_t)pkt.fragment_index * FRAGMENT_DATA_SIZE;
-                            if (offset + pkt.payload_len <= MAX_MESSAGE_SIZE)
+                            memcpy(assembled_message + offset, pkt.payload, pkt.payload_len);
+                            if (!received_bitmap[pkt.fragment_index]) // dedup (SEQN)
                             {
-                                memcpy(assembled_message + offset, pkt.payload, pkt.payload_len);
-                                if (!received_bitmap[pkt.fragment_index])
-                                {
-                                    received_bitmap[pkt.fragment_index] = true;
-                                    received_count++;
-                                }
-                                fragment_stored = true;
+                                received_bitmap[pkt.fragment_index] = true;
+                                received_count++;
                             }
-                        }
-
-                        bool complete = is_message_complete();
-
-                        FragmentAck ack;
-                        ack.type = MSG_FRAGMENT_ACK;
-                        ack.msg_id = pkt.msg_id;
-                        ack.fragment_index = pkt.fragment_index;
-                        ack.complete = complete ? 1 : 0;
-                        ack.suspect_idx = escravo_suspect_channel(); // jamming-mitigation-hardening
-
-                        escravo_radio.stopListening();
-                        radio_send(escravo_radio, &ack, sizeof(ack));
-                        escravo_radio.startListening();
-
-                        // Evento de sucesso: avança pro próximo canal já
-                        // agora, sem esperar timeout nenhum -- ver
-                        // escravo_advance_hop().
-                        escravo_advance_hop();
-
-                        // D3 (design.md, "primeiro FragmentPacket válido
-                        // confirma o enlace"): só agora, com dado de
-                        // verdade recebido (não só o handshake), o enlace
-                        // sai de pareado-provisório -- notify_ready(true)
-                        // (libera o jammer combinado) só dispara aqui, nunca
-                        // antes.
-                        bool just_confirmed = (g_link_state == ESCRAVO_PROVISIONAL);
-                        if (just_confirmed)
-                        {
-                            g_link_state = ESCRAVO_CONFIRMED;
-                            reset_plr_counters();
-                        }
-
-                        // Prints adiados pra depois do ack (ver comentário
-                        // acima) -- não afetam o timing crítico daqui em diante.
-                        if (just_confirmed)
-                        {
-                            tlm_printf("escravo", "pair_confirm", "ch=%u", current_channel);
-                            guarded_printf("[ESCRAVO] Enlace confirmado (primeiro fragmento recebido) em ch=%u.\n", current_channel);
-                            notify_ready(true);
-                        }
-                        if (frag_was_parked)
-                        {
-                            // hop-resync (tarefa 1.3): loga DEPOIS do ack (H6,
-                            // ver tasks.md de pairing-handshake-hardening
-                            // 1.8) -- hop_before é o contador do próprio
-                            // escravo no instante em que estacionou,
-                            // hop_after é o que acabou de ser adotado deste
-                            // fragmento (a diferença mostra se o escravo
-                            // estava adiantado ou atrasado, ver proposal.md).
-                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu",
-                                       g_last_good_channel, g_resync_hop_before, pkt.hop_counter,
-                                       (unsigned long)(millis() - g_resync_park_start));
-                        }
-                        if (is_new_message)
-                            guarded_printf("[ESCRAVO] Nova mensagem msg_id=%u com %u fragmentos\n", pkt.msg_id, pkt.total_fragments);
-                        if (fragment_stored)
-                            guarded_printf("[ESCRAVO] Canal=%u frag=%u/%u recebida (len=%u)\n",
-                                          current_channel, pkt.fragment_index + 1, expected_total_fragments, pkt.payload_len);
-
-                        if (complete && !completion_logged)
-                        {
-                            assembled_message[MAX_MESSAGE_SIZE] = '\0';
-                            guarded_printf("[ESCRAVO] Mensagem completa reconstruida: %s\n", assembled_message);
-                            tlm_event("escravo", "msg_done");
-                            completion_logged = true;
+                            fragment_stored = true;
                         }
                     }
-                    else
+
+                    bool complete = is_message_complete();
+
+                    FragmentAck ack;
+                    ack.type = MSG_FRAGMENT_ACK;
+                    ack.msg_id = pkt.msg_id;
+                    ack.fragment_index = pkt.fragment_index;
+                    ack.complete = complete ? 1 : 0;
+                    ack.suspect_idx = escravo_suspect_channel(); // jamming-mitigation-hardening
+
+                    escravo_radio.stopListening();
+                    radio_send(escravo_radio, &ack, sizeof(ack));
+                    escravo_radio.startListening();
+
+                    // D3: primeiro FragmentPacket válido confirma o enlace.
+                    bool just_confirmed = (g_link_state == ESCRAVO_PROVISIONAL);
+                    if (just_confirmed)
                     {
-                        guarded_println("[ESCRAVO] Pacote ignorado por formato invalido.");
+                        g_link_state = ESCRAVO_CONFIRMED;
+                        reset_plr_counters();
                     }
-                }
-                else if (dt_size == sizeof(ControlSeedPacket)) // == sizeof(ControlBlacklistPacket)
-                {
-                    uint8_t raw[sizeof(ControlSeedPacket)];
-                    escravo_radio.read(raw, dt_size);
-                    uint8_t ctrl_type = raw[0];
 
-                    if (ctrl_type == MSG_CTRL_SEED)
+                    // Prints adiados pra depois do ack.
+                    if (just_confirmed)
                     {
-                        ControlSeedPacket pkt;
-                        memcpy(&pkt, raw, sizeof(pkt));
-
-                        // hop-resync (tarefa 1.2a, design.md D3a): adota o
-                        // contador de hop do mestre também a partir de
-                        // pacote de controle -- mesma correção de deriva que
-                        // o FragmentPacket já faz (ver ramo MSG_FRAGMENT
-                        // acima). Necessário porque, enquanto há controle
-                        // pendente, o mestre manda o pacote de controle NO
-                        // LUGAR do fragmento em todo hop até ser ackado (ver
-                        // send_pending_control_if_any() em mestre/src/node.h)
-                        // -- um escravo estacionado pode nunca ver um
-                        // FragmentPacket, então sem isto não teria de onde
-                        // sair do estacionamento.
-                        hop_counter = pkt.hop_counter;
-                        g_resync_miss_count = 0;
-                        g_last_good_channel = current_channel;
-                        bool seed_was_parked = g_resync_parked;
-                        g_resync_parked = false;
-
-                        g_seed_apply_scheduled = true;
-                        g_seed_apply_value = pkt.new_seed;
-                        g_seed_apply_at = pkt.apply_at_hop;
-
-                        ControlAck ack = {MSG_CTRL_ACK, pkt.apply_at_hop};
-                        escravo_radio.stopListening();
-                        radio_send(escravo_radio, &ack, sizeof(ack));
-                        escravo_radio.startListening();
-                        tlm_printf("escravo", "rekey_ack", "kind=seed;seed=%u;apply=%lu", pkt.new_seed, pkt.apply_at_hop);
-                        // Achado de bancada (2026-09-24): faltava esta linha
-                        // -- sem ela, escravo_advance_hop() logo abaixo conta
-                        // este hop como PERDA (g_hop_received_flag continua
-                        // false), mesmo o pacote de controle tendo sido
-                        // recebido e ackado com sucesso. Sob rajada de
-                        // controle (vários MUDAR_SEED/BLACKLIST_UPDATE em
-                        // sequência, exatamente o que acontece sob jamming
-                        // real ou reavaliação contínua de blacklist-decay),
-                        // isso inflava g_hops_since_rx até LOSS_HOPS e
-                        // derrubava um enlace que na verdade estava
-                        // funcionando -- provável causa raiz do "link nunca
-                        // se recupera" investigado em dynamic-seed-blacklist
-                        // tasks.md 4.4.
-                        g_hop_received_flag = true;
-                        // Mesmo caminho de evento-sucesso do fragmento: o
-                        // mestre também avança o dele imediatamente após
-                        // enviar um pacote de controle (ver mestre_loop()).
-                        escravo_advance_hop();
-                        if (seed_was_parked)
-                        {
-                            // hop-resync (tarefa 1.3): loga DEPOIS do ack,
-                            // mesma regra do ramo MSG_FRAGMENT acima (H6).
-                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu",
-                                       g_last_good_channel, g_resync_hop_before, pkt.hop_counter,
-                                       (unsigned long)(millis() - g_resync_park_start));
-                        }
+                        tlm_printf("escravo", "pair_confirm", "ch=%u", current_channel);
+                        guarded_printf("[ESCRAVO] Enlace confirmado (primeiro fragmento recebido) em ch=%u.\n", current_channel);
+                        notify_ready(true);
                     }
-                    else if (ctrl_type == MSG_CTRL_BLACKLIST)
+                    if (is_new_message)
+                        guarded_printf("[ESCRAVO] Nova mensagem msg_id=%u com %u fragmentos\n", pkt.msg_id, pkt.total_fragments);
+                    if (fragment_stored)
+                        guarded_printf("[ESCRAVO] Canal=%u frag=%u/%u recebida (len=%u)\n",
+                                      current_channel, pkt.fragment_index + 1, expected_total_fragments, pkt.payload_len);
+
+                    if (complete && !completion_logged)
                     {
-                        ControlBlacklistPacket pkt;
-                        memcpy(&pkt, raw, sizeof(pkt));
-
-                        // hop-resync (tarefa 1.2a): mesma adoção do
-                        // hop_counter do mestre que o ramo MSG_CTRL_SEED
-                        // acima -- ver comentário lá.
-                        hop_counter = pkt.hop_counter;
-                        g_resync_miss_count = 0;
-                        g_last_good_channel = current_channel;
-                        bool blacklist_was_parked = g_resync_parked;
-                        g_resync_parked = false;
-
-                        g_mask_apply_scheduled = true;
-                        g_mask_apply_value = pkt.mask;
-                        g_mask_apply_at = pkt.apply_at_hop;
-
-                        ControlAck ack = {MSG_CTRL_ACK, pkt.apply_at_hop};
-                        escravo_radio.stopListening();
-                        radio_send(escravo_radio, &ack, sizeof(ack));
-                        escravo_radio.startListening();
-                        tlm_printf("escravo", "rekey_ack", "kind=blacklist;mask=0x%04X;apply=%lu", pkt.mask, pkt.apply_at_hop);
-                        // Mesmo achado do ramo MSG_CTRL_SEED acima.
-                        g_hop_received_flag = true;
-                        escravo_advance_hop();
-                        if (blacklist_was_parked)
-                        {
-                            // hop-resync (tarefa 1.3): loga DEPOIS do ack
-                            // (H6), mesma regra dos ramos acima.
-                            tlm_printf("escravo", "resync_ok", "ch=%u;hop_before=%lu;hop_after=%lu;ms=%lu",
-                                       g_last_good_channel, g_resync_hop_before, pkt.hop_counter,
-                                       (unsigned long)(millis() - g_resync_park_start));
-                        }
-                    }
-                    else
-                    {
-                        guarded_println("[ESCRAVO] Pacote de controle com tipo desconhecido, descartado.");
+                        assembled_message[MAX_MESSAGE_SIZE] = '\0';
+                        guarded_printf("[ESCRAVO] Mensagem completa reconstruida: %s\n", assembled_message);
+                        tlm_event("escravo", "msg_done");
+                        completion_logged = true;
                     }
                 }
                 else
                 {
-                    uint8_t dump[32];
-                    escravo_radio.read(dump, dt_size);
-                    guarded_printf("[ESCRAVO] Payload inesperado recebido (%d bytes), descartado.\n", dt_size);
+                    guarded_println("[ESCRAVO] Pacote ignorado por formato invalido.");
+                }
+            }
+            else if (dt_size == sizeof(ControlSeedPacket)) // == sizeof(ControlBlacklistPacket)
+            {
+                uint8_t raw[sizeof(ControlSeedPacket)];
+                escravo_radio.read(raw, dt_size);
+                uint8_t ctrl_type = raw[0];
+
+                if (ctrl_type == MSG_CTRL_SEED)
+                {
+                    ControlSeedPacket pkt;
+                    memcpy(&pkt, raw, sizeof(pkt));
+                    g_hop_received_flag = true;
+                    g_hops_since_rx = 0;
+                    g_last_valid_rx_ms = millis();
+                    g_last_good_channel = current_channel;
+                    escravo_reanchor(pkt.hop_counter);
+
+                    g_seed_apply_scheduled = true;
+                    g_seed_apply_value = pkt.new_seed;
+                    g_seed_apply_at = pkt.apply_at_hop;
+
+                    ControlAck ack = {MSG_CTRL_ACK, pkt.apply_at_hop};
+                    escravo_radio.stopListening();
+                    radio_send(escravo_radio, &ack, sizeof(ack));
+                    escravo_radio.startListening();
+                    tlm_printf("escravo", "rekey_ack", "kind=seed;seed=%u;apply=%lu", pkt.new_seed, pkt.apply_at_hop);
+                }
+                else if (ctrl_type == MSG_CTRL_BLACKLIST)
+                {
+                    ControlBlacklistPacket pkt;
+                    memcpy(&pkt, raw, sizeof(pkt));
+                    g_hop_received_flag = true;
+                    g_hops_since_rx = 0;
+                    g_last_valid_rx_ms = millis();
+                    g_last_good_channel = current_channel;
+                    escravo_reanchor(pkt.hop_counter);
+
+                    g_mask_apply_scheduled = true;
+                    g_mask_apply_value = pkt.mask;
+                    g_mask_apply_at = pkt.apply_at_hop;
+
+                    ControlAck ack = {MSG_CTRL_ACK, pkt.apply_at_hop};
+                    escravo_radio.stopListening();
+                    radio_send(escravo_radio, &ack, sizeof(ack));
+                    escravo_radio.startListening();
+                    tlm_printf("escravo", "rekey_ack", "kind=blacklist;mask=0x%04X;apply=%lu", pkt.mask, pkt.apply_at_hop);
+                }
+                else
+                {
+                    guarded_println("[ESCRAVO] Pacote de controle com tipo desconhecido, descartado.");
                 }
             }
             else
             {
-                uint32_t dump_buffer;
-                escravo_radio.read(&dump_buffer, sizeof(dump_buffer));
+                uint8_t dump[32];
+                escravo_radio.read(dump, dt_size);
+                guarded_printf("[ESCRAVO] Payload inesperado recebido (%d bytes), descartado.\n", dt_size);
             }
         }
+        else
+        {
+            uint32_t dump_buffer;
+            escravo_radio.read(&dump_buffer, sizeof(dump_buffer));
+        }
+    }
+
+    // time-slotted-hopping: perda de enlace por TEMPO sem recepção válida
+    // (substitui LOSS_HOPS + o orçamento de park da era por-evento). SÓ vale
+    // depois do sincronismo -- durante o bootstrap (PROVISIONAL, não synced) o
+    // relógio ainda não travou e g_last_valid_rx_ms não foi setado; quem limita
+    // o bootstrap é o SEED_WAIT_TIMEOUT do estado PROVISIONAL. Sem este gate, o
+    // check dispararia na 1ª iteração do bootstrap (millis() - 0 >= LINK_LOSS_MS)
+    // e o escravo re-escaneava antes de receber qualquer coisa (bug de bancada:
+    // boot_s + loss_of_sync no mesmo instante, escravo nunca ficava no ch0).
+    if (g_time_synced && millis() - g_last_valid_rx_ms >= LINK_LOSS_MS)
+    {
+        reset_to_scanning();
+        return;
     }
 }
 

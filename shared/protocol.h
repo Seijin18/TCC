@@ -158,6 +158,37 @@ static const uint8_t PAIR_FAIL_THRESHOLD = 3;
 static const uint32_t PAIR_RECOVERY_ROUNDS = 12;
 
 static const uint32_t HOP_START_DELAY_MS = 900;
+
+// -------------------------------------------------------------
+// time-slotted-hopping: o salto avanca por TEMPO, nao por evento.
+// -------------------------------------------------------------
+// slot = (millis() - hop_start_at) / SLOT_MS nos DOIS lados; o canal e
+// get_next_active_channel(seed, slot, mask). Como o canal e funcao so do tempo
+// e da seed/mascara (compartilhados), mestre e escravo estao no mesmo canal por
+// construcao, tenha ou nao passado pacote -- um slot jammed e so desperdicado,
+// no proximo os dois ja estao num canal novo, alinhados. Substitui o salto por
+// evento (hop-ack-decoupling), cuja fase derivava sem relogio compartilhado.
+static const uint32_t SLOT_MS = 30;       // duracao de cada slot de hopping
+// O mestre nao transmite nos ultimos SLOT_GUARD_MS do slot: absorve o settle do
+// radio (~500us) e o skew inicial de ~1-2ms entre os dois T0 (ancoras vindas do
+// mesmo handshake de pareamento), pra um envio nao cruzar a fronteira do slot.
+static const uint32_t SLOT_GUARD_MS = 4;
+// Espera de ack por TENTATIVA dentro de um slot (o mestre pode tentar mais de
+// uma vez no mesmo slot; cada envio espera ate ATTEMPT_ACK_WAIT_MS pelo ack).
+// >= latencia tipica de ack (~14 ms) pra normalmente pegar o ack na 1a tentativa,
+// e <= (SLOT_MS - SLOT_GUARD_MS) pra caber no slot.
+static const uint32_t ATTEMPT_ACK_WAIT_MS = 15;
+// Perda de enlace por TEMPO sem recepcao valida (substitui LOSS_HOPS/park da era
+// por-evento). ~5s: o relogio atravessa qualquer jamming realista (deriva de
+// cristal ~80us/s => ~375s pra escorregar um slot; e 15/16 slots passam sob
+// jammer de 1 canal, reancorando o relogio).
+static const uint32_t LINK_LOSS_MS = 5000;
+// Slot util pros dois lados (canal e f(seed, slot, mask)); anchor e o
+// hop_start_at local, fixado no pareamento.
+static inline uint32_t current_slot(uint32_t now_ms, uint32_t anchor_ms)
+{
+    return (uint32_t)(now_ms - anchor_ms) / SLOT_MS;
+}
 // Hopping por evento (nao mais por relogio periodico fixo): o salto avanca a
 // cada TENTATIVA de transmissao, desacoplado do ACK (hop-ack-decoupling).
 // O mestre manda o fragmento corrente UMA vez no canal corrente e espera o
