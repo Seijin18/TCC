@@ -1,0 +1,619 @@
+#ifndef JAMMER_NODE_H
+#define JAMMER_NODE_H
+
+#include <Arduino.h>
+#include <SPI.h>
+#include <RF24.h>
+#include <cstring>
+#include "../../shared/hopping.h"
+#include "../../shared/telemetry.h"
+// jammer-emission-check (tarefa 3.1): RF24Diag/tlm_radio_regs para
+// diagnosticar variante (P vs clone nao-P) do(s) radio(s) do jammer no
+// boot -- ver shared/radio_diag.h e escravo/src/node.h:411 (mesmo padrao).
+#include "../../shared/radio_diag.h"
+
+#define PIN_CE_VSPI 22
+#define PIN_CSN_VSPI 21
+#define PIN_SCK_VSPI 18
+#define PIN_MISO_VSPI 19
+#define PIN_MOSI_VSPI 23
+
+#define PIN_CE_HSPI 16
+#define PIN_CSN_HSPI 15
+#define PIN_SCK_HSPI 4
+#define PIN_MISO_HSPI 2
+#define PIN_MOSI_HSPI 17
+
+// 1 = dwell lento (2 ms/canal) para visualizar no heatmap do analisador
+// 0 = modo agressivo para teste com fone BT
+#define JAMMER_SPECTRUM_TEST 0
+
+// Banda Bluetooth Classic + BLE: 2402–2480 MHz (F0 = 2400 + RF_CH)
+#define BT_CH_MIN 2
+#define BT_CH_MAX 80
+#define BT_CH_MID 41
+
+#if JAMMER_SPECTRUM_TEST
+#define PLL_DWELL_US 2000
+#else
+#define PLL_DWELL_US 130
+#endif
+
+// Achado de bancada (2026-09-18, validacao end-to-end): em modo targeted,
+// com o dwell padrao (~1ms/canal, dominado pelo vTaskDelay(1) da task),
+// o jammer troca de canal rapido demais em relacao ao scanSpectrum() do
+// analisador (~860ms pra varrer os 126 canais) -- um canal-alvo so era
+// pego pelo analisador raramente e por acaso, levando dezenas de segundos
+// entre hits no MESMO canal. Aumentar o hold especificamente em targeted
+// (nao mexe no sweep, que deve continuar rapido/amplo) da mais chance de
+// QUALQUER scanner (nao so este analisador) perceber a presenca -- ainda
+// nao elimina o problema de fundo (um radio so pode estar em 1 canal por
+// vez), mas reduz o tempo medio ate uma primeira deteccao.
+static const uint32_t JAM_TARGETED_HOLD_MS = 60;
+
+static SPIClass vspi(VSPI);
+static SPIClass hspi(HSPI);
+
+// jammer-emission-check 3.1: RF24Diag (nao RF24) para poder ler os
+// registradores via tlm_radio_regs() -- mesma troca de tipo (sem mudanca
+// de comportamento) que mestre_radio/escravo_radio ja usam, ver
+// shared/radio_diag.h.
+static RF24Diag jammer_radio(PIN_CE_VSPI, PIN_CSN_VSPI);
+static RF24Diag jammer_radio2(PIN_CE_HSPI, PIN_CSN_HSPI);
+
+static bool has_radio2 = false;
+
+enum JamMode
+{
+    JAM_MODE_SWEEP,
+    JAM_MODE_TARGETED,
+    JAM_MODE_ADAPTIVE,
+    JAM_MODE_HOLD
+};
+
+static JamMode g_mode = JAM_MODE_SWEEP;
+
+// jammer-emission-hardware: modo "hold" -- portadora PARADA num unico canal
+// (sem saltar). Remove o confundidor de dwell do targeted (que fica so ~6%
+// do tempo em cada canal, dificil de detectar e fraco como ataque) e serve
+// de atacante deterministico de canal fixo para o Cenario A. Canal alto
+// default (125) fora do Wi-Fi da bancada; ajustavel por "mode hold <ch>".
+static uint8_t g_hold_channel = 125;
+static unsigned long g_hold_last_rearm = 0;
+// Re-arme periodico da portadora (tecnica "overdrive" de clones Si24R1 que
+// caem fora do CONT_WAVE -- ver design.md). Barato e inocuo mesmo em radios
+// P estaveis; garante emissao sustentada em modulos clone.
+static const unsigned long HOLD_REARM_MS = 2000;
+
+// adaptive-rendezvous / targeted-jammer (2026-09-24): modo "adaptive" --
+// em vez de round-robin cego pelos 16 HOPPING_CHANNELS (targeted) ou pela
+// banda inteira (sweep, pode quebrar até o pareamento se for forte
+// demais), sensoria por energia (RPD) e TRAVA no primeiro canal com
+// atividade real, revalidando periodicamente -- concentra a emissão onde
+// o enlace de fato está, em vez de gastar tempo igual em canais ociosos.
+// Só single-radio (jammer_radio) mesmo com has_radio2 -- suficiente pra
+// bancada de 2 placas (o cenário real de teste), sensoriar+emitir com 2
+// rádios simultâneos dobraria a complexidade sem necessidade aqui.
+static const uint32_t ADAPTIVE_SENSE_SAMPLES = 3;
+static const uint32_t ADAPTIVE_RECHECK_MS = 150; // com que frequência reconfirma um canal já travado
+static int8_t g_adaptive_locked_idx = -1;
+static unsigned long g_adaptive_last_recheck = 0;
+static uint8_t g_adaptive_scan_idx = 0;
+
+// Fonte opcional de "handshake concluído" — quando registrada (placa_b,
+// via jammer_set_ready_source()), o jammer usa **só** o rádio HSPI (o
+// barramento VSPI da placa pertence ao escravo -- two-board-topology
+// seção 7) e só inicia a portadora depois que a fonte retornar true. Sem
+// fonte registrada (nós standalone, cenário de 4 placas), preserva o
+// comportamento original: dois rádios (VSPI+HSPI), emite desde o boot.
+static bool (*g_jammer_ready_source)() = nullptr;
+static bool g_combined_mode = false;
+static bool g_carrier_started = false;
+
+// jam on|off — na placa combinada, default é OFF (não emitir até um
+// comando explícito), diferente do padrão standalone (emite assim que o
+// handshake completa). "power min|low|high|max" ajusta RF24_PA_* em
+// runtime nos dois testes graduais (T4/T5 do plano de bancada).
+static bool g_jam_enabled = true;
+static rf24_pa_dbm_e g_jam_power = RF24_PA_MAX;
+
+static void jammer_set_ready_source(bool (*source)())
+{
+    g_jammer_ready_source = source;
+}
+
+// two-board-topology / scenario-automation: na placa combinada, jammer e
+// escravo compartilham a MESMA UART física, mas só um dos dois pode ler
+// Serial.available()/read() sem correr (os bytes de uma linha se
+// espalhariam entre os dois leitores concorrentes, corrompendo os dois
+// comandos). jammer continua sendo o único a ler fisicamente (não mudou);
+// comandos que ele não reconhece (ex. "mode fixed"/"mode hopping", do
+// modo de teste de scenario-automation) são repassados a este sink,
+// registrado por placa_b/src/main.cpp -> handle_escravo_command(). Sem
+// sink registrado (jammer standalone/4 placas), comando desconhecido só
+// imprime o erro, como antes.
+static bool (*g_jammer_unknown_cmd_sink)(const char *) = nullptr;
+
+static void jammer_set_unknown_cmd_sink(bool (*sink)(const char *))
+{
+    g_jammer_unknown_cmd_sink = sink;
+}
+
+#define CMD_BUF_SIZE 32
+static char cmdBuf[CMD_BUF_SIZE];
+static uint8_t cmdLen = 0;
+
+static void applyPowerLevel()
+{
+    jammer_radio.setPALevel(g_jam_power);
+    if (has_radio2)
+        jammer_radio2.setPALevel(g_jam_power);
+}
+
+static void stopCarrier()
+{
+    if (!g_carrier_started)
+        return;
+    jammer_radio.stopConstCarrier();
+    if (has_radio2)
+        jammer_radio2.stopConstCarrier();
+    g_carrier_started = false;
+    tlm_event("jammer", "jam_state_off");
+    guarded_println("[JAMMER] Emissao interrompida (jam off).");
+}
+
+static void configureJammerRadio(RF24 &r)
+{
+    r.setAutoAck(false);
+    r.setRetries(0, 0);
+    r.disableCRC();
+    r.setDataRate(RF24_2MBPS);
+    r.setPALevel(g_jam_power);
+    r.stopListening();
+}
+
+// jammer-emission-hardware (achado de bancada 2026-09-25): a portadora deste
+// clone DEGRADA ao longo de uma sessao (varios jam on/off, troca de modo,
+// resets) -- o mesmo "mode hold 10" que negava 100%% da comunicacao parava de
+// negar minutos depois, sem mudanca de comando. A causa e o clone (Si24R1)
+// sair/perder o estado de CONT_WAVE. O probe Tests/JammerTx (que fazia
+// powerUp()+reconfig ANTES de startConstCarrier) sempre emitiu forte. Logo:
+// reinicializar o radio (stopConstCarrier -> powerUp -> reconfig) antes de
+// (re)armar a portadora torna a emissao confiavel e reprodutivel. Mesmo
+// padrao do radio_reinit() que consertou o escravo surdo.
+static void startCarrierOn(RF24 &r, uint8_t channel)
+{
+    r.stopConstCarrier();
+    r.powerUp();
+    delay(2);
+    configureJammerRadio(r);
+    r.startConstCarrier(g_jam_power, channel);
+}
+
+static void startCarrier()
+{
+    // Em hold, ja iniciar no canal alvo (evita blip em BT_CH_MIN).
+    uint8_t ch0 = (g_mode == JAM_MODE_HOLD) ? g_hold_channel : BT_CH_MIN;
+    startCarrierOn(jammer_radio, ch0);
+    if (has_radio2)
+        startCarrierOn(jammer_radio2, BT_CH_MAX);
+    g_carrier_started = true;
+    tlm_event("jammer", "jam_state_on");
+    // jammer-emission-hardware (tarefa 2.4): telemetrar RF_SETUP com a
+    // emissao JA ativa a `power` corrente -- confirma potencia real (bit
+    // extra do Si24R1) durante jam on, nao so no boot.
+    tlm_radio_regs("jammer", jammer_radio, "jam_on");
+    guarded_println("[JAMMER] Emissao CW ativa. '.' = heartbeat a cada 1 s\n");
+}
+
+// Achado de bancada (targeted-jammer, retune deterministico, 2026-09-25):
+// o mesmo modo targeted produziu ataques muito diferentes (70-100% de miss
+// em uma bateria, ~15% em outra, so o canal fixo 10 acertando em uma
+// terceira) sem nenhuma mudanca de codigo entre elas. Suspeita confirmada:
+// com a portadora constante ja ativa (startConstCarrier() forcou CONT_WAVE
+// + PLL_LOCK e deixou CE em nivel alto), escrever RF_CH direto com
+// r.setChannel(channel) e CE ainda alto nao reafina o sintetizador de forma
+// confiavel nesses clones de nRF24 -- a portadora podia ficar presa na
+// frequencia antiga de forma nao deterministica. RF24::reUseTX() (chamada
+// internamente por startConstCarrier() em variantes "+") usa exatamente o
+// mesmo padrao ce(LOW) -> ... -> ce(HIGH) para reemitir com seguranca, o
+// que confirma que alternar CE em volta da escrita do canal e compativel
+// com REUSE_TX_PL/CONT_WAVE (o latch de REUSE_TX_PL so e limpo por
+// FLUSH_TX/W_TX_PAYLOAD, nunca por CE baixo, entao nao precisa ser
+// reemitido aqui). Retune deterministico: CE baixo -> RF_CH -> CE alto ->
+// dwell de assentamento.
+static void hopCarrier(RF24 &r, uint8_t channel)
+{
+    r.ce(LOW);
+    r.setChannel(channel);
+    r.ce(HIGH);
+    delayMicroseconds(PLL_DWELL_US);
+}
+
+static bool cmdMatches(const char *buf, const char *cmd)
+{
+    return strcasecmp(buf, cmd) == 0;
+}
+
+static void handleCommand(char *line)
+{
+    while (*line == ' ' || *line == '\t')
+        line++;
+
+    for (char *p = line; *p; p++)
+    {
+        if (*p >= 'A' && *p <= 'Z')
+            *p = (char)(*p - 'A' + 'a');
+    }
+
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t'))
+        line[--len] = '\0';
+
+    if (len == 0)
+        return;
+
+    if (cmdMatches(line, "mode sweep"))
+    {
+        g_mode = JAM_MODE_SWEEP;
+        tlm_event("jammer", "jam_mode_sweep");
+        guarded_println("[MODE] sweep");
+    }
+    else if (cmdMatches(line, "mode targeted"))
+    {
+        g_mode = JAM_MODE_TARGETED;
+        tlm_event("jammer", "jam_mode_targeted");
+        guarded_println("[MODE] targeted");
+    }
+    else if (cmdMatches(line, "mode adaptive"))
+    {
+        g_mode = JAM_MODE_ADAPTIVE;
+        g_adaptive_locked_idx = -1;
+        g_adaptive_scan_idx = 0;
+        tlm_event("jammer", "jam_mode_adaptive");
+        guarded_println("[MODE] adaptive");
+    }
+    // jammer-emission-hardware: "mode hold" (canal default) ou "mode hold <ch>"
+    else if (strncmp(line, "mode hold", 9) == 0)
+    {
+        int ch = (line[9]) ? atoi(line + 9) : g_hold_channel;
+        if (ch < 0 || ch > 125)
+            ch = g_hold_channel;
+        g_hold_channel = (uint8_t)ch;
+        g_mode = JAM_MODE_HOLD;
+        g_hold_last_rearm = 0; // forca re-arme/retune no proximo loop
+        tlm_printf("jammer", "jam_mode_hold", "ch=%u", g_hold_channel);
+        guarded_printf("[MODE] hold ch=%u\n", g_hold_channel);
+    }
+    else if (cmdMatches(line, "jam off"))
+    {
+        g_jam_enabled = false;
+        stopCarrier();
+    }
+    else if (cmdMatches(line, "jam on"))
+    {
+        g_jam_enabled = true;
+        guarded_println("[JAMMER] Habilitado (jam on) -- emissao retoma no proximo ciclo.");
+    }
+    else if (cmdMatches(line, "power min"))
+    {
+        g_jam_power = RF24_PA_MIN;
+        applyPowerLevel();
+        guarded_println("[JAMMER] Potencia: MIN");
+    }
+    else if (cmdMatches(line, "power low"))
+    {
+        g_jam_power = RF24_PA_LOW;
+        applyPowerLevel();
+        guarded_println("[JAMMER] Potencia: LOW");
+    }
+    else if (cmdMatches(line, "power high"))
+    {
+        g_jam_power = RF24_PA_HIGH;
+        applyPowerLevel();
+        guarded_println("[JAMMER] Potencia: HIGH");
+    }
+    else if (cmdMatches(line, "power max"))
+    {
+        g_jam_power = RF24_PA_MAX;
+        applyPowerLevel();
+        guarded_println("[JAMMER] Potencia: MAX");
+    }
+    else if (!g_jammer_unknown_cmd_sink || !g_jammer_unknown_cmd_sink(line))
+    {
+        guarded_printf("[ERRO] comando desconhecido: %s\n", line);
+    }
+}
+
+static void processSerial()
+{
+    while (Serial.available())
+    {
+        char c = (char)Serial.read();
+
+        if (c == '\n' || c == '\r')
+        {
+            if (cmdLen > 0)
+            {
+                cmdBuf[cmdLen] = '\0';
+                handleCommand(cmdBuf);
+                cmdLen = 0;
+            }
+            continue;
+        }
+
+        if (cmdLen < CMD_BUF_SIZE - 1)
+            cmdBuf[cmdLen++] = c;
+        else
+            cmdLen = 0;
+    }
+}
+
+static void jammer_setup()
+{
+    Serial.begin(115200);
+    delay(1000);
+
+    g_combined_mode = (g_jammer_ready_source != nullptr);
+    // Placa combinada: nao emitir por padrao ate um "jam on"/"mode ..."
+    // explicito, e em potencia baixa -- PA_MAX a centimetros do escravo
+    // (docs/pinout.md) satura o receptor na banda inteira, destruindo a
+    // premissa de "escapar para um canal livre".
+    if (g_combined_mode)
+    {
+        g_jam_enabled = false;
+        g_jam_power = RF24_PA_LOW;
+    }
+
+    guarded_println("\n\n=== JAMMER BLUETOOTH (CW) — TESTE CELULAR + FONE ===");
+    guarded_println("Faixa: 2402–2480 MHz | NRF24 ch 2–80");
+#if JAMMER_SPECTRUM_TEST
+    guarded_printf("Modo: SPECTRUM_TEST | Dwell: %u us/canal (heatmap)\n", PLL_DWELL_US);
+#else
+    guarded_printf("Modo: NORMAL | Dwell: %u us/canal\n", PLL_DWELL_US);
+#endif
+
+    hspi.begin(PIN_SCK_HSPI, PIN_MISO_HSPI, PIN_MOSI_HSPI, PIN_CSN_HSPI);
+
+    if (g_combined_mode)
+    {
+        // Um único rádio, no HSPI -- o barramento VSPI desta placa
+        // pertence ao escravo (two-board-topology seção 7).
+        jammer_radio.begin(&hspi, PIN_CE_HSPI, PIN_CSN_HSPI);
+        has_radio2 = false;
+
+        if (!jammer_radio.isChipConnected())
+            guarded_println("[ERRO] Radio (HSPI) nao detectado. Verifique fiação e 3.3V.");
+
+        configureJammerRadio(jammer_radio);
+        guarded_println("[OK] 1 radio (HSPI, placa combinada): varredura completa 2–80");
+    }
+    else
+    {
+        vspi.begin(PIN_SCK_VSPI, PIN_MISO_VSPI, PIN_MOSI_VSPI, PIN_CSN_VSPI);
+
+        jammer_radio.begin(&vspi, PIN_CE_VSPI, PIN_CSN_VSPI);
+        jammer_radio2.begin(&hspi, PIN_CE_HSPI, PIN_CSN_HSPI);
+        has_radio2 = jammer_radio2.isChipConnected();
+
+        if (!jammer_radio.isChipConnected())
+            guarded_println("[ERRO] Radio 1 (VSPI) nao detectado. Verifique fiação e 3.3V.");
+
+        configureJammerRadio(jammer_radio);
+        if (has_radio2)
+        {
+            configureJammerRadio(jammer_radio2);
+            guarded_println("[OK] 2 radios: faixa dividida (2–41 e 41–80 MHz)");
+        }
+        else
+        {
+            guarded_println("[OK] 1 radio: varredura completa 2–80");
+        }
+    }
+
+    tlm_event("jammer", "boot");
+    // jammer-emission-check 3.1: dump dos registradores + variante do(s)
+    // radio(s) no boot, pra comparar isPVariant()/RF_SETUP contra o
+    // criterio de emissao real medido na tarefa 2 (design.md).
+    tlm_radio_regs("jammer", jammer_radio, "boot");
+    if (has_radio2)
+        tlm_radio_regs("jammer", jammer_radio2, "boot_r2");
+    tlm_printf("jammer", "variant", "p=%d;p2=%d;radios=%d",
+               jammer_radio.isPVariant(),
+               has_radio2 ? jammer_radio2.isPVariant() : -1,
+               has_radio2 ? 2 : 1);
+
+    if (!g_jam_enabled)
+    {
+        guarded_println("[JAMMER] Desabilitado no boot (placa combinada). Envie 'jam on' para habilitar.");
+    }
+    else if (g_jammer_ready_source)
+    {
+        guarded_println("[JAMMER] Aguardando handshake mestre/escravo antes de emitir...");
+    }
+    else
+    {
+        startCarrier();
+    }
+}
+
+static void loopSweep()
+{
+    static uint8_t ch_fwd = BT_CH_MIN;
+    static uint8_t ch_rev = BT_CH_MAX;
+
+    if (has_radio2)
+    {
+        hopCarrier(jammer_radio, ch_fwd);
+        hopCarrier(jammer_radio2, ch_rev);
+
+        ch_fwd++;
+        if (ch_fwd > BT_CH_MID)
+            ch_fwd = BT_CH_MIN;
+
+        if (ch_rev <= BT_CH_MID)
+            ch_rev = BT_CH_MAX;
+        else
+            ch_rev--;
+    }
+    else
+    {
+        hopCarrier(jammer_radio, ch_fwd);
+
+        ch_fwd++;
+        if (ch_fwd > BT_CH_MAX)
+            ch_fwd = BT_CH_MIN;
+    }
+}
+
+static void loopTargeted()
+{
+    static uint8_t idx_fwd = 0;
+    static uint8_t idx_rev = TABLE_SIZE - 1;
+
+    const uint8_t fwd_limit = has_radio2 ? (TABLE_SIZE / 2) : TABLE_SIZE;
+
+    hopCarrier(jammer_radio, HOPPING_CHANNELS[idx_fwd]);
+    idx_fwd++;
+    if (idx_fwd >= fwd_limit)
+        idx_fwd = 0;
+
+    if (has_radio2)
+    {
+        hopCarrier(jammer_radio2, HOPPING_CHANNELS[idx_rev]);
+        if (idx_rev <= fwd_limit)
+            idx_rev = TABLE_SIZE - 1;
+        else
+            idx_rev--;
+    }
+
+    delay(JAM_TARGETED_HOLD_MS);
+}
+
+// Sai do modo de portadora constante (que não permite recepção -- é um
+// registro de teste dedicado do NRF24) para sensoriar RPD por energia em
+// `channel`, depois volta a emitir. Interrupção breve e deliberada,
+// aceitável para o propósito de sensoriamento do modo adaptativo -- mesma
+// técnica (testCarrier() após settle) já validada no analisador
+// (measureChannel()) e no mestre (measure_and_pick_candidate()).
+static bool senseChannel(uint8_t channel)
+{
+    jammer_radio.stopConstCarrier();
+    jammer_radio.setChannel(channel);
+    jammer_radio.startListening();
+
+    int hits = 0;
+    for (uint32_t s = 0; s < ADAPTIVE_SENSE_SAMPLES; s++)
+    {
+        delayMicroseconds(PLL_DWELL_US);
+        if (jammer_radio.testCarrier())
+            hits++;
+    }
+
+    jammer_radio.stopListening();
+    jammer_radio.startConstCarrier(g_jam_power, channel);
+    return hits > 0;
+}
+
+// targeted-jammer (2026-09-24): modo "adaptive" -- sensoria os 16
+// HOPPING_CHANNELS procurando atividade real; ao encontrar, trava e
+// concentra a emissão ali (revalidando a cada ADAPTIVE_RECHECK_MS) em vez
+// de repartir tempo igual entre canais ociosos e ocupados como o
+// round-robin de loopTargeted() faz. Se o canal travado ficar quieto (o
+// enlace escapou ou nunca era o certo), solta e volta a escanear. Só
+// jammer_radio (ver comentário em g_adaptive_locked_idx acima).
+static void loopAdaptive()
+{
+    unsigned long now = millis();
+
+    if (g_adaptive_locked_idx >= 0)
+    {
+        uint8_t ch = HOPPING_CHANNELS[g_adaptive_locked_idx];
+        if (now - g_adaptive_last_recheck >= ADAPTIVE_RECHECK_MS)
+        {
+            g_adaptive_last_recheck = now;
+            if (!senseChannel(ch))
+            {
+                tlm_printf("jammer", "adaptive_release", "ch=%u", ch);
+                g_adaptive_locked_idx = -1;
+                return;
+            }
+        }
+        return; // continua emitindo no canal travado (portadora já ligada nele)
+    }
+
+    uint8_t ch = HOPPING_CHANNELS[g_adaptive_scan_idx];
+    if (senseChannel(ch))
+    {
+        g_adaptive_locked_idx = (int8_t)g_adaptive_scan_idx;
+        g_adaptive_last_recheck = now;
+        tlm_printf("jammer", "adaptive_lock", "ch=%u", ch);
+    }
+    else
+    {
+        g_adaptive_scan_idx = (uint8_t)((g_adaptive_scan_idx + 1) % TABLE_SIZE);
+    }
+}
+
+// jammer-emission-hardware: modo hold -- portadora PARADA em g_hold_channel.
+// Ao contrario de loopTargeted/loopSweep, nao troca de canal a cada iteracao;
+// so garante que a portadora esta no canal alvo e a re-arma periodicamente
+// (anti drop-out de clone Si24R1). Concentra 100% da energia num canal --
+// melhor caso para deteccao e para negacao de comunicacao.
+static void loopHold()
+{
+    unsigned long now = millis();
+    if (now - g_hold_last_rearm >= HOLD_REARM_MS)
+    {
+        g_hold_last_rearm = now;
+        // Re-arma a portadora com REINICIALIZACAO completa (powerUp+reconfig,
+        // ver startCarrierOn) -- em bancada, so reescrever CONT_WAVE nao bastou
+        // para o clone que ja tinha degradado; o reinit completo recupera.
+        startCarrierOn(jammer_radio, g_hold_channel);
+    }
+    else
+    {
+        // Entre re-armes, so assegura o canal (retune deterministico via
+        // hopCarrier: CE baixo -> RF_CH -> CE alto -> dwell).
+        hopCarrier(jammer_radio, g_hold_channel);
+    }
+}
+
+static void jammer_loop()
+{
+    static unsigned long last_print = 0;
+
+    processSerial(); // mantém comandos (mode/jam/power) sendo aceitos mesmo em espera
+
+    if (!g_jam_enabled)
+    {
+        if (g_carrier_started)
+            stopCarrier();
+        return;
+    }
+
+    if (!g_carrier_started)
+    {
+        if (g_jammer_ready_source && !g_jammer_ready_source())
+            return; // ainda esperando o handshake mestre/escravo
+
+        startCarrier();
+    }
+
+    if (g_mode == JAM_MODE_TARGETED)
+        loopTargeted();
+    else if (g_mode == JAM_MODE_ADAPTIVE)
+        loopAdaptive();
+    else if (g_mode == JAM_MODE_HOLD)
+        loopHold();
+    else
+        loopSweep();
+
+    if (millis() - last_print >= 1000)
+    {
+        last_print = millis();
+        guarded_print('.');
+    }
+}
+
+#endif // JAMMER_NODE_H
