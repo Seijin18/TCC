@@ -61,11 +61,61 @@
 
 ---
 
-### Resultado (preencher ao rodar)
+### Resultado de bancada (2026-09-26) — parcial, com achados que reorientam
 
-- Soak sem jammer pós-re-derivação (loss / throughput):
-- Cadência de hop sob jamming (mediana / cauda) antes vs depois:
-- `resync_park` sob `hold` antes (12/75s) vs depois:
-- Tempo até banir ch10 antes (~36 s) vs depois:
-- Retenção C sob `hold` antes (25%) vs depois:
-- Bateria adaptive:
+Hardware: placa_a (mestre+analisador), placa_b (escravo+jammer). Wi-Fi real
+ativo. Jammer `hold ch10` PA_MAX.
+
+**Achado 1 — o casamento de fase, não o counter, é o gargalo sem relógio.**
+Janelas casadas de 30 ms nos dois lados (o desenho original) deram **65% de
+miss uniforme em TODOS os canais, em rajadas**, sem jammer. Causa: o escravo
+avança por EVENTO no RX (reancora a fase), mas o mestre só avança depois do ack
++ ~4 telemetrias que disputam o mutex com o analisador → lead de ~15-20 ms de
+jitter; numa janela de 30 ms isso estoura e o escravo avança na frente →
+rajada de miss. **Multi-send DENTRO da janela piorou** (perda contínua): cada
+reenvio é mais uma chance de o escravo avançar cedo num envio cujo ack se
+perde, enquanto o mestre ainda está no canal velho → dessincroniza.
+
+**Correção que passou o gate sem jammer:** janela de escuta do escravo MAIOR
+que a do mestre (`ESCRAVO_LISTEN_MS`=60 vs `ATTEMPT_TIMEOUT_MS`=30). O caminho
+de sucesso continua por evento (rápido); a janela larga só absorve o lead do
+mestre quando o escravo ESPERA. Resultado (soak `session-20260925-230940`,
+~100 s): **0 `loss_of_sync`** (inclui o startup, que as versões casadas não
+passavam), miss 4-49% (varia, margem melhor mas não perfeita), `msg_done`
+4-8,6/s (par com o baseline antigo ~4,4-4,9/s), latência p50=14 ms. GATE
+SEM-JAMMER: **PASSOU** (0 loss, throughput mantido).
+
+**Achado 2 — sob `hold` PA_MAX a retenção é limitada por DESSENSIBILIZAÇÃO de
+banda larga, e a nova cadência REGREDIU a retenção.** Bateria
+`battery-20260926-021206` vs a antiga `battery-20260925-165233` (mesmo modo
+hold/PA_MAX), retenção = `msg_done/s` jamming / baseline:
+
+| Cenário | ANTES (pré-change) | DEPOIS (v3) |
+|---|---|---|
+| A (sem hopping) | 0% | 0% |
+| B (FHSS, sem mitigação) | 8% | 4% |
+| C (mitigação completa) | **16%** | **7%** |
+
+Detalhe do C sob jamming: a portadora PA_MAX no ch10 (2410 MHz)
+**dessensibiliza o front-end do NRF24 em banda larga** — canais PRÓXIMOS em
+frequência (15, 22, 27, 46, 100, 110) dão 100% de miss, canais LONGE (125,
+105, 94, 82) ainda passam parcialmente. O ch10 é banido cedo e some. A
+blacklist então **super-bane** (máscara cai para 2-4 canais ativos de 16),
+porque muitos canais realmente falham (desense), não só o atacado. Bane o
+certo E os vizinhos mortos → sobram poucos canais → throughput baixo. Bate com
+a memória `project_rf_status` ("hold 1 canal nega ~95-100% de FHSS; blacklist
+recupera só ~17%").
+
+**Hipótese da regressão 16%→7%:** a cadência ~7x mais rápida faz a atribuição/
+ban dispararem ~7x mais rápido (mais visitas/s aos canais que parecem ruins sob
+desense), super-banindo mais agressivo que o sistema antigo mais lento — apesar
+de `MASK_HYSTERESIS_HOPS` ter sido re-derivado. As constantes de blacklist
+foram re-derivadas por EQUIVALÊNCIA DE TEMPO, mas sob desense a dinâmica é por
+VISITA, e visitas/s subiram ~7x. Re-tuning da blacklist para a nova cadência
+(ou distinguir desense de jamming pontual) é o próximo passo — território de
+`jamming-mitigation-hardening`, que este change deveria destravar.
+
+**Pendente / decisão do usuário:** (a) confirmar se 16%→7% é regressão real ou
+variância de desense entre runs (re-rodar); (b) re-tunar blacklist p/ a cadência
+rápida (anti-super-ban); (c) testar em PA menor, onde a desense é localizada e a
+blacklist pode de fato ajudar; (d) bateria `adaptive`. Não arquivar até resolver.

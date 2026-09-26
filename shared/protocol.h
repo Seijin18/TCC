@@ -173,7 +173,24 @@ static const uint32_t HOP_START_DELAY_MS = 900;
 // cada slot/evento independente do ACK (lockstep) e a confiabilidade fica
 // num layer separado (ARQN+SEQN). Aqui o SEQN e o (msg_id, fragment_index)
 // deduplicado por received_bitmap no escravo.
+// hop-ack-decoupling: janela que o MESTRE espera o ack de um unico envio antes
+// de avancar de canal (retransmitindo o fragmento no proximo, onde o escravo
+// esta). Curta de proposito -- num canal jammed o mestre abandona rapido, em
+// vez de queimar 220 ms (causa do teto de 25%). ~30 ms >> latencia tipica de
+// ack (~14 ms medido).
 static const uint32_t ATTEMPT_TIMEOUT_MS = 30;
+// hop-ack-decoupling: janela de escuta por hop do ESCRAVO. MAIOR que a do
+// mestre de proposito. O escravo avanca de canal por EVENTO (assim que recebe
+// -- escravo_advance_hop() reancora a fase a cada RX), entao sob enlace normal
+// ele quase nunca chega a este timeout e a cadencia de sucesso e rapida do
+// mesmo jeito. Esta janela larga so entra em acao quando o escravo ESPERA um
+// mestre atrasado: o escravo dispara o avanco no RX e o mestre so avanca depois
+// do ack + ~4 chamadas de telemetria (que disputam o mutex com o analisador),
+// entao o mestre chega com um lead de ~15-20 ms de jitter. Com a janela de 30 ms
+// casada dos dois lados, esse lead estourava a janela do escravo e ele avancava
+// na frente do mestre -> rajada de miss (medido: 65% de miss uniforme sem
+// jammer). Uma janela de escuta maior absorve o lead sem atrasar o sucesso.
+static const uint32_t ESCRAVO_LISTEN_MS = 60;
 static const uint32_t ACK_TIMEOUT_MS = 120;
 static const uint32_t SEED_WAIT_WINDOW_MS = 3000; // seed nao-bloqueante: janela na serial antes do default
 // pairing-handshake-hardening (D3, tarefa 3.5): com o handshake v2 a seed

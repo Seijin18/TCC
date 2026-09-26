@@ -1000,12 +1000,13 @@ static void escravo_loop()
     // rádios reinicializados). O comentário antigo aqui já afirmava
     // (incorretamente) que o `else` de recepção rodava nos dois casos; com
     // `timed_out` único isso finalmente é verdade.
-    // hop-ack-decoupling: a janela de escuta por hop cai de HOP_TIMEOUT_MS
-    // (220 ms, comportamento anterior) para ATTEMPT_TIMEOUT_MS (~30 ms) -- o
-    // escravo avanca na MESMA cadencia por-tentativa do mestre (lockstep sem
-    // relogio compartilhado). No RX valido ele ainda adota o hop_counter do
-    // pacote (correcao fina) e o received_bitmap deduplica retransmissoes.
-    bool timed_out = (millis() - channel_deadline_start >= ATTEMPT_TIMEOUT_MS);
+    // hop-ack-decoupling: janela de escuta por hop = ESCRAVO_LISTEN_MS (~60 ms),
+    // MAIOR que a janela do mestre (ATTEMPT_TIMEOUT_MS ~30 ms) de proposito --
+    // absorve o lead de fase do mestre (telemetria pesada apos o ack) sem
+    // atrasar o caminho de sucesso, que avanca por EVENTO (no RX valido, adota
+    // o hop_counter do pacote e o received_bitmap deduplica retransmissoes,
+    // reancorando a fase). Ver comentario de ESCRAVO_LISTEN_MS em protocol.h.
+    bool timed_out = (millis() - channel_deadline_start >= ESCRAVO_LISTEN_MS);
     if (timed_out && g_resync_parked)
     {
         // D2: nada válido chegou nesta janela -- conta 1 hop "virtual"

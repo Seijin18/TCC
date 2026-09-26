@@ -1255,16 +1255,18 @@ static void mestre_loop()
     FragmentPacket pkt;
     fill_fragment(pkt, g_current_fragment);
 
-    // hop-ack-decoupling: UMA tentativa por canal. Envia o fragmento corrente
-    // uma vez e espera o ack por ATTEMPT_TIMEOUT_MS -- acabou o reenvio no
-    // MESMO canal dentro de uma janela de 220 ms (comportamento anterior), que
-    // prendia o mestre num canal morto enquanto o escravo (que avancou ao
-    // receber o fragmento) ja estava no proximo. Sem ack: g_hop_counter avanca
-    // mesmo assim e o MESMO fragmento (g_current_fragment nao avanca sem ack)
-    // e reenviado no proximo canal -- onde o escravo esta -- mantendo os dois
-    // em lockstep. O escravo deduplica retransmissoes pelo received_bitmap.
-    // scenario-automation: latência = tempo entre a tentativa de envio deste
-    // fragmento neste hop e o ack recebido (round-trip de wait_fragment_ack).
+    // hop-ack-decoupling: UMA tentativa por canal (nao mais reenvio numa janela
+    // de 220 ms, que prendia o mestre num canal morto -- causa do teto de 25%).
+    // Envia o fragmento uma vez e espera o ack por ATTEMPT_TIMEOUT_MS. Sem ack:
+    // g_hop_counter avanca mesmo assim e o fragmento (g_current_fragment nao
+    // avanca sem ack) e reenviado no PROXIMO canal, onde o escravo esta -- o
+    // escravo deduplica pelo received_bitmap (SEQN). NAO se reenvia dentro da
+    // janela: cada reenvio e mais uma chance de o escravo avancar cedo (num
+    // envio cujo ack depois se perde) enquanto o mestre ainda esta no canal
+    // velho, o que DESSINCRONIZA (medido em bancada 2026-09-25: multi-send deu
+    // perda continua). O casamento de fase vem da janela de escuta LARGA do
+    // escravo (ESCRAVO_LISTEN_MS), que absorve o lead do mestre (telemetria
+    // pesada apos o ack), nao de varrer com reenvios.
     unsigned long attempt_started_at = millis();
     bool ack_ok = false;
     bool completed = false;

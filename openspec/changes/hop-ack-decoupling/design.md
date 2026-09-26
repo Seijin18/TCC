@@ -55,11 +55,16 @@ if (g_hops_since_ack >= LOSS_HOPS) reset_to_pairing();
 - Mantém o attribution gate de `jamming-mitigation-hardening` (só atribui falha
   isolada) e o `suspect_idx` do escravo.
 
-### 2. Escravo — janela curta, lockstep, dedup
-- Reduzir a escuta por hop de `HOP_TIMEOUT_MS` para `ATTEMPT_TIMEOUT_MS`
-  (~30 ms) — o escravo avança na mesma cadência do mestre. No RX válido, adota
-  `hop_counter` do pacote (correção fina) e re-acka; `received_bitmap` já evita
-  remontar duplicata.
+### 2. Escravo — janela de escuta LARGA (assimétrica), lockstep por evento, dedup
+- **Revisado após bancada (2026-09-26):** a escuta por hop NÃO é casada em 30 ms
+  com o mestre (`ATTEMPT_TIMEOUT_MS`) como planejado — isso deu 65% de miss por
+  falta de margem de fase (ver tasks.md, "Achado 1"). É `ESCRAVO_LISTEN_MS`
+  (~60 ms), MAIOR que a do mestre. O escravo avança por EVENTO no RX (adota
+  `hop_counter`, re-acka, `received_bitmap` deduplica, reancora a fase), então o
+  sucesso continua rápido; a janela larga só absorve o lead de fase do mestre
+  (telemetria pós-ack) quando o escravo ESPERA. Sem relógio compartilhado, é a
+  folga de fase que substitui o lockstep casado — o counter sozinho não basta.
+- NÃO reenviar dentro da janela (multi-send dessincroniza — ver "Achado 1").
 - `park` só como último recurso (ver item 4).
 
 ### 3. Constantes de contagem de hop — re-derivar para ~30 ms/hop
