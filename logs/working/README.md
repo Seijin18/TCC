@@ -37,6 +37,7 @@ end; horários do nome em UTC, das sessões em horário local UTC-3):
 
 | `session-20260925-013616.jsonl` | 600 s de soak sem nenhuma queda + bateria A/B/C | 2.913 no soak | **soak com `hop-permutation`** (02:16-02:26): 0 `loss_of_sync`, 41/41 resync; depois bateria `targeted` `battery-20260925-044627` (não reprodutível — ver `targeted-jammer` 3.2) |
 | `session-20260925-015833.jsonl` | 2 baterias A/B/C seguidas | — | **baterias reprodutíveis** após o retune do jammer (`battery-20260925-045843`/`-050631`): B e C sem nenhuma queda sob `targeted`, C com 8 máscaras aplicadas por rodada |
+| `session-20260926-001430.jsonl` | **soak ~145s (0 loss, 0 slip) + bateria A/B/C** | 2.900+ no soak | **`time-slotted-hopping` (commit 9329d4f)**: salto por TEMPO. Soak sem jammer: 0 `loss_of_sync`, 0 reanchor, miss 2-3%, 30ms/slot exato, ~19 msg/s. Bateria `battery-20260926-031714` (hold ch10 PA_MAX): retenção **C=83%, B=49%**, A=0% (vs 16/8/0 pré-change, 7/4/0 por-evento); fase C jamming 60s com 0 `loss_of_sync`/0 slip, máscara converge sem super-ban. ~17% residual = desense de banda larga do PA_MAX (hardware) |
 
 Baterias A/B/C (`battery-*.json`, fases com `scenario`; `.png` quando
 gerado): `battery-20260925-041711` (1ª, `targeted`; é a que mostra o
