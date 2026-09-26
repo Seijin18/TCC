@@ -170,8 +170,12 @@ static uint32_t g_resync_hop_before = 0;
 // (shared/resync.h) espera.
 static uint8_t g_resync_channel_ok[TABLE_SIZE] = {0};
 static uint8_t g_resync_channel_miss[TABLE_SIZE] = {0};
-static uint8_t g_resync_quality_hops = 0;
-static const uint8_t RESYNC_QUALITY_DECAY_HOPS = 64;
+// hop-ack-decoupling: re-derivado de 64 para 450 (~7x) para preservar a
+// janela de tempo de "historico recente" na cadencia de ~30 ms/hop. Como
+// 450 > 255, o contador precisa ser uint16_t (era uint8_t e saturaria antes
+// de alcancar o limiar).
+static uint16_t g_resync_quality_hops = 0;
+static const uint16_t RESYNC_QUALITY_DECAY_HOPS = 450;
 
 // ---- Seed ----
 // pairing-handshake-hardening: g_seed agora é adotado diretamente do campo
@@ -197,7 +201,10 @@ static uint32_t g_mask_apply_at = 0;
 static bool g_fixed_channel_mode = false;
 
 // ---- Métricas de PLR (Packet Loss Rate) ----
-static const uint32_t g_window_size = 50; // hops por janela (~11s a 220ms/hop)
+// hop-ack-decoupling: re-derivado de 50 para 350 (~7x), par com
+// THROUGHPUT_WINDOW_HOPS do mestre -- mesma janela de tempo de medicao na
+// cadencia de ~30 ms/hop.
+static const uint32_t g_window_size = 350; // hops por janela (~10,5s a ~30ms/hop sob jamming)
 static uint32_t g_window_expected = 0;
 static uint32_t g_window_received = 0;
 static uint32_t g_session_expected = 0;
@@ -417,7 +424,7 @@ static void escravo_setup()
 // Hopping por evento: chamado sempre que um "round" de escuta em
 // current_channel termina -- por sucesso (fragmento/controle recebido e
 // ackado, com `g_hop_received_flag`/`hop_counter` já atualizados pelo
-// chamador) ou por HOP_TIMEOUT_MS esgotado sem nada válido (fallback).
+// chamador) ou por ATTEMPT_TIMEOUT_MS esgotado sem nada válido (fallback).
 // Nos dois casos o efeito é o mesmo: contabiliza PLR desta rodada, avança
 // hop_counter em exatamente 1, escolhe e configura o próximo canal, e
 // reinicia o deadline de escuta dele.
@@ -969,7 +976,7 @@ static void escravo_loop()
     // fragmento/pacote de controle válido é recebido e ackado -- evento
     // de sucesso, ver as chamadas a escravo_advance_hop() dentro do bloco
     // de recepção abaixo, que resincronizam hop_counter a partir do valor
-    // recebido do mestre ANTES de avançar -- ou (b) HOP_TIMEOUT_MS esgota
+    // recebido do mestre ANTES de avançar -- ou (b) ATTEMPT_TIMEOUT_MS esgota
     // sem nada válido chegar neste canal (fallback logo abaixo: avança
     // mesmo assim, senão o escravo ficaria preso pra sempre esperando num
     // canal jamado).
@@ -993,7 +1000,12 @@ static void escravo_loop()
     // rádios reinicializados). O comentário antigo aqui já afirmava
     // (incorretamente) que o `else` de recepção rodava nos dois casos; com
     // `timed_out` único isso finalmente é verdade.
-    bool timed_out = (millis() - channel_deadline_start >= HOP_TIMEOUT_MS);
+    // hop-ack-decoupling: a janela de escuta por hop cai de HOP_TIMEOUT_MS
+    // (220 ms, comportamento anterior) para ATTEMPT_TIMEOUT_MS (~30 ms) -- o
+    // escravo avanca na MESMA cadencia por-tentativa do mestre (lockstep sem
+    // relogio compartilhado). No RX valido ele ainda adota o hop_counter do
+    // pacote (correcao fina) e o received_bitmap deduplica retransmissoes.
+    bool timed_out = (millis() - channel_deadline_start >= ATTEMPT_TIMEOUT_MS);
     if (timed_out && g_resync_parked)
     {
         // D2: nada válido chegou nesta janela -- conta 1 hop "virtual"

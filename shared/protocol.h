@@ -158,13 +158,22 @@ static const uint8_t PAIR_FAIL_THRESHOLD = 3;
 static const uint32_t PAIR_RECOVERY_ROUNDS = 12;
 
 static const uint32_t HOP_START_DELAY_MS = 900;
-// Hopping por evento (nao mais por relogio periodico fixo): mestre
-// reenvia o fragmento corrente e escravo escuta no canal corrente ate
-// UM dos dois acontecer primeiro -- confirmacao (ack recebido / fragmento
-// recebido e ackado) ou este timeout esgotar (fallback: avanca pro
-// proximo canal mesmo sem confirmacao, pra o enlace nao travar
-// indefinidamente num canal jamado). Ver mestre_loop()/escravo_loop().
-static const uint32_t HOP_TIMEOUT_MS = 220;
+// Hopping por evento (nao mais por relogio periodico fixo): o salto avanca a
+// cada TENTATIVA de transmissao, desacoplado do ACK (hop-ack-decoupling).
+// O mestre manda o fragmento corrente UMA vez no canal corrente e espera o
+// ack por ATTEMPT_TIMEOUT_MS; o escravo escuta o canal corrente por
+// ATTEMPT_TIMEOUT_MS. Um dos dois acontece primeiro -- confirmacao (ack
+// recebido / fragmento recebido e ackado) ou este timeout esgotar (avanca
+// pro proximo canal de qualquer jeito, e o fragmento nao-ackado e reenviado
+// no proximo canal, onde o escravo ja esta). Ver mestre_loop()/escravo_loop().
+//
+// hop-ack-decoupling: a cadencia de um MISS cai de ~220 ms (uma janela
+// inteira de reenvio no mesmo canal, comportamento anterior) para
+// ATTEMPT_TIMEOUT_MS (uma tentativa curta). Referencia: Bluetooth salta a
+// cada slot/evento independente do ACK (lockstep) e a confiabilidade fica
+// num layer separado (ARQN+SEQN). Aqui o SEQN e o (msg_id, fragment_index)
+// deduplicado por received_bitmap no escravo.
+static const uint32_t ATTEMPT_TIMEOUT_MS = 30;
 static const uint32_t ACK_TIMEOUT_MS = 120;
 static const uint32_t SEED_WAIT_WINDOW_MS = 3000; // seed nao-bloqueante: janela na serial antes do default
 // pairing-handshake-hardening (D3, tarefa 3.5): com o handshake v2 a seed
@@ -187,7 +196,10 @@ static const uint16_t SEED_DEFAULT = 42;
 // Perda de sincronismo: depois de LOSS_HOPS hops sem trafego/ACK valido, os
 // dois lados voltam ao estado de pareamento (mesma maquina de estados serve
 // o primeiro encontro e a recuperacao apos falha).
-static const uint32_t LOSS_HOPS = 25;
+// hop-ack-decoupling: re-derivado de 25 (@ ate 220 ms/hop = ~5,5 s) para
+// preservar o mesmo ORCAMENTO DE TEMPO na nova cadencia (~30 ms/hop):
+// 5,5 s / 0,030 s ~= 183 -> 180.
+static const uint32_t LOSS_HOPS = 180;
 
 // hop-resync (tarefa 1.1, design.md D1/D2): defasagem de 1 canal entre
 // mestre e escravo (ack perdido logo apos um fragmento recebido -- ver
@@ -199,19 +211,27 @@ static const uint32_t LOSS_HOPS = 25;
 // e o minimo que ainda deixa uma falha ISOLADA (recupera sozinha no proximo
 // hop, ver design.md "Mecanismo": caso "fragmento perdido") se resolver
 // antes de estacionar.
-static const uint8_t RESYNC_MISS_HOPS = 6;
+// hop-ack-decoupling (design.md item 4): com o lockstep por-tentativa, um
+// miss isolado nao desalinha mais (os dois lados avancam ATTEMPT_TIMEOUT_MS
+// juntos e o hop_counter no pacote corrige quando algo passa), entao o
+// estacionamento vira ULTIMO RECURSO: elevado de 6 para 45 -- so dispara
+// apos muitos hops secos CONSECUTIVOS (desalinhamento genuino e sustentado,
+// nao um canal jammed pontual).
+static const uint8_t RESYNC_MISS_HOPS = 45;
 // D2: estacionamento dura no maximo (TABLE_SIZE + 2) hops do mestre --
 // TABLE_SIZE cobre um ciclo completo do round-robin sobre a mascara de
 // canais ativa (o mestre passa pelo canal estacionado em no maximo
 // active_count <= TABLE_SIZE hops, ver get_next_active_channel() em
-// shared/hopping.h), +2 de folga.
-static const uint32_t RESYNC_PARK_MAX_MS = (uint32_t)(TABLE_SIZE + 2) * HOP_TIMEOUT_MS;
+// shared/hopping.h), +2 de folga. hop-ack-decoupling: um ciclo completo
+// agora custa ATTEMPT_TIMEOUT_MS por hop, nao HOP_TIMEOUT_MS.
+static const uint32_t RESYNC_PARK_MAX_MS = (uint32_t)(TABLE_SIZE + 2) * ATTEMPT_TIMEOUT_MS;
 
 // D2: orcamento verificado em compilacao -- a ressincronizacao completa
 // (hops ate estacionar + tempo estacionado) tem que terminar antes do
 // mestre desistir por LOSS_HOPS, senao o mestre re-pareia enquanto o
-// escravo ainda estaria tentando se recuperar sozinho.
-static_assert(RESYNC_MISS_HOPS * HOP_TIMEOUT_MS + RESYNC_PARK_MAX_MS < LOSS_HOPS * HOP_TIMEOUT_MS,
+// escravo ainda estaria tentando se recuperar sozinho. hop-ack-decoupling:
+// reexpresso em ATTEMPT_TIMEOUT_MS (a cadencia unica dos dois lados agora).
+static_assert(RESYNC_MISS_HOPS * ATTEMPT_TIMEOUT_MS + RESYNC_PARK_MAX_MS < LOSS_HOPS * ATTEMPT_TIMEOUT_MS,
               "orcamento de ressincronizacao (RESYNC_MISS_HOPS + estacionamento) precisa terminar antes do mestre declarar LOSS_HOPS");
 
 // dynamic-seed-blacklist
@@ -220,15 +240,24 @@ static_assert(RESYNC_MISS_HOPS * HOP_TIMEOUT_MS + RESYNC_PARK_MAX_MS < LOSS_HOPS
 // mestre/src/node.h), quase só o canal realmente jammed acumula falha, então
 // um limiar menor bane o atacante mais rápido (antes do enlace colapsar) sem
 // o risco antigo de banir canais inocentes por rajada de dessincronismo.
+// hop-ack-decoupling: MANTIDO em 3 (nao re-derivado). Ao contrario das
+// constantes de TEMPO acima, este limiar conta VISITAS ao canal ruim -- com
+// round-robin sobre ~16 canais, o canal jammed e visitado ~1x a cada 16
+// hops independentemente da cadencia, entao o numero de visitas ate banir e
+// o mesmo; so o TEMPO ate la cai ~7x (bane mais rapido, efeito desejado).
 static const uint8_t CHANNEL_FAIL_THRESHOLD = 3; // ban rapido; escravo (suspect_idx) da a evidencia limpa, attribution gate evita inocentes
 // blacklist-decay: hops que um canal precisa passar excluído antes de ser
 // reincluído às cegas (ver shared/hopping.h update_channel_mask() e
 // design.md "Cooldown por hop_counter"). Ordem de grandeza inicial, a
 // calibrar em bancada (openspec/changes/blacklist-decay/tasks.md 4.2) --
 // bem maior que CHANNEL_FAIL_THRESHOLD para não flappar.
-static const uint32_t RECOVERY_COOLDOWN_HOPS = 200;
-static const uint8_t CONTROL_RETRY_HOPS = 6;     // hops repetindo o pacote de controle ate confirmar
-static const uint8_t CONTROL_APPLY_MARGIN = 2;   // folga de hops entre confirmacao e troca efetiva
+// hop-ack-decoupling: re-derivado de 200 (@ ate 220 ms/hop ~= 44 s) para
+// preservar o mesmo TEMPO de cooldown na nova cadencia (~30 ms/hop):
+// ~44 s / 0,030 s ~= 1466 -> 1500. Sem isto, um canal jammed banido seria
+// reincluido as cegas ~7x mais rapido (churn de re-teste).
+static const uint32_t RECOVERY_COOLDOWN_HOPS = 1500;
+static const uint8_t CONTROL_RETRY_HOPS = 45;    // hops repetindo o controle (re-derivado de 6 @220ms p/ ~1,3s @30ms)
+static const uint8_t CONTROL_APPLY_MARGIN = 15;  // folga entre confirmacao e troca (re-derivado de 2 @220ms p/ ~450ms @30ms)
 
 // pairing-handshake-hardening (D3, tarefa 3.1): handshake de pareamento v2
 // -- substitui o LinkPacket de 1 byte (sem identificacao de sessao) e as

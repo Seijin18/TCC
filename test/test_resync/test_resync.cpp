@@ -36,7 +36,7 @@ static void test_should_park_respects_different_threshold(void)
 
 // --- resync_park_expired (D2) ----------------------------------------------
 
-static const uint32_t PARK_MAX_MS = 3960; // (TABLE_SIZE + 2) * HOP_TIMEOUT_MS, ver shared/protocol.h
+static const uint32_t PARK_MAX_MS = 540; // (TABLE_SIZE + 2) * ATTEMPT_TIMEOUT_MS, ver shared/protocol.h (hop-ack-decoupling)
 
 static void test_park_not_expired_before_limit(void)
 {

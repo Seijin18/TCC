@@ -399,7 +399,9 @@ static uint8_t g_rx_suspect_idx = SUSPECT_NONE;
 // por MASK_HYSTERESIS_HOPS hops -- tempo do enlace estabilizar antes de
 // reavaliar. Assim converge para banir só o canal atacado e fica estável.
 static uint32_t g_last_mask_change_hop = 0;
-static const uint32_t MASK_HYSTERESIS_HOPS = 16;
+// hop-ack-decoupling: re-derivado de 16 (@ ate 220 ms/hop ~= 3,5 s) para
+// preservar ~3,5 s de estabilizacao na nova cadencia (~30 ms/hop): 116 -> 112.
+static const uint32_t MASK_HYSTERESIS_HOPS = 112;
 
 // ---- dynamic-seed-blacklist: máscara de canais ativos e evidência própria ----
 static uint16_t g_channel_mask = 0xFFFF;
@@ -415,7 +417,12 @@ static bool g_reseed_needed = false;
 
 // scenario-automation: throughput (fragmentos confirmados/s) por janela de
 // hops -- mesmo padrão de janela de plr-metric (escravo, g_window_size).
-static const uint32_t THROUGHPUT_WINDOW_HOPS = 50;
+// hop-ack-decoupling: re-derivado de 50 para 350 (~7x), preservando a mesma
+// janela de tempo de medicao na cadencia de ~30 ms/hop (par com g_window_size
+// do escravo). ATTRIB_MAX_HOPS_SINCE_ACK fica em 1 (nao re-derivado): conta
+// misses ISOLADOS -- com lockstep, uma visita ao canal jammed ainda e 1 hop
+// sem ack, entao o gate de "perda isolada = 1 hop" continua correto.
+static const uint32_t THROUGHPUT_WINDOW_HOPS = 350;
 static uint32_t g_throughput_window_confirmed = 0;
 static uint32_t g_throughput_window_hops = 0;
 static unsigned long g_throughput_window_start_ms = 0;
@@ -1187,9 +1194,9 @@ static void mestre_loop()
     // openspec/changes/adaptive-rendezvous/design.md): cada chamada
     // daqui pra baixo faz UMA tentativa de hop completa (bloqueante),
     // que só termina por um dos dois motivos -- ack recebido (evento de
-    // sucesso) ou HOP_TIMEOUT_MS esgotado sem resposta (fallback: avança
-    // pro próximo canal mesmo assim, senão o enlace travaria pra sempre
-    // num canal jamado). Não há mais nenhum relógio livre (`g_last_hop_time`)
+    // sucesso) ou ATTEMPT_TIMEOUT_MS esgotado sem resposta (fallback: avança
+    // pro próximo canal mesmo assim -- e o fragmento não-ackado é reenviado lá,
+    // hop-ack-decoupling -- senão o enlace travaria num canal jamado). Não há mais nenhum relógio livre (`g_last_hop_time`)
     // rodando contra o wall-clock -- o único estado que precisa concordar
     // entre mestre e escravo é `g_hop_counter`/`hop_counter` (um inteiro,
     // não um instante de tempo), e ele só muda por evento explícito dos
@@ -1248,33 +1255,28 @@ static void mestre_loop()
     FragmentPacket pkt;
     fill_fragment(pkt, g_current_fragment);
 
-    // Reenvia o mesmo fragmento a cada attempt_wait_ms até um dos dois:
-    // ack chega (sai do while por "break"), ou HOP_TIMEOUT_MS deste
-    // canal esgota (fallback abaixo, any_sent decide se foi por falha de
-    // envio ou por falta de ack).
-    unsigned long hop_window_end = millis() + HOP_TIMEOUT_MS;
-    // scenario-automation: latência = tempo entre a primeira tentativa de
-    // envio deste fragmento neste hop e o ack recebido (round-trip de
-    // wait_fragment_ack, incluindo reenvios dentro do próprio hop).
+    // hop-ack-decoupling: UMA tentativa por canal. Envia o fragmento corrente
+    // uma vez e espera o ack por ATTEMPT_TIMEOUT_MS -- acabou o reenvio no
+    // MESMO canal dentro de uma janela de 220 ms (comportamento anterior), que
+    // prendia o mestre num canal morto enquanto o escravo (que avancou ao
+    // receber o fragmento) ja estava no proximo. Sem ack: g_hop_counter avanca
+    // mesmo assim e o MESMO fragmento (g_current_fragment nao avanca sem ack)
+    // e reenviado no proximo canal -- onde o escravo esta -- mantendo os dois
+    // em lockstep. O escravo deduplica retransmissoes pelo received_bitmap.
+    // scenario-automation: latência = tempo entre a tentativa de envio deste
+    // fragmento neste hop e o ack recebido (round-trip de wait_fragment_ack).
     unsigned long attempt_started_at = millis();
-    const uint32_t attempt_wait_ms = 25;
     bool ack_ok = false;
     bool completed = false;
     bool any_sent = false;
 
-    while (millis() + attempt_wait_ms < hop_window_end)
+    mestre_radio.stopListening();
+    bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));
+    mestre_radio.startListening();
+    if (sent)
     {
-        mestre_radio.stopListening();
-        bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));
-        mestre_radio.startListening();
-
-        if (sent)
-        {
-            any_sent = true;
-            ack_ok = wait_fragment_ack(g_current_fragment, completed, attempt_wait_ms);
-            if (ack_ok)
-                break;
-        }
+        any_sent = true;
+        ack_ok = wait_fragment_ack(g_current_fragment, completed, ATTEMPT_TIMEOUT_MS);
     }
 
     if (!any_sent)
