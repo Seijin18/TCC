@@ -112,10 +112,12 @@ def main():
     labels = battery.get("scenario_labels", {})
     by_scenario = phases_by_scenario(battery)
 
-    fig, (ax_thr, ax_lat, ax_bar) = plt.subplots(3, 1, figsize=(11, 12), sharex=False)
+    fig, (ax_thr, ax_ack, ax_lat, ax_bar) = plt.subplots(4, 1, figsize=(11, 16), sharex=False)
     # jamming-mitigation-hardening: métricas por fase (baseline/jamming/
     # recovery) por cenário, para o painel de barras e a taxa de sobrevivência.
-    per_phase_thr = {}  # scenario -> {phase: mean throughput}
+    per_phase_thr = {}  # scenario -> {phase: mean throughput (telemetria frags/s)}
+    per_phase_acks = {}  # scenario -> {phase: total de ACKs recebidos}
+    per_phase_ackrate = {}  # scenario -> {phase: ACKs/s (contagem direta, confiável)}
 
     print("=" * 78)
     print(f"Bateria comparativa: {path}")
@@ -133,8 +135,14 @@ def main():
 
         thr = [(d["epoch"] - t_start, float(d["fields"]["frags_per_s"]))
                for d in events if d.get("src") == "mestre" and d.get("event") == "throughput" and "frags_per_s" in d.get("fields", {})]
+        # latência: event-driven emite num evento "latency" separado; time-slotted
+        # embute "ms" no próprio "ack". Lê dos dois pra funcionar nas duas variantes.
         lat = [(d["epoch"] - t_start, float(d["fields"]["ms"]))
-               for d in events if d.get("src") == "mestre" and d.get("event") == "latency" and "ms" in d.get("fields", {})]
+               for d in events if d.get("src") == "mestre" and d.get("event") in ("latency", "ack") and "ms" in d.get("fields", {})]
+        # ACKs recebidos (um por fragmento confirmado) -- para o painel de acks/s
+        # e a contagem por fase. src=mestre, event=ack nas duas variantes.
+        acks = [(d["epoch"] - t_start) for d in events
+                if d.get("src") == "mestre" and d.get("event") == "ack"]
         plr = [(d["epoch"], float(d["fields"]["window"]))
                for d in events if d.get("src") == "escravo" and d.get("event") == "plr" and "window" in d.get("fields", {})]
 
@@ -162,10 +170,23 @@ def main():
             xs, ys = zip(*sorted(lat))
             ax_lat.scatter(xs, ys, s=6, color=color, alpha=0.5, label=label)
 
+        # ACKs/s ao longo do tempo: bina os eventos de ack em janelas de 2s.
+        if acks:
+            BIN = 2.0
+            tmax = max(acks)
+            nb = int(tmax // BIN) + 1
+            counts = [0] * nb
+            for t in acks:
+                counts[int(t // BIN)] += 1
+            axk = [i * BIN + BIN / 2 for i in range(nb)]
+            ayk = [c / BIN for c in counts]
+            ax_ack.plot(axk, ayk, marker="o", markersize=3, color=color, label=label)
+
         jam_start = named.get("jamming")
         jam_end = named.get("recovery")
         if jam_start is not None and jam_end is not None:
             ax_thr.axvspan(jam_start - t_start, jam_end - t_start, color=color, alpha=0.05)
+            ax_ack.axvspan(jam_start - t_start, jam_end - t_start, color=color, alpha=0.05)
             ax_lat.axvspan(jam_start - t_start, jam_end - t_start, color=color, alpha=0.05)
 
             plr_during_jam = [v for ep, v in plr if jam_start <= ep <= jam_end]
@@ -176,15 +197,29 @@ def main():
         # throughput médio por fase (para o painel de barras + taxa de sobrevivência)
         wins = phase_windows(phases)
         ph_means = {}
+        ph_acks = {}
+        ph_ackrate = {}
         for ph_name, (ws, we) in wins.items():
             vals = [y for (ep, y) in [(t + t_start, y) for (t, y) in thr] if ws <= ep < we]
             ph_means[ph_name] = mean(vals)
+            # total de ACKs recebidos na fase (contagem absoluta) e taxa (acks/s).
+            n = sum(1 for t in acks if ws <= (t + t_start) < we)
+            ph_acks[ph_name] = n
+            dur = (we - ws)
+            ph_ackrate[ph_name] = (n / dur) if dur and dur < 1e8 else 0.0
         per_phase_thr[scenario] = ph_means
+        per_phase_acks[scenario] = ph_acks
+        per_phase_ackrate[scenario] = ph_ackrate
 
     ax_thr.set_ylabel("throughput (fragmentos confirmados/s)")
     ax_thr.set_title("Throughput × tempo (relativo ao início da baseline de cada cenário)")
     ax_thr.grid(alpha=0.3)
     ax_thr.legend(loc="upper right", fontsize=8)
+
+    ax_ack.set_ylabel("ACKs recebidos/s")
+    ax_ack.set_title("ACKs recebidos × tempo (janela de 2 s; total por fase no resumo)")
+    ax_ack.grid(alpha=0.3)
+    ax_ack.legend(loc="upper right", fontsize=8)
 
     ax_lat.set_ylabel("latência por fragmento (ms)")
     ax_lat.set_xlabel("tempo (s, desde o início da baseline do cenário)")
@@ -192,7 +227,12 @@ def main():
     ax_lat.grid(alpha=0.3)
     ax_lat.legend(loc="upper right", fontsize=8)
 
-    # -------- Painel de barras: throughput médio por fase, por cenário -------
+    # -------- Painel de barras: ACKs/s médio por fase, por cenário -------
+    # Usa a TAXA DE ACKS (contagem direta), não a telemetria de throughput: sob
+    # colapso, a janela de throughput do firmware (350 hops) atravessa a baseline
+    # e reporta uma taxa de jamming falsamente alta (ex.: event-driven cenário A
+    # aparentava ~48% quando só houve ~11 acks). A contagem de acks é confiável
+    # nas duas variantes.
     phase_order = ["baseline", "jamming", "recovery"]
     phase_labels = {"baseline": "baseline\n(sem jammer)", "jamming": "jamming\n(hold PA_MAX)", "recovery": "recovery\n(jammer off)"}
     import numpy as np
@@ -200,25 +240,23 @@ def main():
     nscen = max(len(scenarios), 1)
     width = 0.8 / nscen
     for i, scenario in enumerate(scenarios):
-        ph = per_phase_thr.get(scenario, {})
-        vals = [ph.get(p, float("nan")) for p in phase_order]
-        vals = [0.0 if (v != v) else v for v in vals]  # NaN->0 para a barra
+        ph = per_phase_ackrate.get(scenario, {})
+        vals = [ph.get(p, 0.0) for p in phase_order]
         offs = x + (i - (nscen - 1) / 2) * width
-        bars = ax_bar.bar(offs, vals, width, color=SCENARIO_COLOR.get(scenario, "gray"),
-                          label=f"{scenario}: {labels.get(scenario, '')[:38]}")
-        # taxa de sobrevivência sob jamming (jamming/baseline) anotada na barra de jamming.
-        # jam ausente (NaN) = colapso total (0 throughput) -> "0%".
+        ax_bar.bar(offs, vals, width, color=SCENARIO_COLOR.get(scenario, "gray"),
+                   label=f"{scenario}: {labels.get(scenario, '')[:38]}")
+        # taxa de sobrevivência sob jamming (acks/s jamming ÷ baseline).
         base = ph.get("baseline")
         jam = ph.get("jamming")
         if base and base > 0:
-            ret = (100.0 * jam / base) if (jam is not None and jam == jam) else 0.0
-            ax_bar.annotate(f"{ret:.0f}%", (offs[1], vals[1]), textcoords="offset points",
+            surv = 100.0 * (jam or 0.0) / base
+            ax_bar.annotate(f"{surv:.0f}%", (offs[1], vals[1]), textcoords="offset points",
                             xytext=(0, 3), ha="center", fontsize=9, fontweight="bold",
                             color=SCENARIO_COLOR.get(scenario, "gray"))
     ax_bar.set_xticks(x)
     ax_bar.set_xticklabels([phase_labels[p] for p in phase_order])
-    ax_bar.set_ylabel("throughput médio (frag/s)")
-    ax_bar.set_title("Throughput médio por fase (%=taxa de sobrevivência sob jamming vs baseline do cenário)")
+    ax_bar.set_ylabel("ACKs recebidos/s (médio)")
+    ax_bar.set_title("ACKs/s por fase (%=taxa de sobrevivência sob jamming vs baseline do cenário)")
     ax_bar.grid(alpha=0.3, axis="y")
     ax_bar.legend(loc="upper right", fontsize=8)
 
@@ -244,6 +282,13 @@ def main():
         ret = (100.0 * jam_disp / base) if (base and base > 0) else float("nan")
         print(f"{scenario:<8} {base:>10.2f} {jam_disp:>10.2f} {recov:>10.2f} {ret:>12.0f}% "
               f"{plr_by.get(scenario, float('nan')):>10.1f} {lat_by.get(scenario, float('nan')):>11.1f}")
+    # jamming-mitigation-hardening / time-slotted: total de ACKs recebidos por
+    # fase e cenário (contagem absoluta) -- "quantas mensagens/fragmentos foram
+    # confirmados em cada cenário".
+    print(f"\n{'Cenário':<8} {'ACKs base':>10} {'ACKs jam':>10} {'ACKs recov':>11}")
+    for scenario in scenarios:
+        a = per_phase_acks.get(scenario, {})
+        print(f"{scenario:<8} {a.get('baseline', 0):>10} {a.get('jamming', 0):>10} {a.get('recovery', 0):>11}")
     print(
         "\nLeitura: A (sem hopping) deve colapsar sob o hold no canal fixo; B (hopping "
         "sem mitigação) sofre o dessincronismo; C (mitigação on) deve reter mais que B. "
