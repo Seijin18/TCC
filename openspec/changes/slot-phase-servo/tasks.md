@@ -1,26 +1,26 @@
 ## 1. Lógica pura
 
-- [ ] 1.1 `shared/time_sync.h`: estado do servo + `phase_servo_update()`
+- [x] 1.1 `shared/time_sync.h`: estado do servo + `phase_servo_update()`
       (filtro EMA, passo de 1 ms, limite de taxa, guardas D5).
-- [ ] 1.2 `test/test_time_sync/`: convergência sob ±50 ppm por 30 min
+- [x] 1.2 `test/test_time_sync/`: convergência sob ±50 ppm por 30 min
       simulados, passo/taxa limitados, ruído ±2 ms sem correção espúria,
       amostra ≥ meio slot ignorada, desligamento por divergência.
 
 ## 2. Protocolo
 
-- [ ] 2.1 `FragmentPacket.slot_phase_ms` + `static_assert` de tamanho ≤ 32.
-- [ ] 2.2 Mestre: preencher `slot_phase_ms` imediatamente antes de cada
+- [x] 2.1 `FragmentPacket.slot_phase_ms` + `static_assert` de tamanho ≤ 32.
+- [x] 2.2 Mestre: preencher `slot_phase_ms` imediatamente antes de cada
       `radio_send()` do fragmento.
 
 ## 3. Escravo
 
-- [ ] 3.1 A cada `FragmentPacket` válido: calcular `e`, alimentar o servo,
+- [x] 3.1 A cada `FragmentPacket` válido: calcular `e`, alimentar o servo,
       aplicar o ajuste em `hop_start_at`.
-- [ ] 3.2 `e_alvo` a partir das primeiras amostras depois de `time_sync`;
+- [x] 3.2 `e_alvo` a partir das primeiras amostras depois de `time_sync`;
       zerar o estado do servo em `reset_to_scanning()`.
-- [ ] 3.3 Telemetria `e=phase;err=..;adj=..;n=..` a cada ~5 s;
+- [x] 3.3 Telemetria `e=phase;err=..;adj=..;n=..` a cada ~5 s;
       `state=disabled` se a guarda disparar.
-- [ ] 3.4 Logger: último `phase` em `state.json`.
+- [x] 3.4 Logger: último `phase` em `state.json`.
 
 ## 4. Validação em bancada
 

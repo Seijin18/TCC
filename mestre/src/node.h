@@ -10,6 +10,7 @@
 #include "../../shared/hopping.h"
 #include "../../shared/control_policy.h"
 #include "../../shared/protocol.h"
+#include "../../shared/time_sync.h"
 #include "../../shared/pairing.h"
 #include "../../shared/telemetry.h"
 #include "../../shared/radio_diag.h"
@@ -1225,6 +1226,10 @@ static void mestre_loop()
 
         FragmentPacket pkt;
         fill_fragment(pkt, g_current_fragment);
+        // slot-phase-servo: a ancora do mestre so e fixada quando o ack chega
+        // (abaixo), entao ainda nao ha fase de slot a informar -- o escravo
+        // ignora PHASE_UNKNOWN e captura o alvo do servo nos pacotes seguintes.
+        pkt.slot_phase_ms = PHASE_UNKNOWN;
         mestre_radio.stopListening();
         bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));
         mestre_radio.startListening();
@@ -1307,6 +1312,10 @@ static void mestre_loop()
         {
             FragmentPacket pkt;
             fill_fragment(pkt, g_current_fragment);
+            // slot-phase-servo: posicao do mestre neste slot, medida o mais
+            // perto possivel do envio (o escravo rastreia a deriva sub-slot
+            // por ela -- ver shared/time_sync.h).
+            pkt.slot_phase_ms = phase_in_slot_ms(millis(), g_hop_start_at, slot);
             mestre_radio.stopListening();
             bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));
             mestre_radio.startListening();

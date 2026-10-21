@@ -8,6 +8,7 @@
 #include <string.h>
 #include "../../shared/hopping.h"
 #include "../../shared/protocol.h"
+#include "../../shared/time_sync.h"
 #include "../../shared/pairing.h"
 #include "../../shared/resync.h"
 #include "../../shared/telemetry.h"
@@ -142,6 +143,17 @@ static unsigned long g_last_valid_rx_ms = 0;
 // válido ancora o relógio (hop_start_at) ao slot do mestre e entra no salto por
 // tempo. Resetado em reset_to_scanning().
 static bool g_time_synced = false;
+
+// slot-phase-servo: rastreia a fase sub-slot do relogio de slots em relacao
+// ao mestre (shared/time_sync.h, openspec/changes/slot-phase-servo). O alvo
+// do servo e capturado nos primeiros fragmentos depois do time_sync e o
+// estado e zerado em reset_to_scanning(). Os contadores abaixo so alimentam
+// a telemetria periodica `phase`.
+static PhaseServo g_phase_servo;
+static const uint32_t PHASE_TLM_INTERVAL_MS = 5000;
+static unsigned long g_phase_tlm_last_ms = 0;
+static uint16_t g_phase_tlm_n = 0;   // amostras validas desde a ultima linha
+static int16_t g_phase_tlm_adj = 0;  // soma dos passos (ms) desde a ultima linha
 
 // ---- hop-resync: estacionamento (design.md D1/D2) ----
 // Canal do ultimo FragmentPacket ou pacote de controle valido recebido --
@@ -358,6 +370,9 @@ static void reset_to_scanning()
     hop_counter = 0;
     g_hops_since_rx = 0;
     g_time_synced = false; // time-slotted-hopping: re-sincroniza no próximo pareamento
+    phase_servo_reset(g_phase_servo); // slot-phase-servo: novo pareamento = novo alvo de fase
+    g_phase_tlm_n = 0;
+    g_phase_tlm_adj = 0;
     // time-slotted-hopping: invalida o canal corrente. O bloco SCANNING troca o
     // canal do RÁDIO (candidatos de pareamento) sem atualizar current_channel;
     // sem este reset, o guard `current_channel != ch0` no bootstrap pularia o
@@ -1050,11 +1065,41 @@ static void escravo_loop()
                         hop_counter = pkt.hop_counter;
                         g_time_synced = true;
                         g_last_valid_rx_ms = millis(); // arma o timer de perda só a partir do sync
+                        // slot-phase-servo: ancora recem-alinhada -- o alvo de fase
+                        // e capturado a partir dos proximos fragmentos.
+                        phase_servo_reset(g_phase_servo);
+                        g_phase_tlm_last_ms = millis();
+                        g_phase_tlm_n = 0;
+                        g_phase_tlm_adj = 0;
                         tlm_printf("escravo", "time_sync", "master=%lu;ch=%u", (unsigned long)pkt.hop_counter, current_channel);
                     }
                     else
                     {
+                        bool slipped = (hop_counter != pkt.hop_counter);
                         escravo_reanchor(pkt.hop_counter);
+                        if (slipped)
+                        {
+                            // reancoragem de slot inteiro recoloca a fase em 0: o
+                            // alvo e o filtro antigos nao valem mais.
+                            phase_servo_reset(g_phase_servo);
+                        }
+                        else if (pkt.slot_phase_ms != PHASE_UNKNOWN)
+                        {
+                            // slot-phase-servo: e = fase do escravo - fase do mestre
+                            // (convencao de sinal em shared/time_sync.h); o ajuste
+                            // devolvido (-1/0/+1 ms) e somado a ancora.
+                            long fase_escravo = (long)(g_last_valid_rx_ms - (hop_start_at + (unsigned long)pkt.hop_counter * SLOT_MS));
+                            long e = fase_escravo - (long)pkt.slot_phase_ms;
+                            bool was_enabled = g_phase_servo.enabled;
+                            int8_t adj = phase_servo_update(g_phase_servo, (int32_t)e, (uint32_t)g_last_valid_rx_ms);
+                            if (adj != 0)
+                            {
+                                hop_start_at += (long)adj;
+                                g_phase_tlm_adj += adj;
+                            }
+                            if (was_enabled)
+                                g_phase_tlm_n++;
+                        }
                     }
 
                     bool is_new_message = (current_msg_id != pkt.msg_id);
@@ -1099,6 +1144,20 @@ static void escravo_loop()
                     }
 
                     // Prints adiados pra depois do ack.
+                    // slot-phase-servo: telemetria da fase a cada ~5 s; o
+                    // desligamento por divergencia e logado uma unica vez.
+                    if (g_phase_servo.just_disabled)
+                    {
+                        g_phase_servo.just_disabled = false;
+                        tlm_printf("escravo", "phase", "state=disabled;err=%ld", (long)phase_servo_err_ms(g_phase_servo));
+                    }
+                    else if (g_time_synced && g_phase_servo.enabled && millis() - g_phase_tlm_last_ms >= PHASE_TLM_INTERVAL_MS)
+                    {
+                        g_phase_tlm_last_ms = millis();
+                        tlm_printf("escravo", "phase", "err=%ld;adj=%d;n=%u", (long)phase_servo_err_ms(g_phase_servo), (int)g_phase_tlm_adj, (unsigned)g_phase_tlm_n);
+                        g_phase_tlm_adj = 0;
+                        g_phase_tlm_n = 0;
+                    }
                     if (just_confirmed)
                     {
                         tlm_printf("escravo", "pair_confirm", "ch=%u", current_channel);

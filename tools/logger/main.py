@@ -154,6 +154,12 @@ class StateStore:
                 node["plr_session"] = fields.get("session")
             elif event == "throughput":
                 node["throughput_frags_per_s"] = fields.get("frags_per_s")
+            elif event == "phase":
+                # slot-phase-servo: desvio de fase filtrado (ms), passos no
+                # periodo e estado do servo (state=disabled quando divergiu).
+                node["phase_err_ms"] = fields.get("err")
+                node["phase_adj"] = fields.get("adj")
+                node["phase_state"] = fields.get("state", "ok")
             elif event in ("alert_on", "alert_off"):
                 node["alert"] = event == "alert_on"
             elif event == "blacklist":

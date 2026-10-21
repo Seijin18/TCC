@@ -348,6 +348,11 @@ struct __attribute__((packed)) FragmentPacket
     uint8_t payload_len;
     char payload[FRAGMENT_DATA_SIZE];
     uint32_t hop_counter; // adaptive-rendezvous: resync do contador de hop
+    // slot-phase-servo: posicao do MESTRE dentro do slot corrente (ms, 0..
+    // SLOT_MS-1) no instante do envio, ou PHASE_UNKNOWN (0xFF, shared/
+    // time_sync.h) no pacote de bootstrap. O escravo compara com a propria
+    // fase pra rastrear a deriva sub-slot dos cristais.
+    uint8_t slot_phase_ms;
 };
 
 struct __attribute__((packed)) FragmentAck
@@ -404,6 +409,19 @@ struct __attribute__((packed)) ControlAck
 static_assert(sizeof(LinkProbeV2) <= 32, "LinkProbeV2 excede 32 bytes do NRF24");
 static_assert(sizeof(LinkAckV2) <= 32, "LinkAckV2 excede 32 bytes do NRF24");
 static_assert(sizeof(FragmentPacket) <= 32, "FragmentPacket excede 32 bytes do NRF24");
+// slot-phase-servo: FragmentPacket cresceu de 30 para 31 bytes (slot_phase_ms).
+// O escravo distingue os pacotes por getDynamicPayloadSize() == sizeof(...)
+// (escravo/src/node.h), entao o tamanho novo nao pode colidir com nenhum
+// dos outros que ele recebe: Link{Probe,Ack}V2 = 8, FragmentAck = 6,
+// ControlSeed/Blacklist = 11, ControlAck = 5.
+static_assert(sizeof(FragmentPacket) == 31, "FragmentPacket mudou de tamanho -- reavaliar colisao de sizeof abaixo");
+static_assert(sizeof(FragmentPacket) != sizeof(ControlSeedPacket) &&
+                  sizeof(FragmentPacket) != sizeof(ControlBlacklistPacket) &&
+                  sizeof(FragmentPacket) != sizeof(LinkProbeV2) &&
+                  sizeof(FragmentPacket) != sizeof(LinkAckV2) &&
+                  sizeof(FragmentPacket) != sizeof(FragmentAck) &&
+                  sizeof(FragmentPacket) != sizeof(ControlAck),
+              "sizeof(FragmentPacket) colide com outro pacote distinguido por tamanho no escravo");
 static_assert(sizeof(FragmentAck) <= 32, "FragmentAck excede 32 bytes do NRF24");
 static_assert(sizeof(ControlSeedPacket) <= 32, "ControlSeedPacket excede 32 bytes do NRF24");
 static_assert(sizeof(ControlBlacklistPacket) <= 32, "ControlBlacklistPacket excede 32 bytes do NRF24");
