@@ -6,6 +6,33 @@ verdade de contexto/dependências) — é a camada de "o que fazer agora, em que
 ordem" derivada dele. Atualizar esta lista conforme tasks forem fechadas ou
 changes forem arquivados.
 
+## Estado em 2026-10-21: três bugs encontrados, três propostas abertas
+
+Testes de 2026-10-21 (placas reconectadas, firmware regravado):
+
+- **Hardware OK**: os 4 rádios respondem com registradores normais; 58/58
+  testes nativos; build limpo.
+- **Acoplamento OK**: o analisador vê o jammer com força (ocupação 100% no
+  canal travado, ~200× a base) na posição atual — a pendência "aproximar a
+  placa A do jammer" (abaixo) está **refutada**.
+- **Comparação dos 4 modos a `PA_MAX`** (hopping, mitigação desligada,
+  re-pareando antes de cada um): hold 2,8% > adaptive 1,7% > targeted 1,2% >
+  sweep 0,8% de miss (sem ch34). O `hold` derruba 99% do canal travado, mas
+  o hopping dilui isso. A mitigação nunca disparou.
+- **Bugs** (ver as propostas):
+  1. `half-open-handshake-recovery` — pareamento preso em meio-aberto
+     (bateria `battery-20261021-091229`: A sem tráfego por 31,5 s, C nunca
+     pareou). Prioridade 1.
+  2. `slot-phase-servo` — throughput cai ~2/3 em ~7,5 min por deriva de
+     cristal (soak `session-20261021-054356`). Contamina qualquer medição
+     longa, inclusive o "hold → 51%" de 2026-09-26. Prioridade 2.
+  3. `channel-quality-sensing` — o alerta do analisador não dispara mesmo
+     vendo o jammer; proposta do autor de avaliar qualidade por canal sem
+     classificar a causa. Prioridade 3.
+
+Até 1 e 2 estarem fechados, **re-parear antes de cada run** e não confiar em
+runs com mais de ~2 min sem re-pareamento.
+
 ## Estado em 2026-09-25 (madrugada): validação sob ataque feita até onde dá remotamente
 
 Arquivados: `plr-metric`, `adaptive-rendezvous`,

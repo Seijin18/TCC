@@ -123,6 +123,20 @@ andamento que `dynamic-seed-blacklist` protege).
    restante**: sem ele o re-pareamento após uma perda de enlace falhava
    (0/6 → 20/20 com ele), e qualquer cenário com jamming derruba o enlace
    ao menos uma vez.
+9. **`half-open-handshake-recovery`** (2026-10-21) — estende
+   `clean-channel-rendezvous`. Corrige o pareamento preso em meio-aberto
+   (escravo ouve o mestre, mestre não ouve o escravo) que anulou o cenário C
+   da bateria de 2026-10-21. **Primeiro da fila**: sem ele nenhuma bateria
+   é confiável.
+10. **`slot-phase-servo`** (2026-10-21) — depende de `time-slotted-hopping`
+    (arquivar antes ou junto). Corrige o decaimento de throughput por deriva
+    de cristal (~7,5 min até `loss_of_sync`), que contamina qualquer medição
+    longa sem re-pareamento.
+11. **`channel-quality-sensing`** (2026-10-21) — analisador avalia qualidade
+    por canal sem classificar a causa (jammer ou Wi-Fi) e a blacklist funde
+    essa evidência com a do enlace. Substitui as tarefas 3.1/3.3 de
+    `spectrum-attack-classification`. Independente de 9 e 10, mas validar
+    depois deles (precisa de bateria confiável e medição longa).
 
 Ordem recomendada de execução: `plr-metric` e `targeted-jammer` em paralelo
 → `spectrum-attack-classification` → `dynamic-seed-blacklist` →
