@@ -9,11 +9,11 @@
 
 ## 2. Lógica pura
 
-- [ ] 2.1 Ocupação por janela + histerese por canal, como lógica pura em
+- [x] 2.1 Ocupação por janela + histerese por canal, como lógica pura em
       `shared/` + testes `native_test`.
-- [ ] 2.2 Fusão (falha do enlace OR degradado do analisador) sobre
+- [x] 2.2 Fusão (falha do enlace OR degradado do analisador) sobre
       `update_channel_mask()` mantendo as guardas + testes.
-- [ ] 2.3 Gatilho de reseed em `shared/control_policy.h` + testes.
+- [x] 2.3 Gatilho de reseed em `shared/control_policy.h` + testes.
 
 ## 3. Firmware
 

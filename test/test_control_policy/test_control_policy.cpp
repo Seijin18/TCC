@@ -136,6 +136,70 @@ static void test_repeated_calls_with_mask_still_scheduled_never_flood(void)
     }
 }
 
+// --- channel-quality-sensing (tarefa 2.3): gatilho de reseed ------------
+
+static void test_reseed_fires_at_min_degraded_channels(void)
+{
+    TEST_ASSERT_TRUE(should_reseed_for_channel_quality(CHQ_RESEED_MIN_DEGRADED, 0));
+    TEST_ASSERT_TRUE(should_reseed_for_channel_quality(16, 0));
+}
+
+static void test_reseed_does_not_fire_below_min_degraded_channels(void)
+{
+    TEST_ASSERT_FALSE(should_reseed_for_channel_quality(0, 0));
+    TEST_ASSERT_FALSE_MESSAGE(should_reseed_for_channel_quality(1, 0), "um canal degradado: blacklist basta, seed nao muda");
+    TEST_ASSERT_FALSE(should_reseed_for_channel_quality(CHQ_RESEED_MIN_DEGRADED - 1, 0));
+}
+
+static void test_reseed_fires_on_sustained_post_blacklist_miss(void)
+{
+    uint8_t w = 0;
+    for (uint8_t i = 0; i < CHQ_RESEED_MISS_WINDOWS - 1; i++)
+    {
+        w = chq_update_post_blacklist_miss_windows(w, /*blacklist_applied=*/true, /*miss=*/CHQ_RESEED_MISS_PCT + 1);
+        TEST_ASSERT_FALSE(should_reseed_for_channel_quality(1, w));
+    }
+    w = chq_update_post_blacklist_miss_windows(w, true, CHQ_RESEED_MISS_PCT + 1);
+    TEST_ASSERT_TRUE(should_reseed_for_channel_quality(1, w));
+}
+
+static void test_miss_windows_reset_when_miss_drops_or_no_blacklist(void)
+{
+    uint8_t w = 0;
+    w = chq_update_post_blacklist_miss_windows(w, true, 90);
+    w = chq_update_post_blacklist_miss_windows(w, true, 90);
+    TEST_ASSERT_EQUAL_UINT8(2, w);
+
+    // miss no limiar (nao acima) zera: exige janelas consecutivas
+    TEST_ASSERT_EQUAL_UINT8(0, chq_update_post_blacklist_miss_windows(w, true, CHQ_RESEED_MISS_PCT));
+    // miss alto sem blacklist aplicada nao conta
+    TEST_ASSERT_EQUAL_UINT8(0, chq_update_post_blacklist_miss_windows(w, false, 100));
+}
+
+static void test_miss_windows_saturate_at_255(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(255, chq_update_post_blacklist_miss_windows(255, true, 100));
+}
+
+static void test_reseed_does_not_fire_with_high_miss_before_blacklist(void)
+{
+    uint8_t w = 0;
+    for (uint8_t i = 0; i < 20; i++)
+        w = chq_update_post_blacklist_miss_windows(w, /*blacklist_applied=*/false, 100);
+    TEST_ASSERT_FALSE(should_reseed_for_channel_quality(2, w));
+}
+
+static void test_channel_quality_reseed_feeds_decide_control_proposal(void)
+{
+    // A decisao pura alimenta reseed_needed; as guardas de decide_control_proposal seguem valendo.
+    bool reseed = should_reseed_for_channel_quality(CHQ_RESEED_MIN_DEGRADED, 0);
+    ControlProposalDecision d = decide_control_proposal(false, false, true, false, false, reseed, 0xFFFB, 0xFFFF);
+    TEST_ASSERT_TRUE(d.kind == ControlProposalKind::kSeed);
+
+    d = decide_control_proposal(false, false, true, /*seed_scheduled=*/true, false, reseed, 0xFFFB, 0xFFFF);
+    TEST_ASSERT_TRUE(d.kind == ControlProposalKind::kNone);
+}
+
 int main(int argc, char **argv)
 {
     UNITY_BEGIN();
@@ -149,5 +213,12 @@ int main(int argc, char **argv)
     RUN_TEST(test_proposes_blacklist_when_candidate_differs_from_effective_mask);
     RUN_TEST(test_reseed_takes_priority_over_blacklist);
     RUN_TEST(test_repeated_calls_with_mask_still_scheduled_never_flood);
+    RUN_TEST(test_reseed_fires_at_min_degraded_channels);
+    RUN_TEST(test_reseed_does_not_fire_below_min_degraded_channels);
+    RUN_TEST(test_reseed_fires_on_sustained_post_blacklist_miss);
+    RUN_TEST(test_miss_windows_reset_when_miss_drops_or_no_blacklist);
+    RUN_TEST(test_miss_windows_saturate_at_255);
+    RUN_TEST(test_reseed_does_not_fire_with_high_miss_before_blacklist);
+    RUN_TEST(test_channel_quality_reseed_feeds_decide_control_proposal);
     return UNITY_END();
 }

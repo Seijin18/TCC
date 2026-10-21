@@ -2,6 +2,7 @@
 // sem hardware nem framework Arduino. Rodar com: pio test -e native_test
 #include <unity.h>
 #include "hopping.h"
+#include "channel_quality.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -481,6 +482,198 @@ static void test_update_channel_mask_smaller_count_guard_and_reinclusion(void)
     TEST_ASSERT_TRUE_MESSAGE(mask & (1u << 2), "candidato deveria ser reincluido apos o cooldown, com count < TABLE_SIZE");
 }
 
+// --- channel-quality-sensing (tarefa 2.2): fusao enlace + sensor -------------
+// update_channel_mask() com `sensor_degraded_mask` e `min_active`; os
+// defaults (0 e 1) precisam preservar o comportamento antigo.
+
+static void test_fusion_default_params_match_legacy_behavior(void)
+{
+    uint8_t fa[TABLE_SIZE], fb[TABLE_SIZE];
+    uint32_t sa[TABLE_SIZE], sb[TABLE_SIZE];
+    reset_state(fa, sa);
+    reset_state(fb, sb);
+    fa[3] = fb[3] = FAIL_THRESHOLD;
+    fa[9] = fb[9] = FAIL_THRESHOLD + 2;
+
+    uint16_t legacy = update_channel_mask(0xFFFF, fa, sa, 1000, FAIL_THRESHOLD, COOLDOWN);
+    uint16_t explicit_defaults = update_channel_mask(0xFFFF, fb, sb, 1000, FAIL_THRESHOLD, COOLDOWN, TABLE_SIZE, 0, 1);
+    TEST_ASSERT_EQUAL_UINT16(legacy, explicit_defaults);
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+    {
+        TEST_ASSERT_EQUAL_UINT8(fa[i], fb[i]);
+        TEST_ASSERT_EQUAL_UINT32(sa[i], sb[i]);
+    }
+}
+
+static void test_fusion_sensor_excludes_channel_with_low_fail_count(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    fail_count[5] = 0; // enlace nao viu falha nenhuma
+
+    uint16_t result = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN,
+                                          TABLE_SIZE, /*sensor=*/(1u << 5), HOP_MIN_ACTIVE_CHANNELS);
+
+    TEST_ASSERT_EQUAL_UINT16(0xFFFF & ~(1u << 5), result);
+    TEST_ASSERT_EQUAL_UINT32(1000, blacklisted_since[5]);
+}
+
+static void test_fusion_link_and_sensor_union(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    fail_count[2] = FAIL_THRESHOLD; // so o enlace
+    // canal 11 so o sensor
+
+    uint16_t result = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 500, FAIL_THRESHOLD, COOLDOWN,
+                                          TABLE_SIZE, (1u << 11), HOP_MIN_ACTIVE_CHANNELS);
+
+    TEST_ASSERT_EQUAL_UINT16(0xFFFF & ~((1u << 2) | (1u << 11)), result);
+}
+
+static void test_fusion_min_active_guard_keeps_four_best(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    // Sensor marca tudo; o enlace tem historico diferente por canal.
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+        fail_count[i] = (uint8_t)(1 + i); // canal 0 = melhor historico
+    fail_count[10] = 0;                   // canal 10 = melhor de todos
+
+    uint16_t result = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN,
+                                          TABLE_SIZE, 0xFFFF, HOP_MIN_ACTIVE_CHANNELS);
+
+    TEST_ASSERT_EQUAL_UINT8(HOP_MIN_ACTIVE_CHANNELS, mask_popcount16(result));
+    // 4 menores fail_count: canal 10 (0), 0 (1), 1 (2), 2 (3)
+    TEST_ASSERT_EQUAL_UINT16((1u << 10) | (1u << 0) | (1u << 1) | (1u << 2), result);
+    // so os efetivamente excluidos gravam timestamp
+    TEST_ASSERT_EQUAL_UINT32(0, blacklisted_since[10]);
+    TEST_ASSERT_EQUAL_UINT32(1000, blacklisted_since[3]);
+}
+
+static void test_fusion_min_active_prefers_sensor_clean_channels(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    // Enlace falhando em 13 canais (0..12); sensor marca os outros 3 (13..15) e
+    // mais nada. Todos candidatos a exclusao -> restam so as escolhas da guarda.
+    for (uint8_t i = 0; i < 13; i++)
+        fail_count[i] = (uint8_t)(FAIL_THRESHOLD + i); // pior historico cresce com i
+    uint16_t sensor = (1u << 13) | (1u << 14) | (1u << 15);
+    fail_count[13] = fail_count[14] = fail_count[15] = 0;
+
+    uint16_t result = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN,
+                                          TABLE_SIZE, sensor, HOP_MIN_ACTIVE_CHANNELS);
+
+    // sem sensor primeiro: os 4 de menor fail_count entre 0..12 = 0,1,2,3
+    TEST_ASSERT_EQUAL_UINT16((1u << 0) | (1u << 1) | (1u << 2) | (1u << 3), result);
+}
+
+static void test_fusion_min_active_default_keeps_legacy_whole_mask_guard(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+
+    // sensor marca tudo, piso default (1): guarda antiga mantem a mascara inteira
+    uint16_t result = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN,
+                                          TABLE_SIZE, 0xFFFF);
+    TEST_ASSERT_EQUAL_UINT16(0xFFFF, result);
+}
+
+static void test_fusion_min_active_does_not_reinclude_channels_outside_input_mask(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    // Entrada ja com 3 canais (abaixo do piso): a guarda nao inventa canais.
+    uint16_t in = (1u << 0) | (1u << 1) | (1u << 2);
+    for (uint8_t i = 3; i < TABLE_SIZE; i++)
+        blacklisted_since[i] = 1000; // ainda no cooldown
+
+    uint16_t result = update_channel_mask(in, fail_count, blacklisted_since, 1001, FAIL_THRESHOLD, COOLDOWN,
+                                          TABLE_SIZE, 0, HOP_MIN_ACTIVE_CHANNELS);
+    TEST_ASSERT_EQUAL_UINT16(in, result);
+}
+
+static void test_fusion_sensor_held_channel_not_reincluded_by_cooldown(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+
+    uint16_t sensor = (1u << 5);
+    uint16_t mask = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN,
+                                        TABLE_SIZE, sensor, HOP_MIN_ACTIVE_CHANNELS);
+    TEST_ASSERT_FALSE(mask & (1u << 5));
+
+    // Muito alem do cooldown, sensor ainda segura: continua fora.
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, 1000 + 5 * COOLDOWN, FAIL_THRESHOLD, COOLDOWN,
+                               TABLE_SIZE, sensor, HOP_MIN_ACTIVE_CHANNELS);
+    TEST_ASSERT_FALSE_MESSAGE(mask & (1u << 5), "sensor segura o canal: cooldown nao reinclui");
+}
+
+static void test_fusion_cooldown_starts_when_sensor_releases(void)
+{
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+
+    uint16_t sensor = (1u << 5);
+    uint16_t mask = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN,
+                                        TABLE_SIZE, sensor, HOP_MIN_ACTIVE_CHANNELS);
+    uint32_t t_release = 1000 + 5 * COOLDOWN;
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, t_release, FAIL_THRESHOLD, COOLDOWN,
+                               TABLE_SIZE, sensor, HOP_MIN_ACTIVE_CHANNELS); // ainda seguro neste hop
+
+    // Sensor solta: o relogio parte da ultima chamada com o canal segurado.
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, t_release + 1, FAIL_THRESHOLD, COOLDOWN,
+                               TABLE_SIZE, 0, HOP_MIN_ACTIVE_CHANNELS);
+    TEST_ASSERT_FALSE_MESSAGE(mask & (1u << 5), "recem-solto: ainda dentro do cooldown");
+
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, t_release + COOLDOWN - 1, FAIL_THRESHOLD, COOLDOWN,
+                               TABLE_SIZE, 0, HOP_MIN_ACTIVE_CHANNELS);
+    TEST_ASSERT_FALSE(mask & (1u << 5));
+
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, t_release + COOLDOWN, FAIL_THRESHOLD, COOLDOWN,
+                               TABLE_SIZE, 0, HOP_MIN_ACTIVE_CHANNELS);
+    TEST_ASSERT_TRUE_MESSAGE(mask & (1u << 5), "cooldown vencido depois do sensor soltar: reinclui");
+    TEST_ASSERT_EQUAL_UINT8(0, fail_count[5]);
+}
+
+static void test_fusion_link_exclusion_timestamp_still_not_pushed_forward(void)
+{
+    // Falha do enlace (sem sensor) continua com a regra antiga: timestamp so na transicao.
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    fail_count[4] = FAIL_THRESHOLD;
+
+    uint16_t mask = update_channel_mask(0xFFFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN,
+                                        TABLE_SIZE, 0, HOP_MIN_ACTIVE_CHANNELS);
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, 1100, FAIL_THRESHOLD, COOLDOWN,
+                               TABLE_SIZE, 0, HOP_MIN_ACTIVE_CHANNELS);
+    TEST_ASSERT_EQUAL_UINT32(1000, blacklisted_since[4]);
+    mask = update_channel_mask(mask, fail_count, blacklisted_since, 1000 + COOLDOWN, FAIL_THRESHOLD, COOLDOWN,
+                               TABLE_SIZE, 0, HOP_MIN_ACTIVE_CHANNELS);
+    TEST_ASSERT_TRUE(mask & (1u << 4));
+}
+
+static void test_fusion_sensor_bit_beyond_count_is_ignored(void)
+{
+    // Com count=8 (candidatos de pareamento), bits >= 8 do sensor nao afetam nada.
+    uint8_t fail_count[TABLE_SIZE];
+    uint32_t blacklisted_since[TABLE_SIZE];
+    reset_state(fail_count, blacklisted_since);
+    uint16_t result = update_channel_mask(0xFF, fail_count, blacklisted_since, 1000, FAIL_THRESHOLD, COOLDOWN,
+                                          8, 0xFF00);
+    TEST_ASSERT_EQUAL_UINT16(0xFF, result);
+}
+
 int main(int argc, char **argv)
 {
     UNITY_BEGIN();
@@ -506,5 +699,16 @@ int main(int argc, char **argv)
     RUN_TEST(test_update_channel_mask_flapping_cycle);
     RUN_TEST(test_update_channel_mask_smaller_count_basic_exclusion);
     RUN_TEST(test_update_channel_mask_smaller_count_guard_and_reinclusion);
+    RUN_TEST(test_fusion_default_params_match_legacy_behavior);
+    RUN_TEST(test_fusion_sensor_excludes_channel_with_low_fail_count);
+    RUN_TEST(test_fusion_link_and_sensor_union);
+    RUN_TEST(test_fusion_min_active_guard_keeps_four_best);
+    RUN_TEST(test_fusion_min_active_prefers_sensor_clean_channels);
+    RUN_TEST(test_fusion_min_active_default_keeps_legacy_whole_mask_guard);
+    RUN_TEST(test_fusion_min_active_does_not_reinclude_channels_outside_input_mask);
+    RUN_TEST(test_fusion_sensor_held_channel_not_reincluded_by_cooldown);
+    RUN_TEST(test_fusion_cooldown_starts_when_sensor_releases);
+    RUN_TEST(test_fusion_link_exclusion_timestamp_still_not_pushed_forward);
+    RUN_TEST(test_fusion_sensor_bit_beyond_count_is_ignored);
     return UNITY_END();
 }
