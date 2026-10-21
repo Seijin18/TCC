@@ -17,14 +17,14 @@
 
 ## 3. Firmware
 
-- [ ] 3.1 Analisador: ocupação + histerese; emitir `e=chq;mask=..;top=..`;
+- [x] 3.1 Analisador: ocupação + histerese; emitir `e=chq;mask=..;top=..`;
       entregar a máscara pelo callback da placa combinada (booleano no fio
       de GPIO da topologia de 4 placas).
-- [ ] 3.2 Analisador: tirar o classificador CFAR/votos/streak do caminho de
+- [x] 3.2 Analisador: tirar o classificador CFAR/votos/streak do caminho de
       decisão (manter como telemetria até a validação).
-- [ ] 3.3 Mestre: receber a máscara e fundir com `g_channel_fail`; aplicar
+- [x] 3.3 Mestre: receber a máscara e fundir com `g_channel_fail`; aplicar
       a política de reseed nova.
-- [ ] 3.4 Atualizar `run_scenario.py`/`run_battery.py` e o logger para o
+- [x] 3.4 Atualizar `run_scenario.py`/`run_battery.py` e o logger para o
       evento `chq`.
 
 ## 4. Validação em bancada

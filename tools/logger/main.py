@@ -60,7 +60,10 @@ EVENT_RE = re.compile(r"^@(?P<src>[^;]+);t=(?P<t>\d+);e=(?P<event>[^;]*)(?P<rest
 # hop-resync (tarefa 1.3): "resync_park"/"resync_ok" pelo mesmo motivo --
 # raros (só ocorrem quando o escravo estaciona) e são exatamente a
 # instrumentação que confirma o mecanismo em bancada (proposal.md).
-ROUTINE_EVENTS = {"hop", "ack", "miss", "pair_scan", "latency"}
+# channel-quality-sensing (tarefa 3.4): "chq" sai a cada varredura do
+# analisador (~0,9 s), como "hop"/"ack" -- vai para o JSONL e para o
+# state.json; as transições aparecem em events.log via alert_on/alert_off.
+ROUTINE_EVENTS = {"hop", "ack", "miss", "pair_scan", "latency", "chq"}
 
 CSV_MIN_FIELDS = 100
 
@@ -166,6 +169,12 @@ class StateStore:
                 node["phase_state"] = fields.get("state", "ok")
             elif event in ("alert_on", "alert_off"):
                 node["alert"] = event == "alert_on"
+            elif event == "chq":
+                # channel-quality-sensing (tarefa 3.4): máscara de canais
+                # degradados do analisador (bit i = HOPPING_CHANNELS[i]) e os
+                # canais de maior ocupação ("top" = "canal:ocupação,...").
+                node["chq_mask"] = fields.get("mask")
+                node["chq_top"] = fields.get("top")
             elif event == "blacklist":
                 node["channel_mask"] = fields.get("mask")
             elif event in ("jam_mode_sweep", "jam_mode_targeted"):

@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include "../../shared/hopping.h"
 #include "../../shared/control_policy.h"
+#include "../../shared/channel_quality.h"
 #include "../../shared/protocol.h"
 #include "../../shared/time_sync.h"
 #include "../../shared/pairing.h"
@@ -75,6 +76,28 @@ static bool (*g_mestre_alert_source)() = nullptr;
 static void mestre_set_alert_source(bool (*source)())
 {
     g_mestre_alert_source = source;
+}
+
+// channel-quality-sensing (tarefa 3.3): fonte da MÁSCARA de canais degradados
+// do analisador (bit i = HOPPING_CHANNELS[i]) na placa combinada. Quando
+// registrada, o mestre funde a máscara por canal com a evidência de ack em
+// update_channel_mask() e usa a política de reseed calibrada (contagem de
+// canais degradados / miss sustentado após a blacklist). Sem ela (4 placas,
+// só o booleano do GPIO ou da fonte bool) o comportamento é o de antes:
+// reseed na borda do alerta, nenhuma máscara por canal do sensor.
+// Mesma regra de ordem: registrar ANTES de mestre_setup().
+static uint16_t (*g_mestre_chq_source)() = nullptr;
+
+static void mestre_set_chq_source(uint16_t (*source)())
+{
+    g_mestre_chq_source = source;
+}
+
+// Placa combinada = qualquer fonte registrada (bool ou máscara): sem pino de
+// alerta de entrada nem blink de LED_BUILTIN (GPIO 2 é MISO do HSPI).
+static bool mestre_is_combined()
+{
+    return g_mestre_alert_source != nullptr || g_mestre_chq_source != nullptr;
 }
 
 /**
@@ -423,6 +446,17 @@ static uint32_t g_channel_blacklisted_since[TABLE_SIZE] = {0};
 static bool g_alert_active = false;
 static bool g_reseed_needed = false;
 
+// channel-quality-sensing (tarefa 3.3): estado da política de reseed (só
+// usado com fonte de máscara). Janela de miss do enlace POR SLOT (não
+// reaproveita throughput_window: aquela mistura fragmentos confirmados --
+// vários por slot, em pipeline -- com slots perdidos). Cada slot conta 1,
+// ack em qualquer tentativa = ok; sem ack = miss. Fecha a cada
+// THROUGHPUT_WINDOW_HOPS slots (mesma janela de tempo da vazão, ~10 s).
+static uint32_t g_chq_win_slots = 0;
+static uint32_t g_chq_win_miss = 0;
+static uint8_t g_chq_post_bl_miss_windows = 0; // janelas consecutivas com miss alto após blacklist
+static bool g_chq_reseed_cond_prev = false;    // detector de borda da condição de reseed
+
 // scenario-automation: throughput (fragmentos confirmados/s) por janela de
 // hops -- mesmo padrão de janela de plr-metric (escravo, g_window_size).
 // hop-ack-decoupling: re-derivado de 50 para 350 (~7x), preservando a mesma
@@ -737,8 +771,47 @@ static bool wait_control_ack(uint32_t expected_apply_at, uint32_t timeout_ms)
 // -------------------------------------------------------------
 static uint16_t compute_candidate_mask()
 {
+    // channel-quality-sensing: com fonte de máscara, funde o sensor (OR com a
+    // falha de ack) e aplica o piso de canais ativos. O piso HOP_MIN_ACTIVE_CHANNELS
+    // (4) só entra junto com o sensor: sem ele (4 placas) mantém min_active=1,
+    // porque com 4 o piso passaria a devolver canais de falha de ack alta
+    // quando o jamming banir mais de 12 canais -- mudaria o comportamento
+    // atual da topologia standalone.
+    uint16_t sensor_mask = g_mestre_chq_source ? g_mestre_chq_source() : 0;
+    uint8_t min_active = g_mestre_chq_source ? HOP_MIN_ACTIVE_CHANNELS : 1;
     return update_channel_mask(g_channel_mask, g_channel_fail, g_channel_blacklisted_since,
-                                g_hop_counter, CHANNEL_FAIL_THRESHOLD, RECOVERY_COOLDOWN_HOPS);
+                                g_hop_counter, CHANNEL_FAIL_THRESHOLD, RECOVERY_COOLDOWN_HOPS,
+                                TABLE_SIZE, sensor_mask, min_active);
+}
+
+// channel-quality-sensing (tarefa 3.3): contabiliza um slot na janela de
+// miss do enlace; ao fechar a janela atualiza o contador de janelas
+// consecutivas com miss alto DEPOIS de haver blacklist aplicada (máscara
+// diferente de 0xFFFF). Chamado uma vez por slot, só com fonte de máscara.
+static void chq_note_slot(bool acked)
+{
+    g_chq_win_slots++;
+    if (!acked)
+        g_chq_win_miss++;
+    if (g_chq_win_slots < THROUGHPUT_WINDOW_HOPS)
+        return;
+    uint8_t miss_pct = (uint8_t)((g_chq_win_miss * 100u) / g_chq_win_slots);
+    g_chq_post_bl_miss_windows = chq_update_post_blacklist_miss_windows(
+        g_chq_post_bl_miss_windows, g_channel_mask != 0xFFFF, miss_pct);
+    g_chq_win_slots = 0;
+    g_chq_win_miss = 0;
+}
+
+// Zera a janela/contador (reset_to_pairing: o enlace recomeça, as janelas
+// parciais não valem mais).
+static void chq_reset_miss_window()
+{
+    g_chq_win_slots = 0;
+    g_chq_win_miss = 0;
+    g_chq_post_bl_miss_windows = 0;
+    // g_chq_reseed_cond_prev fica de fora de propósito: é detector de borda
+    // da condição, não da janela -- zerar aqui faria um novo reseed a cada
+    // re-pareamento enquanto a banda seguir degradada.
 }
 
 // blacklist-decay (achado de bancada 2026-09-24): mascara-alvo EFETIVA --
@@ -1053,6 +1126,7 @@ static void reset_to_pairing(bool clear_blacklist)
     // na LinkProbeV2, então o escravo re-pareado adota o mesmo conjunto.
     memset(g_channel_blacklisted_since, 0, sizeof(g_channel_blacklisted_since));
     reset_throughput_window();
+    chq_reset_miss_window();
     tlm_event("mestre", "loss_of_sync");
     // tarefa 1.2: dump de registradores toda vez que o mestre entra (ou
     // volta a entrar) no estado de pareamento -- compara contra o dump do
@@ -1072,7 +1146,7 @@ static void mestre_setup()
     delay(1000); // Aguarda o monitor serial abrir
 
     pinMode(LED_BUILTIN, OUTPUT);
-    if (!g_mestre_alert_source)
+    if (!mestre_is_combined())
         pinMode(PIN_ALERT_IN, INPUT_PULLDOWN);
 
     guarded_println("\n[MESTRE] Iniciando transmissor (FIXO)...");
@@ -1122,7 +1196,7 @@ static void mestre_loop()
     // barramento HSPI usado pela task do analisador (two-board-topology
     // seção 7) -- a mesma condição usada para o pino de alerta indica
     // modo combinado.
-    if (!g_mestre_alert_source)
+    if (!mestre_is_combined())
     {
         static unsigned long last_blink = 0;
         if (millis() - last_blink >= 500)
@@ -1133,12 +1207,38 @@ static void mestre_loop()
     }
 
     // ---- ALERTA DO ANALISADOR (spectrum-attack-classification) ----
-    bool alert_now = g_mestre_alert_source ? g_mestre_alert_source() : (digitalRead(PIN_ALERT_IN) == HIGH);
+    // channel-quality-sensing: com fonte de máscara, "alerta" = máscara != 0
+    // (só telemetria alert_on/alert_off) e o reseed vem da política abaixo,
+    // não mais da borda. Sem ela: booleano da fonte/GPIO, reseed na borda.
+    uint16_t chq_mask = g_mestre_chq_source ? g_mestre_chq_source() : 0;
+    bool alert_now = g_mestre_chq_source ? (chq_mask != 0)
+                     : (g_mestre_alert_source ? g_mestre_alert_source() : (digitalRead(PIN_ALERT_IN) == HIGH));
+    if (g_mestre_chq_source)
+    {
+        // Política calibrada (control_policy.h): >= CHQ_RESEED_MIN_DEGRADED
+        // canais degradados juntos OU miss alto sustentado depois da
+        // blacklist. Disparo por BORDA da condição (g_reseed_needed é nível
+        // e só é limpo quando a proposta sai: sem a borda, uma condição
+        // persistente -- ex. Wi-Fi larga que reseed não resolve -- geraria
+        // um reseed a cada vez que a guarda de controle liberasse). No braço
+        // de miss, zera o contador ao disparar: o próximo disparo exige
+        // CHQ_RESEED_MISS_WINDOWS janelas novas (>= ~30 s entre reseeds).
+        bool reseed_cond = should_reseed_for_channel_quality(
+            mask_popcount16(chq_mask), g_chq_post_bl_miss_windows);
+        if (reseed_cond && !g_chq_reseed_cond_prev)
+        {
+            g_reseed_needed = true;
+            if (g_chq_post_bl_miss_windows >= CHQ_RESEED_MISS_WINDOWS)
+                g_chq_post_bl_miss_windows = 0;
+        }
+        g_chq_reseed_cond_prev = reseed_cond;
+    }
     if (alert_now != g_alert_active)
     {
         if (alert_now)
         {
-            g_reseed_needed = true;
+            if (!g_mestre_chq_source)
+                g_reseed_needed = true;
             guarded_println("[MESTRE] ALERTA: ataque detectado (analisador).");
             tlm_event("mestre", "alert_on");
         }
@@ -1365,6 +1465,8 @@ static void mestre_loop()
     }
 
     // --- contabiliza o slot (uma vez, na saída) ---
+    if (g_mestre_chq_source)
+        chq_note_slot(acked_any);
     if (acked_any)
     {
         tlm_printf("mestre", "hop", "ch=%u;n=%lu;frag=%u", channel, g_hop_counter, g_current_fragment);

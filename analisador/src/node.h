@@ -16,7 +16,11 @@
  * ao GPIO 4 do mestre (entrada) + GND comum entre as duas placas, quando
  * standalone (4 placas). Numa Placa A combinada (two-board-topology), o
  * alerta usa uma flag compartilhada em vez de GPIO — ver
- * analisador_set_alert_sink(). Ver docs/pinout.md.
+ * analisador_set_alert_sink() / analisador_set_chq_sink(). Ver docs/pinout.md.
+ *
+ * channel-quality-sensing: quem decide o alerta/máscara é a ocupação por
+ * canal com histerese (shared/channel_quality.h), agnóstica à causa. O
+ * classificador CFAR/votos abaixo virou só telemetria (`chmap`, cfar_on/off).
  *
  * Output (115200 baud, sem cabecalho):
  *   <ch0_%>,<ch1_%>,...,<ch125_%>
@@ -27,6 +31,7 @@
 #include <RF24.h>
 #include <math.h>
 #include "../../shared/hopping.h"
+#include "../../shared/channel_quality.h"
 #include "../../shared/telemetry.h"
 
 // Pinagem standalone (4 placas, barramento único): CE/CSN/SCK/MISO/MOSI
@@ -168,7 +173,7 @@ static int channelData[NUM_CHANNELS];
 // Estado do baseline adaptativo por canal -- ver comentário acima
 // (ADAPTIVE_*). float é seguro aqui: nada disto é tocado por interrupção
 // nem compartilhado com outra task diretamente (só o boolean agregado de
-// classifyAttack() cruza pra fora via setAlertPin()/tlm_printf).
+// classifyAttack() cruza pra fora, e agora só via tlm_printf).
 static float g_baseline[NUM_CHANNELS];
 static float g_mad[NUM_CHANNELS];
 static bool g_primed[NUM_CHANNELS];
@@ -182,7 +187,13 @@ static uint8_t g_vote_write_idx[NUM_CHANNELS];
 static uint8_t g_vote_count[NUM_CHANNELS];
 
 static uint8_t g_attack_streak = 0;
-static bool g_attack_active = false;
+static bool g_attack_active = false; // só telemetria (CFAR) -- não aciona o alerta
+
+// channel-quality-sensing (tarefa 3.1): qualidade por canal medida a cada
+// varredura completa -- ocupação + histerese (shared/channel_quality.h).
+// É ESTE estado que decide o alerta e a máscara entregue ao mestre.
+static ChannelQualityState g_analisador_chq;
+static bool g_chq_alert_active = false; // (máscara != 0), borda -> alert_on/alert_off
 
 // Sink alternativo do alerta de ataque (two-board-topology): quando
 // registrado (Placa A combinada, mestre+analisador na mesma placa), grava
@@ -190,16 +201,35 @@ static bool g_attack_active = false;
 // o comportamento standalone via digitalWrite(PIN_ALERT, ...).
 static void (*g_analisador_alert_sink)(bool) = nullptr;
 
+// channel-quality-sensing (tarefa 3.1): sink da MÁSCARA de 16 bits (bit i =
+// HOPPING_CHANNELS[i] degradado) na placa combinada. Quando registrado, a
+// placa é combinada (HSPI, sem GPIO de alerta) e o mestre consome a máscara
+// inteira em vez do booleano. Sem ele (4 placas) o booleano
+// (máscara != 0) continua indo pelo pino PIN_ALERT, como antes.
+static void (*g_analisador_chq_sink)(uint16_t) = nullptr;
+
 static void analisador_set_alert_sink(void (*sink)(bool))
 {
     g_analisador_alert_sink = sink;
+}
+
+static void analisador_set_chq_sink(void (*sink)(uint16_t))
+{
+    g_analisador_chq_sink = sink;
+}
+
+// Placa combinada = qualquer sink registrado (bool ou máscara): o VSPI é do
+// mestre e GPIO 4 é o SCK do HSPI do analisador, então nunca mexe em PIN_ALERT.
+static bool analisador_is_combined()
+{
+    return g_analisador_alert_sink != nullptr || g_analisador_chq_sink != nullptr;
 }
 
 static void setAlertPin(bool active)
 {
     if (g_analisador_alert_sink)
         g_analisador_alert_sink(active);
-    else
+    else if (!g_analisador_chq_sink)
         digitalWrite(PIN_ALERT, active ? HIGH : LOW);
 }
 
@@ -324,9 +354,9 @@ static uint16_t computeCompromisedMask(uint8_t *out_count)
 // Declara "ataque ativo" quando pelo menos ATTACK_MIN_CHANNELS canais de
 // HOPPING_CHANNELS estão simultaneamente marcados como comprometidos
 // pelo baseline adaptativo (updateAdaptiveBaseline(), por canal -- ver
-// bloco ADAPTIVE_* acima), por ATTACK_STREAK_N ciclos seguidos. Reflete
-// o estado agregado via setAlertPin() (HIGH/flag enquanto ativo, LOW/flag
-// assim que um ciclo deixa de ser candidato) e emite o mapa completo de
+// bloco ADAPTIVE_* acima), por ATTACK_STREAK_N ciclos seguidos.
+// channel-quality-sensing: agora é SÓ TELEMETRIA -- registra o veredito
+// como cfar_on/cfar_off, sem acionar setAlertPin(). Emite o mapa completo de
 // canais comprometidos via telemetria (`chmap`) a cada ciclo, para
 // observabilidade/depuração independente do alerta agregado.
 static void classifyAttack()
@@ -336,6 +366,10 @@ static void classifyAttack()
 
     tlm_printf("analisador", "chmap", "mask=0x%04X;count=%u", mask, compromised_count);
 
+    // channel-quality-sensing (tarefa 3.2): o veredito do CFAR NÃO aciona
+    // mais o alerta (quem faz isso é classifyChannelQuality()). Fica como
+    // telemetria comparável (cfar_on/cfar_off, antigos alert_on/alert_off)
+    // até a validação de bancada da change.
     bool candidate = compromised_count >= ATTACK_MIN_CHANNELS;
 
     if (candidate)
@@ -344,9 +378,7 @@ static void classifyAttack()
         if (g_attack_streak >= ATTACK_STREAK_N && !g_attack_active)
         {
             g_attack_active = true;
-            setAlertPin(true);
-            guarded_printf("[ALERTA] Ataque detectado. canais comprometidos=%u mask=0x%04X\n", compromised_count, mask);
-            tlm_printf("analisador", "alert_on", "count=%u;mask=0x%04X", compromised_count, mask);
+            tlm_printf("analisador", "cfar_on", "count=%u;mask=0x%04X", compromised_count, mask);
         }
     }
     else
@@ -355,8 +387,72 @@ static void classifyAttack()
         if (g_attack_active)
         {
             g_attack_active = false;
-            setAlertPin(false);
-            guarded_println("[ALERTA] Ataque encerrado.");
+            tlm_event("analisador", "cfar_off");
+        }
+    }
+}
+
+// channel-quality-sensing (tarefa 3.1): alimenta a janela de ocupação com a
+// varredura recém-concluída, avalia a histerese por canal e entrega o
+// resultado: telemetria `chq`, máscara ao sink da placa combinada e o
+// booleano (máscara != 0) ao alerta legado (GPIO de 4 placas / sink bool).
+static void classifyChannelQuality()
+{
+    // occ[i] = channelData[HOPPING_CHANNELS[i]] = % (0..100) das
+    // SCAN_SAMPLES leituras de testCarrier() que acenderam naquele canal
+    // nesta varredura -- exatamente o valor da célula do CSV/spectrum.
+    uint8_t occ[TABLE_SIZE];
+    for (uint8_t i = 0; i < TABLE_SIZE; i++)
+    {
+        int v = channelData[HOPPING_CHANNELS[i]];
+        occ[i] = (uint8_t)(v < 0 ? 0 : (v > 100 ? 100 : v));
+    }
+
+    chq_push_sweep(g_analisador_chq, occ);
+    uint16_t mask = chq_degraded_mask(g_analisador_chq);
+
+    // Até 3 canais de maior ocupação média da janela (canal RF:ocupação),
+    // só os com média > 0. Seleção simples sobre 16 itens.
+    char top[48];
+    int pos = 0;
+    top[0] = '\0';
+    bool used[TABLE_SIZE] = {false};
+    for (uint8_t n = 0; n < 3; n++)
+    {
+        int best = -1;
+        uint8_t best_mean = 0;
+        for (uint8_t i = 0; i < TABLE_SIZE; i++)
+        {
+            uint8_t m = chq_mean(g_analisador_chq, i);
+            if (!used[i] && m > best_mean)
+            {
+                best = i;
+                best_mean = m;
+            }
+        }
+        if (best < 0)
+            break;
+        used[best] = true;
+        pos += snprintf(top + pos, sizeof(top) - (size_t)pos, "%s%u:%u", n ? "," : "", HOPPING_CHANNELS[best], best_mean);
+    }
+    tlm_printf("analisador", "chq", "mask=0x%04X;top=%s", mask, top);
+
+    if (g_analisador_chq_sink)
+        g_analisador_chq_sink(mask);
+
+    bool alert = (mask != 0);
+    if (alert != g_chq_alert_active)
+    {
+        g_chq_alert_active = alert;
+        setAlertPin(alert);
+        if (alert)
+        {
+            guarded_printf("[ALERTA] Canais degradados=%u mask=0x%04X\n", mask_popcount16(mask), mask);
+            tlm_printf("analisador", "alert_on", "count=%u;mask=0x%04X", mask_popcount16(mask), mask);
+        }
+        else
+        {
+            guarded_println("[ALERTA] Canais voltaram ao normal.");
             tlm_event("analisador", "alert_off");
         }
     }
@@ -384,7 +480,8 @@ static void analisador_setup()
 
     guarded_println("\n=== TCC Analisador v1 — Espectro 2.4 GHz ===");
 
-    bool combined_mode = (g_analisador_alert_sink != nullptr);
+    bool combined_mode = analisador_is_combined();
+    chq_reset(g_analisador_chq);
 
     if (!combined_mode)
     {
@@ -435,7 +532,8 @@ static void analisador_setup()
 static void analisador_loop()
 {
     scanSpectrum();
-    classifyAttack();
+    classifyAttack();        // telemetria (chmap, cfar_on/off) -- não decide o alerta
+    classifyChannelQuality(); // ocupação + histerese: decide alerta e máscara
     sendCSV();
 }
 
