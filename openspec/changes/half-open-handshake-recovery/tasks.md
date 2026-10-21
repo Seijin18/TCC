@@ -29,15 +29,22 @@ desnecessários pela correção do #2).
 
 ## 3. Validação em bancada
 
-- [ ] 3.1 `pio test -e native_test` + `pio run` todos os envs; gravar.
-- [ ] 3.2 Não-regressão: bateria `hold` ch10 `PA_MAX` + 10 re-pareamentos
+- [x] 3.1 `pio test -e native_test` + `pio run` todos os envs; gravar.
+- [x] 3.2 Não-regressão: bateria `hold` ch10 `PA_MAX` + 10 re-pareamentos
       normais — o watchdog NÃO dispara em operação normal (0 `half_open`), e
       o pareamento continua subindo em ~3-4 s.
-- [ ] 3.3 (Se possível) injetar o estado meio-aberto artificialmente (ex.:
-      um comando de teste que force o escravo a ignorar o próximo
-      `FragmentPacket` por N sessões) e confirmar `half_open` + recuperação
-      ≤ 15 s. Se não for viável sem mudar firmware de teste, documentar que a
-      validação do disparo fica dependente de uma reprodução futura.
+- [~] 3.3 **Validação parcial (2026-10-21)**: o estado preso original não
+      reproduz mais (gatilho eliminado pelo #2), então o disparo não pôde ser
+      forçado de forma representativa. Evidência obtida: (a) ANTES do fix do
+      reset completo, o cenário A disparou `half_open` 5x SEM recuperar
+      (`battery-20261021-144452`); (b) DEPOIS, cenário A x5 recuperou sozinho
+      em todas (`session-20261021-115813`), com o watchdog disparando 1x
+      (sessions=4) e recuperando ~1,2 s após `jam off`; (c) a ação de
+      recuperação é agora código IDÊNTICO ao `reset` manual comprovadamente
+      recuperador. Cobertura empírica do caminho disparo→recuperação é de 1
+      amostra (o estado raramente chega a 4 sessões sem confirmar). Opção de
+      reforço: baixar HALF_OPEN_SESSIONS temporariamente p/ forçar mais
+      disparos — não feito (custo/benefício baixo dado o argumento mecânico).
 - [ ] 3.4 Se qualificar, copiar sessão para `logs/working/`.
 
 ## 4. Fechamento
