@@ -34,12 +34,16 @@ Bateria diagnóstica (`diag_battery.py t3-offline`/`t3-run`):
   e nenhuma borda nova aparece quando o jammer chega — exatamente o que a
   mudança para qualidade **por canal** resolve. `chmap count ≥ 1` em todos
   os ciclos de todas as fases.
-- **Confirma a direção (ocupação prediz perda, agnóstico à causa)**: com
-  portadora travada no ch70 a atividade do analisador saltou de 0,45 para
-  **97,0** e o miss do mestre no ch70 para **78%**; correlação
-  ocupação-vs-miss nos 16 canais = **0,93** na fase com jammer, **0,70–0,75**
-  nas fases só com Wi-Fi (dominada por ch34/ch46). Ou seja, um limiar de
-  ocupação separa canal bom de ruim tanto para jammer quanto para Wi-Fi.
+- **Confirma a direção para ataque FORTE**: com portadora travada no ch70 a
+  atividade do analisador saltou de 0,45 para **97,0** e o miss do mestre no
+  ch70 para **78%**. A calibração ampla (ver design.md "Resultado da
+  calibração 2026-10-21") confirma: ocupação separa perfeitamente jammer forte
+  (90-100) de canal limpo (≤15), zero sobreposição. **Ressalva importante**: a
+  correlação de 0,70-0,75 que o Wi-Fi mostrou no t3-run NÃO se sustenta no
+  conjunto maior — o ch34 em ocupação ~11 tem correlação ≈ 0 com o miss em
+  várias sessões. A ocupação só é confiável para ocupação forte; a faixa
+  moderada de Wi-Fi fica para a evidência de ack do enlace. Por isso a fusão
+  (próxima seção) é essencial.
 - **A blacklist reativa do mestre já funciona**: na fase `hold ch70` o mestre
   baniu o ch70 sozinho (`mask=0xFFDB`) pela própria evidência de ack. Confirma
   o papel do analisador como fonte **proativa** fundida, não substituta.

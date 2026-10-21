@@ -1,10 +1,10 @@
 ## 1. Calibração (offline, antes do firmware)
 
-- [ ] 1.1 Script em `tools/validation/` cruzando ocupação por canal
+- [x] 1.1 Script em `tools/validation/` cruzando ocupação por canal
       (`spectrum.csv`) com miss% do mestre por canal, por sessão.
 - [ ] 1.2 Coleta dedicada: Wi-Fi ambiente sem jammer (10 min) + jammer
       `hold` em 3 canais conhecidos da tabela, enlace ativo.
-- [ ] 1.3 Escolher `W`, `T_on`, `T_off`; medir a ocupação causada pelo
+- [x] 1.3 Escolher `W`, `T_on`, `T_off`; medir a ocupação causada pelo
       próprio mestre (D3). Registrar no `design.md`.
 
 ## 2. Lógica pura
