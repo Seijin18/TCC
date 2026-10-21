@@ -72,31 +72,21 @@ dados confirmarem), não o receptor do mestre. Correções à proposta:
 
 ## What Changes
 
-- **Confirmar o lado surdo antes da correção definitiva**: reproduzir o
-  estado preso e, nele, (a) usar o analisador (mesma placa do mestre) para
-  ver se há energia do ack do escravo no canal de acampamento a cada
-  ~100 ms; (b) reinicializar só o mestre vs. só o escravo e registrar qual
-  resolve.
-- **Telemetria de saúde do receptor no pareamento**: o mestre passa a medir
-  portadora (`testCarrier()`/RPD) dentro da janela de espera do ack e
-  publica em `pair_stats` (`rx_rpd=` — janelas com portadora detectada).
-  Distingue "ninguém transmitindo" de "alguém transmitindo e nada
-  decodificado".
-- **Detecção e recuperação de handshake meio-aberto, nos dois lados,
-  independente da causa exata**:
-  - mestre: `HALF_OPEN_SILENT_CAMPS` acampamentos seguidos sem nenhum pacote
-    recebido → `radio_reinit()` + dump `e=regs;why=half_open`, com backoff
-    para não reinicializar sem parar quando o escravo está de fato
-    desligado;
-  - escravo: `HALF_OPEN_SESSIONS` sessões de pareamento seguidas (nonces
-    distintos) respondidas sem nenhum `FragmentPacket` → evento
-    `half_open`, `radio_reinit()` e volta a varrer.
-- **Reinicialização verificada**: depois de `radio_reinit()`, ler de volta
-  os registradores críticos (`CONFIG`, `EN_RXADDR`, `RX_ADDR_P1`, `RF_CH`,
-  `FEATURE`, `DYNPD`, `RF_SETUP`) e comparar com o esperado; divergência →
-  reinicialização completa (`begin()` + configuração de boot). Conferir que
-  a FIFO de RX é esvaziada na reinicialização do mestre (requisito existente
-  "Estado de rádio conhecido ao entrar em pareamento").
+**Escopo enxuto (decisão do autor, 2026-10-21):** como o #2 eliminou o
+gatilho e o travamento não reproduz mais, só a rede de segurança é
+implementada; o diagnóstico de lado surdo, a instrumentação de RPD e o
+watchdog do mestre são descartados.
+
+- **Watchdog de auto-recuperação do escravo**: o escravo conta sessões de
+  pareamento provisório seguidas (nonces distintos) que nunca confirmam um
+  `FragmentPacket`. Ao atingir `HALF_OPEN_SESSIONS`, emite `e=half_open`,
+  faz `radio_reinit()` completo e volta a varrer **a partir de um índice de
+  candidato / fase de dwell aleatorizados** — imitando o `reset` manual do
+  escravo (único que recuperava o estado preso real) e quebrando qualquer
+  ressonância de fase com a rotação de acampamento do mestre. O contador
+  zera ao confirmar o enlace (CONFIRMED).
+- A decisão "deve recuperar?" vira função pura em `shared/pairing.h`, testada
+  em `env:native_test`.
 
 ## Capabilities
 
@@ -110,15 +100,13 @@ dados confirmarem), não o receptor do mestre. Correções à proposta:
 
 ## Impact
 
-- `mestre/src/node.h`: `try_establish_link()` (RPD na janela de ack),
-  acampamento (contador de acampamentos silenciosos), `radio_reinit()`
-  (readback + fallback).
-- `escravo/src/node.h`: caminho `ESCRAVO_PROVISIONAL` (contador de sessões
-  sem dado), `radio_reinit()` (readback).
-- `shared/pairing.h`: decisão pura "meio-aberto?" a partir dos contadores,
-  testada em `env:native_test`.
-- `shared/protocol.h`: constantes `HALF_OPEN_SILENT_CAMPS`,
-  `HALF_OPEN_SESSIONS`, backoff.
-- `tools/logger/main.py`: guardar `half_open`/`rx_rpd` em `state.json`.
-- Destrava: qualquer bateria A/B/C confiável (o cenário C de 2026-10-21 foi
-  anulado por este bug).
+- `escravo/src/node.h`: contador de sessões provisórias sem confirmação;
+  gatilho de recuperação forçada (reinit + rescan aleatorizado) ao atingir o
+  limiar; zera em CONFIRMED e no `reset` por comando.
+- `shared/pairing.h`: decisão pura `half_open_should_recover(...)`, testada
+  em `env:native_test`.
+- `shared/protocol.h`: constante `HALF_OPEN_SESSIONS`.
+- `tools/logger/main.py`: guardar `half_open` em `state.json`.
+- Rede de segurança: o cenário C que havia sido anulado por este bug em
+  2026-10-21 já volta a funcionar com o #2; este watchdog garante a
+  auto-recuperação caso o estado meio-aberto ocorra por outro caminho.

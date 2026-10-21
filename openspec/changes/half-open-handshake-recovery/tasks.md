@@ -1,46 +1,46 @@
-## 1. Instrumentar e confirmar o lado surdo
+## Escopo enxuto (decisão 2026-10-21)
 
-- [ ] 1.1 Mestre: amostrar `testCarrier()` durante `LINK_ACK_WAIT_MS` em
-      `try_establish_link()` e publicar `rx_rpd=` em `pair_stats`.
-- [ ] 1.2 Escravo: contar sessões de pareamento seguidas sem
-      `FragmentPacket` e emitir `e=half_open_suspect;sessions=N` (só
-      telemetria nesta etapa, sem ação).
-- [ ] 1.3 `pio test -e native_test` + `pio run` de todos os envs; gravar
-      `placa_a`/`placa_b`.
-- [ ] 1.4 Reproduzir o estado preso: laço de `reset` forçados + bateria
-      `hold` ch10 `PA_MAX` até ocorrer (registrar quantas tentativas).
-- [ ] 1.5 No estado preso: (a) `spectrum.csv` no canal de acampamento —
-      há energia a cada ~100 ms? (b) `placa_a reset` sozinho vs.
-      `placa_b reset` sozinho — qual destrava? Registrar no `design.md`
-      (confirma/refuta a hipótese D1).
+O gatilho conhecido do travamento (falha de rekey sob mitigação pela deriva)
+foi eliminado por `slot-phase-servo` e o travamento não reproduz mais (bateria
++ 15 ciclos de estresse com mitigação ligada: 0 travas, 0 `rekey_failed`).
+Decisão do autor: implementar **só** o watchdog de auto-recuperação do
+escravo como rede de segurança; descartar o escopo original de diagnóstico de
+lado surdo, instrumentação de RPD e watchdog do mestre (tornados
+desnecessários pela correção do #2).
 
-## 2. Recuperação
+## 1. Lógica pura
 
-- [ ] 2.1 `shared/pairing.h`: função pura de decisão de meio-aberto
-      (contadores + backoff) + testes em `test/test_pairing`.
-- [ ] 2.2 Mestre: watchdog de acampamentos silenciosos
-      (`HALF_OPEN_SILENT_CAMPS`, backoff até 60 s) → `radio_reinit()` +
-      `e=regs;why=half_open`.
-- [ ] 2.3 Escravo: `HALF_OPEN_SESSIONS` sessões sem fragmento →
-      `e=half_open`, `radio_reinit()`, volta a varrer.
-- [ ] 2.4 `radio_reinit()` dos dois lados: readback dos registradores
-      críticos + fallback para reinicialização completa; conferir
-      `flush_rx()` na reinit do mestre.
-- [ ] 2.5 Logger: `half_open` e `rx_rpd` em `state.json`.
+- [ ] 1.1 `shared/pairing.h`: função pura
+      `half_open_should_recover(sessions_without_data, threshold)` (+ qualquer
+      estado de contagem que faça sentido isolar) e testes em
+      `test/test_pairing`.
+
+## 2. Escravo
+
+- [ ] 2.1 Contar sessões provisórias consecutivas com nonce novo que nunca
+      confirmam `FragmentPacket`; zerar ao confirmar (CONFIRMED) e em
+      `reset_to_scanning` por comando.
+- [ ] 2.2 Ao atingir `HALF_OPEN_SESSIONS` (constante em `shared/protocol.h`):
+      emitir `e=half_open`, `radio_reinit()` completo, voltar a varrer a
+      partir de um índice de candidato / fase de dwell **aleatorizados**
+      (quebra ressonância de fase com o acampamento do mestre, imitando o
+      `reset` manual que recuperava o estado preso).
+- [ ] 2.3 Logger: registrar `half_open` em `state.json`/`events.log`.
 
 ## 3. Validação em bancada
 
 - [ ] 3.1 `pio test -e native_test` + `pio run` todos os envs; gravar.
-- [ ] 3.2 30 `reset` forçados seguidos: nenhum período sem tráfego > 15 s.
-- [ ] 3.3 Bateria A/B/C `hold` ch10 `PA_MAX`, 3 vezes: o cenário C sempre
-      pareia; nenhum período sem tráfego > 15 s fora da fase de jamming do
-      cenário A.
-- [ ] 3.4 Se qualificar, copiar sessão e baterias para `logs/working/`
-      (`CLAUDE.md`).
+- [ ] 3.2 Não-regressão: bateria `hold` ch10 `PA_MAX` + 10 re-pareamentos
+      normais — o watchdog NÃO dispara em operação normal (0 `half_open`), e
+      o pareamento continua subindo em ~3-4 s.
+- [ ] 3.3 (Se possível) injetar o estado meio-aberto artificialmente (ex.:
+      um comando de teste que force o escravo a ignorar o próximo
+      `FragmentPacket` por N sessões) e confirmar `half_open` + recuperação
+      ≤ 15 s. Se não for viável sem mudar firmware de teste, documentar que a
+      validação do disparo fica dependente de uma reprodução futura.
+- [ ] 3.4 Se qualificar, copiar sessão para `logs/working/`.
 
 ## 4. Fechamento
 
-- [ ] 4.1 Sincronizar spec delta com o que foi implementado (D1 pode mudar
-      a causa registrada).
-- [ ] 4.2 `openspec validate half-open-handshake-recovery --strict` e
-      arquivar.
+- [ ] 4.1 Sincronizar o spec delta com o implementado.
+- [ ] 4.2 `openspec validate half-open-handshake-recovery --strict` e arquivar.
