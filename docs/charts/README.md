@@ -17,6 +17,7 @@ rádio em `hold ch10 PA_MAX` (o atacante confiável desta bancada).
 | Arquivo | O que demonstra |
 |---|---|
 | `bateria-abc-sistema-final.png` | **Resultado final do sistema** (2026-10-21, firmware com as 3 correções: servo de fase, watchdog de pareamento, qualidade por canal). A/B/C sob `hold ch10 PA_MAX`. Sobrevivência sob jamming: **A=0%, B=94%, C=99%**; C aplica blacklist nos dois lados, 0 `loss_of_sync` em B/C, A cai e re-pareia sozinho. |
+| `comparacao-modos-atacante.png` | **Sistema vs os 4 modos de atacante** (mesma campanha, firmware final, A/B/C por modo, um rádio PA_MAX). Sobrevivência sob jamming: só o `hold` derruba o canal fixo (A=1%); `sweep`/`targeted`/`adaptive` se diluem (A=85-90%). Hopping (B) e sistema completo (C) sobrevivem a **todos** os modos (91-102%). Justifica o `hold` como o atacante de referência. |
 | `comparacao-survival-event-vs-time.png` | **Impacto do redesenho do transporte** (event-driven → time-slotted, 2026-09-26, mesmo teste, mesma sessão). Sobrevivência: B **9%→45%**, C **1%→78%**; o event-driven dessincroniza sob jamming e o C colapsa, o time-slotted se mantém. É a justificativa da escolha de arquitetura. |
 | `estabilidade-deriva-antes-depois.png` | **Confiabilidade do enlace sem jammer** — correção da deriva de clock (`slot-phase-servo`). Antes: throughput decai com o tempo (serrote, re-pareamento mascarava); depois: estável ~100 fragmentos/s por 15 min. |
 
@@ -43,6 +44,11 @@ rádio em `hold ch10 PA_MAX` (o atacante confiável desta bancada).
   maior parte dessa folga. A diferença C≫B apareceria contra um atacante
   multi-canal ou que persegue a sequência de salto — fora do alcance desta
   bancada de um rádio.
+- **Latência não é um eixo de avaliação neste sistema.** No transporte por
+  slots a latência por fragmento fica estruturalmente constante (~3 ms
+  mediana / ~19 ms p95) em todos os cenários e fases, inclusive sob jamming.
+  Por isso o painel de latência foi removido das figuras de bateria (era um
+  scatter ilegível de valores quantizados); o fato fica só no texto.
 - **Quem banе o canal é a evidência de ack do próprio mestre (reativa).** A
   detecção por ocupação do analisador (`channel-quality-sensing`) é um sinal
   complementar: ela conserta o alerta antes travado pelo Wi-Fi e dá

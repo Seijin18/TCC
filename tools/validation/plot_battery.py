@@ -112,12 +112,13 @@ def main():
     labels = battery.get("scenario_labels", {})
     by_scenario = phases_by_scenario(battery)
 
-    fig, (ax_thr, ax_ack, ax_lat, ax_bar) = plt.subplots(4, 1, figsize=(11, 16), sharex=False)
+    fig, (ax_thr, ax_ack, ax_bar) = plt.subplots(3, 1, figsize=(11, 12), sharex=False)
     # jamming-mitigation-hardening: métricas por fase (baseline/jamming/
     # recovery) por cenário, para o painel de barras e a taxa de sobrevivência.
     per_phase_thr = {}  # scenario -> {phase: mean throughput (telemetria frags/s)}
     per_phase_acks = {}  # scenario -> {phase: total de ACKs recebidos}
     per_phase_ackrate = {}  # scenario -> {phase: ACKs/s (contagem direta, confiável)}
+    per_phase_lat = {}  # scenario -> {phase: [latências ms]}
 
     print("=" * 78)
     print(f"Bateria comparativa: {path}")
@@ -166,10 +167,6 @@ def main():
                 ys.append(y)
                 prev_t = t
             ax_thr.plot(xs, ys, marker="o", markersize=3, color=color, label=label)
-        if lat:
-            xs, ys = zip(*sorted(lat))
-            ax_lat.scatter(xs, ys, s=6, color=color, alpha=0.5, label=label)
-
         # ACKs/s ao longo do tempo: bina os eventos de ack em janelas de 2s.
         if acks:
             BIN = 2.0
@@ -187,7 +184,6 @@ def main():
         if jam_start is not None and jam_end is not None:
             ax_thr.axvspan(jam_start - t_start, jam_end - t_start, color=color, alpha=0.05)
             ax_ack.axvspan(jam_start - t_start, jam_end - t_start, color=color, alpha=0.05)
-            ax_lat.axvspan(jam_start - t_start, jam_end - t_start, color=color, alpha=0.05)
 
             plr_during_jam = [v for ep, v in plr if jam_start <= ep <= jam_end]
             thr_during_jam = [v for t, v in thr if (jam_start - t_start) <= t <= (jam_end - t_start)]
@@ -207,6 +203,11 @@ def main():
             ph_acks[ph_name] = n
             dur = (we - ws)
             ph_ackrate[ph_name] = (n / dur) if dur and dur < 1e8 else 0.0
+        # amostras de latência (ms) por fase, para o painel de distribuição.
+        per_phase_lat[scenario] = {
+            ph_name: [v for (t, v) in lat if ws <= (t + t_start) < we]
+            for ph_name, (ws, we) in wins.items()
+        }
         per_phase_thr[scenario] = ph_means
         per_phase_acks[scenario] = ph_acks
         per_phase_ackrate[scenario] = ph_ackrate
@@ -221,11 +222,11 @@ def main():
     ax_ack.grid(alpha=0.3)
     ax_ack.legend(loc="upper right", fontsize=8)
 
-    ax_lat.set_ylabel("latência por fragmento (ms)")
-    ax_lat.set_xlabel("tempo (s, desde o início da baseline do cenário)")
-    ax_lat.set_title("Latência × tempo (relativo ao início da baseline de cada cenário)")
-    ax_lat.grid(alpha=0.3)
-    ax_lat.legend(loc="upper right", fontsize=8)
+    # Painel de latência removido: no sistema por slots a latência fica
+    # estruturalmente constante (~3 ms mediana / ~19 ms p95) em todos os
+    # cenários e fases, inclusive sob jamming -- não diferencia nada
+    # visualmente. O fato fica registrado no resumo em texto (lat jam ms).
+    import numpy as np  # usado pelo painel de barras abaixo
 
     # -------- Painel de barras: ACKs/s médio por fase, por cenário -------
     # Usa a TAXA DE ACKS (contagem direta), não a telemetria de throughput: sob
@@ -235,7 +236,6 @@ def main():
     # nas duas variantes.
     phase_order = ["baseline", "jamming", "recovery"]
     phase_labels = {"baseline": "baseline\n(sem jammer)", "jamming": "jamming\n(hold PA_MAX)", "recovery": "recovery\n(jammer off)"}
-    import numpy as np
     x = np.arange(len(phase_order))
     nscen = max(len(scenarios), 1)
     width = 0.8 / nscen
