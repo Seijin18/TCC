@@ -423,15 +423,22 @@ static void reset_to_scanning()
 static void escravo_half_open_recover()
 {
     tlm_printf("escravo", "half_open", "sessions=%u", g_provisional_sessions_no_data);
-    g_pair_idx = (uint8_t)(esp_random() % PAIRING_CANDIDATE_COUNT);
-    radio_reinit(); // ja faz setChannel(PAIRING_CANDIDATES[g_pair_idx])
-    escravo_radio.setChannel(PAIRING_CANDIDATES[g_pair_idx]);
-    // Fase de dwell aleatoria: recua g_pair_dwell_start em [0, PAIR_DWELL_MS)
-    // (aritmetica modular de unsigned long, igual ao millis() - start do loop).
-    g_pair_dwell_start = millis() - (unsigned long)(esp_random() % PAIR_DWELL_MS);
-    g_link_state = ESCRAVO_SCANNING;
-    reset_pair_cycle_counters();
     g_provisional_sessions_no_data = 0;
+    // Recuperacao IDENTICA ao `reset` manual do escravo (o unico que recuperava
+    // o estado preso real em bancada): mascara limpa + reset_to_scanning()
+    // COMPLETO. Um reset parcial (so g_link_state + contadores de ciclo)
+    // deixava current_channel, g_time_synced, os flags seed/mask-apply e o
+    // estado de estacionamento obsoletos -- em especial current_channel != 0xFF
+    // fazia o bootstrap pular o setChannel e o escravo escutar no canal errado
+    // (ver reset_to_scanning()): o watchdog disparava mas nao recuperava
+    // (cenario A, bateria 2026-10-21).
+    g_channel_mask = 0xFFFF;
+    reset_to_scanning();
+    // Alem do reset, randomiza o ponto de partida da varredura pra quebrar
+    // qualquer ressonancia de fase com a rotacao de acampamento do mestre.
+    g_pair_idx = (uint8_t)(esp_random() % PAIRING_CANDIDATE_COUNT);
+    escravo_radio.setChannel(PAIRING_CANDIDATES[g_pair_idx]);
+    g_pair_dwell_start = millis() - (unsigned long)(esp_random() % PAIR_DWELL_MS);
 }
 
 static void escravo_setup()
