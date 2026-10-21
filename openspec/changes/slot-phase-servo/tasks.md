@@ -24,10 +24,14 @@
 
 ## 4. Validação em bancada
 
-- [ ] 4.1 `pio test -e native_test` + `pio run` todos os envs; gravar.
-- [ ] 4.2 Soak de 15 min sem jammer, sem re-pareamento: throughput do mestre
+- [x] 4.1 `pio test -e native_test` + `pio run` todos os envs; gravar.
+- [x] 4.2 Soak de 15 min sem jammer, sem re-pareamento: throughput do mestre
       ≥ 90% do valor inicial durante todo o soak, 0 `loss_of_sync`,
       `|err|` filtrado ≤ 3 ms, nenhum `reanchor`.
+      **PASS 2026-10-21** (`session-20261021-101328`, 15 min): fps 98,6-102,1
+      (vs 105→40 no firmware antigo), 0 `loss_of_sync`, `err`=0 em todas as
+      186 linhas `phase`, 0 `reanchor`, sem reset. adj acumulado +53 ms ≈
+      57 ppm (compensa a deriva medida).
 - [ ] 4.3 Soak de 15 min com jammer `hold` ch10 `PA_MAX` em hopping: mesmos
       critérios fora do canal 10.
 - [ ] 4.4 Repetir a comparação dos 4 modos de jammer **sem** re-parear entre
