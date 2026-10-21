@@ -1,8 +1,6 @@
 #ifndef CONTROL_POLICY_H
 #define CONTROL_POLICY_H
 
-// Nos firmwares usa os typedefs de Arduino.h; no ambiente de testes nativo
-// (env:native_test) cai para <cstdint>.
 #ifdef ARDUINO
 #include <Arduino.h>
 #else
@@ -94,26 +92,19 @@ inline ControlProposalDecision decide_control_proposal(
 }
 
 // -------------------------------------------------------------
-// channel-quality-sensing (tarefa 2.3): gatilho de reseed
+// channel-quality-sensing: gatilho de reseed
 // -------------------------------------------------------------
-// A blacklist resolve canal ruim; a seed nova só vale quando a blacklist não
-// basta (design.md D5): muitos canais degradados AO MESMO TEMPO (banda
-// tomada em muitos pontos, ou atacante que segue o padrão de salto), ou o
-// miss do enlace continuar alto mesmo depois de a blacklist estar aplicada.
-// Valores iniciais CONSERVADORES (preferem não trocar seed a trocar à toa);
-// a calibrar na validação de bancada (tasks.md, seção 4), não derivados de
-// dado ainda.
+// Seed nova só quando a blacklist não basta: muitos canais degradados ao mesmo
+// tempo, ou miss alto mesmo com a blacklist aplicada. Limiares conservadores,
+// ainda não calibrados com dado.
 static const uint8_t CHQ_RESEED_MIN_DEGRADED = 6;  // >= 6 de 16 canais degradados juntos
 static const uint8_t CHQ_RESEED_MISS_PCT = 40;     // miss da janela > 40% conta como "alto"
 static const uint8_t CHQ_RESEED_MISS_WINDOWS = 3;  // janelas CONSECUTIVAS altas após a blacklist
 
 /**
- * Atualiza o contador de janelas consecutivas com miss alto depois de uma
- * blacklist aplicada. Quem chama (mestre) é dono do contador `prev`; chamar
- * uma vez por janela de medição do enlace. Sem blacklist aplicada o miss
- * alto não conta (ainda não se tentou o remédio barato) e o contador zera;
- * uma janela abaixo do limiar também zera (exige janelas consecutivas).
- * Satura em 255.
+ * Contador de janelas consecutivas com miss alto depois de uma blacklist
+ * aplicada (o chamador guarda `prev`; uma chamada por janela). Zera sem
+ * blacklist aplicada ou com janela abaixo do limiar. Satura em 255.
  */
 inline uint8_t chq_update_post_blacklist_miss_windows(uint8_t prev, bool blacklist_applied, uint8_t miss_pct)
 {
@@ -123,15 +114,8 @@ inline uint8_t chq_update_post_blacklist_miss_windows(uint8_t prev, bool blackli
 }
 
 /**
- * Decisão pura: o reseed se justifica? Entradas escalares, sem estado:
- *  - `degraded_count`: canais degradados agora (mask_popcount16 da máscara
- *    do analisador);
- *  - `post_blacklist_miss_windows`: saída de
- *    chq_update_post_blacklist_miss_windows().
- * Dispara quando `degraded_count >= CHQ_RESEED_MIN_DEGRADED` OU
- * `post_blacklist_miss_windows >= CHQ_RESEED_MISS_WINDOWS`. O resultado
- * alimenta `reseed_needed` de decide_control_proposal(), que continua dono
- * das guardas (pendente/agendado/modo fixo/mitigação).
+ * O reseed se justifica? Alimenta `reseed_needed` de decide_control_proposal(),
+ * que continua dono das guardas (pendente/agendado/modo fixo/mitigação).
  */
 inline bool should_reseed_for_channel_quality(uint8_t degraded_count, uint8_t post_blacklist_miss_windows)
 {

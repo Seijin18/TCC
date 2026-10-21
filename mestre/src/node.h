@@ -78,14 +78,11 @@ static void mestre_set_alert_source(bool (*source)())
     g_mestre_alert_source = source;
 }
 
-// channel-quality-sensing (tarefa 3.3): fonte da MÁSCARA de canais degradados
-// do analisador (bit i = HOPPING_CHANNELS[i]) na placa combinada. Quando
-// registrada, o mestre funde a máscara por canal com a evidência de ack em
-// update_channel_mask() e usa a política de reseed calibrada (contagem de
-// canais degradados / miss sustentado após a blacklist). Sem ela (4 placas,
-// só o booleano do GPIO ou da fonte bool) o comportamento é o de antes:
-// reseed na borda do alerta, nenhuma máscara por canal do sensor.
-// Mesma regra de ordem: registrar ANTES de mestre_setup().
+// channel-quality-sensing: fonte da máscara de canais degradados do
+// analisador (bit i = HOPPING_CHANNELS[i]) na placa combinada. Registrada: o
+// mestre funde a máscara com a evidência de ack e usa a política de reseed por
+// qualidade. Sem ela: reseed na borda do alerta, como antes.
+// Registrar ANTES de mestre_setup().
 static uint16_t (*g_mestre_chq_source)() = nullptr;
 
 static void mestre_set_chq_source(uint16_t (*source)())
@@ -93,8 +90,8 @@ static void mestre_set_chq_source(uint16_t (*source)())
     g_mestre_chq_source = source;
 }
 
-// Placa combinada = qualquer fonte registrada (bool ou máscara): sem pino de
-// alerta de entrada nem blink de LED_BUILTIN (GPIO 2 é MISO do HSPI).
+// Placa combinada = qualquer fonte registrada: sem pino de alerta nem blink de
+// LED_BUILTIN (GPIO 2 é MISO do HSPI).
 static bool mestre_is_combined()
 {
     return g_mestre_alert_source != nullptr || g_mestre_chq_source != nullptr;
@@ -446,12 +443,9 @@ static uint32_t g_channel_blacklisted_since[TABLE_SIZE] = {0};
 static bool g_alert_active = false;
 static bool g_reseed_needed = false;
 
-// channel-quality-sensing (tarefa 3.3): estado da política de reseed (só
-// usado com fonte de máscara). Janela de miss do enlace POR SLOT (não
-// reaproveita throughput_window: aquela mistura fragmentos confirmados --
-// vários por slot, em pipeline -- com slots perdidos). Cada slot conta 1,
-// ack em qualquer tentativa = ok; sem ack = miss. Fecha a cada
-// THROUGHPUT_WINDOW_HOPS slots (mesma janela de tempo da vazão, ~10 s).
+// channel-quality-sensing: janela de miss do enlace por slot (ack em qualquer
+// tentativa = ok), fechada a cada THROUGHPUT_WINDOW_HOPS slots. Separada da
+// throughput_window, que conta fragmentos e não slots.
 static uint32_t g_chq_win_slots = 0;
 static uint32_t g_chq_win_miss = 0;
 static uint8_t g_chq_post_bl_miss_windows = 0; // janelas consecutivas com miss alto após blacklist
@@ -771,12 +765,8 @@ static bool wait_control_ack(uint32_t expected_apply_at, uint32_t timeout_ms)
 // -------------------------------------------------------------
 static uint16_t compute_candidate_mask()
 {
-    // channel-quality-sensing: com fonte de máscara, funde o sensor (OR com a
-    // falha de ack) e aplica o piso de canais ativos. O piso HOP_MIN_ACTIVE_CHANNELS
-    // (4) só entra junto com o sensor: sem ele (4 placas) mantém min_active=1,
-    // porque com 4 o piso passaria a devolver canais de falha de ack alta
-    // quando o jamming banir mais de 12 canais -- mudaria o comportamento
-    // atual da topologia standalone.
+    // channel-quality-sensing: o piso de canais ativos só vale com o sensor;
+    // sem ele (4 placas) min_active=1 preserva o comportamento standalone.
     uint16_t sensor_mask = g_mestre_chq_source ? g_mestre_chq_source() : 0;
     uint8_t min_active = g_mestre_chq_source ? HOP_MIN_ACTIVE_CHANNELS : 1;
     return update_channel_mask(g_channel_mask, g_channel_fail, g_channel_blacklisted_since,
@@ -784,10 +774,8 @@ static uint16_t compute_candidate_mask()
                                 TABLE_SIZE, sensor_mask, min_active);
 }
 
-// channel-quality-sensing (tarefa 3.3): contabiliza um slot na janela de
-// miss do enlace; ao fechar a janela atualiza o contador de janelas
-// consecutivas com miss alto DEPOIS de haver blacklist aplicada (máscara
-// diferente de 0xFFFF). Chamado uma vez por slot, só com fonte de máscara.
+// channel-quality-sensing: contabiliza um slot na janela de miss; ao fechar,
+// atualiza as janelas consecutivas com miss alto após blacklist aplicada.
 static void chq_note_slot(bool acked)
 {
     g_chq_win_slots++;
@@ -802,15 +790,13 @@ static void chq_note_slot(bool acked)
     g_chq_win_miss = 0;
 }
 
-// Zera a janela/contador (reset_to_pairing: o enlace recomeça, as janelas
-// parciais não valem mais).
+// Zera a janela/contador em reset_to_pairing().
 static void chq_reset_miss_window()
 {
     g_chq_win_slots = 0;
     g_chq_win_miss = 0;
     g_chq_post_bl_miss_windows = 0;
-    // g_chq_reseed_cond_prev fica de fora de propósito: é detector de borda
-    // da condição, não da janela -- zerar aqui faria um novo reseed a cada
+    // g_chq_reseed_cond_prev fica de fora: zerar causaria um reseed a cada
     // re-pareamento enquanto a banda seguir degradada.
 }
 
@@ -1207,22 +1193,16 @@ static void mestre_loop()
     }
 
     // ---- ALERTA DO ANALISADOR (spectrum-attack-classification) ----
-    // channel-quality-sensing: com fonte de máscara, "alerta" = máscara != 0
-    // (só telemetria alert_on/alert_off) e o reseed vem da política abaixo,
-    // não mais da borda. Sem ela: booleano da fonte/GPIO, reseed na borda.
+    // channel-quality-sensing: com fonte de máscara, alerta = máscara != 0
+    // (só telemetria) e o reseed vem da política abaixo, não da borda.
     uint16_t chq_mask = g_mestre_chq_source ? g_mestre_chq_source() : 0;
     bool alert_now = g_mestre_chq_source ? (chq_mask != 0)
                      : (g_mestre_alert_source ? g_mestre_alert_source() : (digitalRead(PIN_ALERT_IN) == HIGH));
     if (g_mestre_chq_source)
     {
-        // Política calibrada (control_policy.h): >= CHQ_RESEED_MIN_DEGRADED
-        // canais degradados juntos OU miss alto sustentado depois da
-        // blacklist. Disparo por BORDA da condição (g_reseed_needed é nível
-        // e só é limpo quando a proposta sai: sem a borda, uma condição
-        // persistente -- ex. Wi-Fi larga que reseed não resolve -- geraria
-        // um reseed a cada vez que a guarda de controle liberasse). No braço
-        // de miss, zera o contador ao disparar: o próximo disparo exige
-        // CHQ_RESEED_MISS_WINDOWS janelas novas (>= ~30 s entre reseeds).
+        // Dispara por borda: g_reseed_needed é nível, e uma condição
+        // persistente que reseed não resolve (ex. Wi-Fi larga) reseedaria
+        // a cada liberação da guarda. No braço de miss, zera o contador.
         bool reseed_cond = should_reseed_for_channel_quality(
             mask_popcount16(chq_mask), g_chq_post_bl_miss_windows);
         if (reseed_cond && !g_chq_reseed_cond_prev)
@@ -1326,9 +1306,7 @@ static void mestre_loop()
 
         FragmentPacket pkt;
         fill_fragment(pkt, g_current_fragment);
-        // slot-phase-servo: a ancora do mestre so e fixada quando o ack chega
-        // (abaixo), entao ainda nao ha fase de slot a informar -- o escravo
-        // ignora PHASE_UNKNOWN e captura o alvo do servo nos pacotes seguintes.
+        // slot-phase-servo: ancora so fixada quando o ack chega (abaixo)
         pkt.slot_phase_ms = PHASE_UNKNOWN;
         mestre_radio.stopListening();
         bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));
@@ -1412,9 +1390,7 @@ static void mestre_loop()
         {
             FragmentPacket pkt;
             fill_fragment(pkt, g_current_fragment);
-            // slot-phase-servo: posicao do mestre neste slot, medida o mais
-            // perto possivel do envio (o escravo rastreia a deriva sub-slot
-            // por ela -- ver shared/time_sync.h).
+            // slot-phase-servo: fase medida o mais perto possivel do envio
             pkt.slot_phase_ms = phase_in_slot_ms(millis(), g_hop_start_at, slot);
             mestre_radio.stopListening();
             bool sent = radio_send(mestre_radio, &pkt, sizeof(pkt));

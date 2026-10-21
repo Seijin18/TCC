@@ -156,10 +156,8 @@ static const uint8_t PAIR_FAIL_THRESHOLD = 3;
 // Em "rounds" de seleção de candidato (não hops, que ainda não existem
 // antes de parear) -- ver g_pair_round em mestre/src/node.h.
 static const uint32_t PAIR_RECOVERY_ROUNDS = 12;
-// half-open-handshake-recovery: quantas sessoes provisorias SEGUIDAS (nonces
-// novos) sem nenhuma confirmacao por FragmentPacket o escravo tolera antes de
-// forcar a recuperacao (radio_reinit() + varredura aleatorizada) -- ver
-// half_open_should_recover() em shared/pairing.h.
+// half-open-handshake-recovery: sessoes provisorias seguidas sem nenhum
+// FragmentPacket que o escravo tolera antes de forcar a recuperacao.
 static const uint8_t HALF_OPEN_SESSIONS = 4;
 
 static const uint32_t HOP_START_DELAY_MS = 900;
@@ -353,10 +351,8 @@ struct __attribute__((packed)) FragmentPacket
     uint8_t payload_len;
     char payload[FRAGMENT_DATA_SIZE];
     uint32_t hop_counter; // adaptive-rendezvous: resync do contador de hop
-    // slot-phase-servo: posicao do MESTRE dentro do slot corrente (ms, 0..
-    // SLOT_MS-1) no instante do envio, ou PHASE_UNKNOWN (0xFF, shared/
-    // time_sync.h) no pacote de bootstrap. O escravo compara com a propria
-    // fase pra rastrear a deriva sub-slot dos cristais.
+    // slot-phase-servo: fase do mestre no slot (ms) no envio, ou PHASE_UNKNOWN
+    // (0xFF) no bootstrap.
     uint8_t slot_phase_ms;
 };
 
@@ -414,11 +410,8 @@ struct __attribute__((packed)) ControlAck
 static_assert(sizeof(LinkProbeV2) <= 32, "LinkProbeV2 excede 32 bytes do NRF24");
 static_assert(sizeof(LinkAckV2) <= 32, "LinkAckV2 excede 32 bytes do NRF24");
 static_assert(sizeof(FragmentPacket) <= 32, "FragmentPacket excede 32 bytes do NRF24");
-// slot-phase-servo: FragmentPacket cresceu de 30 para 31 bytes (slot_phase_ms).
-// O escravo distingue os pacotes por getDynamicPayloadSize() == sizeof(...)
-// (escravo/src/node.h), entao o tamanho novo nao pode colidir com nenhum
-// dos outros que ele recebe: Link{Probe,Ack}V2 = 8, FragmentAck = 6,
-// ControlSeed/Blacklist = 11, ControlAck = 5.
+// slot-phase-servo: o escravo distingue pacotes por sizeof, entao o
+// FragmentPacket (31 bytes com slot_phase_ms) nao pode colidir com os demais.
 static_assert(sizeof(FragmentPacket) == 31, "FragmentPacket mudou de tamanho -- reavaliar colisao de sizeof abaixo");
 static_assert(sizeof(FragmentPacket) != sizeof(ControlSeedPacket) &&
                   sizeof(FragmentPacket) != sizeof(ControlBlacklistPacket) &&

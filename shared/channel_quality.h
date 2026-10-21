@@ -1,21 +1,12 @@
 #ifndef CHANNEL_QUALITY_H
 #define CHANNEL_QUALITY_H
 
-// channel-quality-sensing (tarefa 2.1): qualidade por canal medida pelo
-// analisador, agnóstica à causa (jammer, Wi-Fi, outro enlace) -- ver
-// openspec/changes/channel-quality-sensing/design.md (D1). Lógica pura,
-// só inteiros, sem hardware nem Arduino, para ser testada em
-// env:native_test (mesmo padrão de shared/hopping.h).
-//
-// Entrada: a cada varredura completa do analisador, a ocupação de cada um
-// dos TABLE_SIZE canais de HOPPING_CHANNELS, 0..100 (% das amostras de
-// testCarrier() que acenderam -- é exatamente o valor da célula do
-// spectrum). Saída: máscara de 16 bits com os canais degradados, que o
-// mestre funde com a evidência do próprio enlace (update_channel_mask() em
-// hopping.h, parâmetro `sensor_degraded_mask`).
+// channel-quality-sensing: qualidade por canal medida pelo analisador,
+// agnóstica à causa (jammer, Wi-Fi...). Lógica pura (testada em native_test).
+// Entrada: ocupação 0..100 dos TABLE_SIZE canais a cada varredura (% de
+// testCarrier() acesos). Saída: máscara de canais degradados, fundida pelo
+// mestre em update_channel_mask() (`sensor_degraded_mask`).
 
-// Nos firmwares (ESP32/Arduino) usa os typedefs de Arduino.h; no ambiente de
-// testes nativo (env:native_test, sem framework Arduino) cai para <cstdint>.
 #ifdef ARDUINO
 #include <Arduino.h>
 #else
@@ -24,31 +15,22 @@
 
 #include "hopping.h"
 
-// Limiares escolhidos pela calibração offline de 2026-10-21 (design.md,
-// "Resultado da calibração 2026-10-21"; tools/validation/calibrate_chq.py).
-// Ocupação de canal limpo nunca passou de 15 (p99,9 = 11) e jammer forte
-// fica em 90-100, sem sobreposição; T_off = T_on/2 absorve quedas pontuais
-// de uma varredura do jammer sem perder o flag. A faixa moderada de Wi-Fi
-// (~10-30) NÃO é separável por ocupação -- fica para a evidência de ack do
-// enlace (fusão, D2/D4).
+// Limiares da calibração offline de 2026-10-21 (tools/validation/calibrate_chq.py):
+// canal limpo nunca passou de 15 e jammer forte fica em 90-100; T_off = T_on/2
+// absorve quedas pontuais do jammer. Wi-Fi moderado (~10-30) não é separável
+// por ocupação -- fica para a evidência de ack na fusão.
 static const uint8_t CHQ_WINDOW_SWEEPS = 10; // varreduras na janela (~9 s a ~0,9 s/varredura)
 static const uint8_t CHQ_T_ON = 30;          // média da janela >= T_on  -> degradado
 static const uint8_t CHQ_T_OFF = 15;         // média da janela <= T_off -> volta a utilizável
 
-// Piso de canais ativos usado na fusão (design.md D4 / spec "Guarda de
-// banda mínima"): update_channel_mask(..., min_active) devolve à máscara os
-// canais de melhor histórico até completar este número.
+// Piso de canais ativos na fusão (min_active em update_channel_mask()).
 static const uint8_t HOP_MIN_ACTIVE_CHANNELS = 4;
 
 struct ChannelQualityState
 {
-    // Janela deslizante por canal. `ring[ch]` guarda as últimas
-    // CHQ_WINDOW_SWEEPS ocupações do canal `ch` (índice de HOPPING_CHANNELS,
-    // não o número do canal RF). `head[ch]` é a PRÓXIMA posição a escrever:
-    // a cada push grava-se em ring[ch][head[ch]] e head avança módulo W.
-    // Enquanto count < W a posição ainda não foi usada (vale 0 após reset);
-    // com count == W a posição apontada por head é a amostra MAIS ANTIGA,
-    // que é subtraída de `sum` antes de ser sobrescrita.
+    // Janela deslizante por canal (índice de HOPPING_CHANNELS, não o canal RF).
+    // head[ch] é a próxima posição a escrever; com count == W ela guarda a
+    // amostra mais antiga, subtraída de sum antes de ser sobrescrita.
     uint8_t ring[TABLE_SIZE][CHQ_WINDOW_SWEEPS];
     uint16_t sum[TABLE_SIZE]; // soma da janela (máx. 10 * 100 = 1000 -> cabe em uint16_t)
     uint8_t head[TABLE_SIZE];
@@ -70,16 +52,12 @@ inline void chq_reset(ChannelQualityState &s)
 }
 
 /**
- * Empurra uma varredura (TABLE_SIZE valores de ocupação 0..100, na ordem de
- * HOPPING_CHANNELS) e reavalia a histerese de cada canal. Valores acima de
- * 100 são saturados em 100 (defesa contra entrada fora da faixa).
- *
- * Histerese só é avaliada com a janela CHEIA (count == W): antes disso o
- * canal fica utilizável, para uma única amostra alta na partida não
- * sinalizar. Com a janela cheia, média inteira = sum / W:
+ * Empurra uma varredura (ocupação 0..100 na ordem de HOPPING_CHANNELS; acima
+ * de 100 satura) e reavalia a histerese de cada canal. Só avalia com a janela
+ * cheia, para uma amostra alta na partida não sinalizar:
  *   utilizável --(média >= CHQ_T_ON)--> degradado
  *   degradado  --(média <= CHQ_T_OFF)--> utilizável
- *   entre T_off e T_on mantém o estado.
+ *   entre os dois limiares mantém o estado.
  */
 inline void chq_push_sweep(ChannelQualityState &s, const uint8_t occ[TABLE_SIZE])
 {
@@ -106,8 +84,7 @@ inline void chq_push_sweep(ChannelQualityState &s, const uint8_t occ[TABLE_SIZE]
     }
 }
 
-// Ocupação média atual do canal (0..100); 0 enquanto a janela está vazia.
-// Divide pelas amostras já presentes (telemetria `top=<canal:ocupação>`).
+// Ocupação média atual do canal (0..100); 0 com janela vazia (telemetria `top=`).
 inline uint8_t chq_mean(const ChannelQualityState &s, uint8_t ch)
 {
     if (ch >= TABLE_SIZE || s.count[ch] == 0)

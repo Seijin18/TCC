@@ -1,11 +1,9 @@
 #ifndef TIME_SYNC_H
 #define TIME_SYNC_H
 
-// slot-phase-servo: servo de fase de 1a ordem para o relogio de slots do
-// ESCRAVO. Logica pura (inteira, sem Arduino/RF24) -- testada em
-// env:native_test (test/test_time_sync/). O firmware so chama
-// phase_servo_update() a cada FragmentPacket valido e soma o retorno em
-// hop_start_at. Ver openspec/changes/slot-phase-servo/design.md.
+// slot-phase-servo: servo de fase de 1a ordem do relogio de slots do ESCRAVO.
+// Logica pura (testada em native_test); o firmware soma o retorno de
+// phase_servo_update() em hop_start_at a cada FragmentPacket valido.
 
 #ifdef ARDUINO
 #include <Arduino.h>
@@ -15,19 +13,14 @@
 
 #include "protocol.h" // SLOT_MS
 
-// Convencao de sinal (design D1/D3):
-//   e = fase_escravo - fase_mestre   [ms]
+// Sinal: e = fase_escravo - fase_mestre [ms], com
 //   fase_escravo = agora - (hop_start_at + master_slot * SLOT_MS)
 //   fase_mestre  = FragmentPacket.slot_phase_ms
-// e > 0: o relogio do escravo esta ADIANTADO (a fronteira de slot dele vem
-// antes da do mestre; os pacotes "chegam tarde" no slot dele). Somar +1 ms a
-// hop_start_at ATRASA a fronteira do escravo e REDUZ e em 1 ms. Logo o ajuste
-// devolvido por phase_servo_update() e somado a hop_start_at:
-//   hop_start_at += phase_servo_update(...)
+// e > 0: escravo adiantado. Somar +1 ms a hop_start_at atrasa a fronteira dele
+// e reduz e em 1 ms, entao: hop_start_at += phase_servo_update(...)
 
-// "Fase desconhecida" no campo slot_phase_ms (valores validos: 0..SLOT_MS-1):
-// o mestre manda isto no pacote de bootstrap, onde a ancora dele ainda nao
-// existe (e fixada so quando o ack chega). O escravo ignora a amostra.
+// slot_phase_ms desconhecido: o mestre manda no bootstrap (ancora ainda nao
+// fixada); o escravo ignora a amostra. Validos: 0..SLOT_MS-1.
 static const uint8_t PHASE_UNKNOWN = 0xFF;
 
 static const int32_t PHASE_FX = 64;           // escala de ponto fixo: 1 ms = 64
@@ -73,8 +66,7 @@ static inline bool phase_servo_target_ready(const PhaseServo &s)
     return s.target_n >= PHASE_TARGET_SAMPLES;
 }
 
-// Desvio filtrado em relacao ao alvo (ms, arredondado p/ zero) -- o "err" da
-// telemetria. 0 enquanto o alvo nao foi capturado.
+// Desvio filtrado em relacao ao alvo (ms) -- o "err" da telemetria.
 static inline int32_t phase_servo_err_ms(const PhaseServo &s)
 {
     if (!phase_servo_target_ready(s))
@@ -82,12 +74,10 @@ static inline int32_t phase_servo_err_ms(const PhaseServo &s)
     return (s.ema_fx - s.target_fx) / PHASE_FX;
 }
 
-// Alimenta UMA amostra de desvio de fase e devolve o ajuste (-1, 0 ou +1 ms)
-// a somar em hop_start_at. Devolve 0 se: servo desligado; amostra atipica
-// (|e| >= SLOT_MS/2 -- slip real de slot inteiro e tratado por
-// escravo_reanchor()); alvo ainda sendo capturado (as primeiras
-// PHASE_TARGET_SAMPLES amostras so acumulam); desvio filtrado < 1 ms; ou
-// limite de taxa (1 passo por PHASE_MIN_STEP_INTERVAL_MS).
+// Alimenta uma amostra de desvio e devolve o ajuste (-1, 0 ou +1 ms) para
+// hop_start_at. 0 se: desligado; |e| >= SLOT_MS/2 (slip de slot inteiro e
+// tratado por escravo_reanchor()); alvo em captura; desvio < 1 ms; ou
+// limite de taxa.
 static inline int8_t phase_servo_update(PhaseServo &s, int32_t e_ms, uint32_t now_ms)
 {
     if (!s.enabled)
@@ -107,8 +97,8 @@ static inline int8_t phase_servo_update(PhaseServo &s, int32_t e_ms, uint32_t no
         s.ema_fx += (e_fx - s.ema_fx) / 8;
     }
 
-    // Captura do alvo: media das primeiras N amostras apos o reset. Absorve a
-    // latencia fixa (ar + processamento) sem constante por placa (design D4).
+    // Alvo = media das primeiras N amostras: absorve a latencia fixa
+    // (ar + processamento) sem constante por placa.
     if (!phase_servo_target_ready(s))
     {
         s.target_sum += e_ms;
@@ -128,9 +118,8 @@ static inline int8_t phase_servo_update(PhaseServo &s, int32_t e_ms, uint32_t no
         return 0;
     }
 
-    // Guarda de divergencia (design D5): desvio filtrado acima de 10 ms mesmo
-    // depois de varias correcoes seguidas no mesmo sentido => o servo nao esta
-    // fechando a malha (erro de sinal ou fonte de erro que ele nao controla).
+    // Divergencia: desvio > 10 ms apos varias correcoes no mesmo sentido =>
+    // a malha nao fecha; desliga.
     if (dev_abs > PHASE_DIVERGE_MS * PHASE_FX && s.run_len >= PHASE_DIVERGE_RUN)
     {
         s.enabled = false;
@@ -142,8 +131,7 @@ static inline int8_t phase_servo_update(PhaseServo &s, int32_t e_ms, uint32_t no
         return 0;
 
     int8_t adj = dev_fx > 0 ? 1 : -1;
-    // Mover a ancora de adj ms muda e (futuro) de -adj: desloca o acumulador
-    // junto pra nao re-disparar de imediato.
+    // Desloca o acumulador junto com a ancora p/ nao re-disparar de imediato.
     s.ema_fx -= (int32_t)adj * PHASE_STEP_THRESHOLD_MS * PHASE_FX;
     s.last_adj_ms = now_ms;
     s.has_adj = true;
@@ -160,12 +148,11 @@ static inline int8_t phase_servo_update(PhaseServo &s, int32_t e_ms, uint32_t no
     return adj;
 }
 
-// Posicao do mestre dentro do slot corrente, em ms, saturada em SLOT_MS-1
-// (cabe em uint8_t; protege contra um envio que atravessou a fronteira).
+// Posicao do mestre no slot corrente (ms), saturada em SLOT_MS-1.
 static inline uint8_t phase_in_slot_ms(uint32_t now_ms, uint32_t anchor_ms, uint32_t slot)
 {
     uint32_t p = (uint32_t)(now_ms - (anchor_ms + slot * SLOT_MS));
-    if ((int32_t)p < 0) // relogio antes do inicio do slot (nao deveria ocorrer)
+    if ((int32_t)p < 0)
         return 0;
     return (uint8_t)(p > SLOT_MS - 1 ? SLOT_MS - 1 : p);
 }

@@ -1,13 +1,10 @@
 #ifndef PLACA_A_SHARED_STATE_H
 #define PLACA_A_SHARED_STATE_H
 
-// Máscara de canais degradados compartilhada entre a task do mestre (core do
-// loop() padrão do Arduino) e a task do analisador (core secundário), usada
-// no lugar do GPIO físico do cenário de 4 placas (channel-quality-sensing,
-// tarefas 3.1/3.3; antes era um bool de alerta -- spectrum-attack-classification).
-// Bit i = 1 -> HOPPING_CHANNELS[i] degradado. Um único escritor
-// (analisador), um único leitor (mestre), tipo primitivo (uint16_t alinhado
-// cabe num load/store atômico no Xtensa) — não precisa de mutex.
+// channel-quality-sensing: máscara de canais degradados (bit i = 1 ->
+// HOPPING_CHANNELS[i]) entre a task do mestre e a do analisador, no lugar do
+// GPIO do cenário de 4 placas. Um escritor, um leitor, uint16_t alinhado
+// (load/store atômico no Xtensa) — sem mutex.
 
 #include <Arduino.h>
 

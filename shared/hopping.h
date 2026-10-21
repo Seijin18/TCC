@@ -157,11 +157,7 @@ inline uint8_t get_next_active_channel(uint16_t seed, uint32_t counter, uint16_t
     return HOPPING_CHANNELS[active_indices[pos]];
 }
 
-/**
- * channel-quality-sensing (tarefa 2.2): número de bits em 1 de uma máscara
- * de 16 canais. Laço simples (sem __builtin_popcount) para ser idêntico no
- * ESP32 e no gcc nativo dos testes.
- */
+/** channel-quality-sensing: bits em 1 de uma máscara de 16 canais. */
 inline uint8_t mask_popcount16(uint16_t mask)
 {
     uint8_t n = 0;
@@ -203,39 +199,16 @@ inline uint8_t mask_popcount16(uint16_t mask)
  * `mestre/src/node.h` `note_candidate_result()`. Default `TABLE_SIZE`
  * preserva todas as chamadas existentes sem mudança.
  *
- * channel-quality-sensing (tarefa 2.2, fusão enlace + analisador): dois
- * parâmetros novos, ambos com default que preserva o comportamento antigo
- * bit a bit (chamadores existentes não mudam):
- *
- *  - `sensor_degraded_mask` (bit i = 1 -> o analisador marca
- *    HOPPING_CHANNELS[i] como degradado). Escolha de desenho: o sensor
- *    entra COMO UM SEGUNDO CRITÉRIO DE CANDIDATO dentro da própria função,
- *    em vez de um wrapper `fuse_channel_mask()` por fora, porque as três
- *    guardas (piso de canais ativos, timestamp só na transição, cooldown)
- *    precisam enxergar a união das duas fontes ao mesmo tempo -- um
- *    wrapper teria de duplicar a fase 2 para impedir que o cooldown
- *    reincluísse um canal que o sensor ainda segura, e duas cópias da
- *    mesma regra de reinclusão divergem com o tempo. Na fase 1 o canal é
- *    candidato a exclusão se `fail_count[i] >= fail_threshold` OU o bit do
- *    sensor está em 1. Na fase 2 um canal que o sensor ainda segura NÃO é
- *    reincluído pelo cooldown, e enquanto estiver excluído e segurado o
- *    `blacklisted_since[i]` é rearmado a cada chamada: o relógio do
- *    cooldown só começa a contar quando o sensor solta o canal (design.md
- *    D4: "a reinclusão continua respeitando o cooldown" depois que o
- *    analisador volta o canal para utilizável). Esse rearmo é a única
- *    exceção à regra "timestamp só na transição" e só vale para o sensor --
- *    para falha do enlace nada muda.
- *
- *  - `min_active` (piso de canais ativos). Default 1 = guarda antiga (só
- *    impede esvaziar tudo; se a exclusão zerasse a máscara, mantém a
- *    anterior inteira). Com `min_active > 1` (a fusão usa
- *    `HOP_MIN_ACTIVE_CHANNELS` = 4) e menos canais ativos que o piso após a
- *    fase 1, devolve à máscara, entre os recém-excluídos, os de melhor
- *    histórico até completar o piso: primeiro os que o sensor NÃO marca,
- *    depois os de menor `fail_count` (empate: menor índice). Os devolvidos
- *    não gravam timestamp (não houve transição). Se a máscara de entrada
- *    já tem menos canais que o piso, não há o que devolver e ela é mantida
- *    como está (a guarda nunca reinclui canal fora do cooldown).
+ * channel-quality-sensing: `sensor_degraded_mask` e `min_active` têm defaults
+ * que preservam o comportamento antigo.
+ *  - `sensor_degraded_mask` (bit i = analisador marca HOPPING_CHANNELS[i]):
+ *    segundo critério de exclusão na fase 1. Na fase 2 o canal segurado pelo
+ *    sensor não é reincluído e `blacklisted_since[i]` é rearmado a cada
+ *    chamada, então o cooldown só conta depois que o sensor solta o canal.
+ *  - `min_active` (piso de canais ativos; a fusão usa HOP_MIN_ACTIVE_CHANNELS).
+ *    Abaixo do piso após a fase 1, devolve os recém-excluídos de melhor
+ *    histórico (sensor não marca primeiro, depois menor `fail_count`, depois
+ *    menor índice), sem gravar timestamp.
  */
 inline uint16_t update_channel_mask(uint16_t mask, uint8_t fail_count[], uint32_t blacklisted_since[],
                                      uint32_t hop_counter, uint8_t fail_threshold, uint32_t recovery_cooldown_hops,
@@ -256,8 +229,7 @@ inline uint16_t update_channel_mask(uint16_t mask, uint8_t fail_count[], uint32_
     }
     else
     {
-        // channel-quality-sensing: piso de canais ativos (só com min_active > 1;
-        // com o default o ramo abaixo nunca roda e o comportamento é o antigo).
+        // channel-quality-sensing: piso de canais ativos (só com min_active > 1)
         while (min_active > 1 && mask_popcount16(candidate) < min_active)
         {
             int8_t best = -1;

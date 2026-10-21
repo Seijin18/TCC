@@ -89,12 +89,9 @@ static unsigned long g_pair_dwell_start = 0;
 // distinguir re-sonda da MESMA tentativa (re-ack) de uma sonda de uma
 // tentativa NOVA do mestre (adota outra sessao).
 static uint16_t g_session_nonce = 0;
-// half-open-handshake-recovery: sessoes provisorias SEGUIDAS com nonce NOVO
-// (ADOPT_NEW; re-ack da mesma sessao nao conta) que nunca chegaram a
-// confirmar um FragmentPacket. Ao atingir HALF_OPEN_SESSIONS
-// (half_open_should_recover(), shared/pairing.h) o escravo forca a
-// recuperacao -- ver escravo_half_open_recover(). Zerado ao confirmar o
-// enlace (CONFIRMED) e no reset por comando.
+// half-open-handshake-recovery: sessoes provisorias seguidas com nonce NOVO
+// (re-ack da mesma sessao nao conta) sem confirmar FragmentPacket. Ao atingir
+// HALF_OPEN_SESSIONS o escravo recupera (escravo_half_open_recover()).
 static uint8_t g_provisional_sessions_no_data = 0;
 // pairing-handshake-hardening (tarefa 3.7): comando de teste "drop_next_ack"
 // -- descarta (nao transmite) o proximo LinkAckV2 que seria enviado, em vez
@@ -151,11 +148,9 @@ static unsigned long g_last_valid_rx_ms = 0;
 // tempo. Resetado em reset_to_scanning().
 static bool g_time_synced = false;
 
-// slot-phase-servo: rastreia a fase sub-slot do relogio de slots em relacao
-// ao mestre (shared/time_sync.h, openspec/changes/slot-phase-servo). O alvo
-// do servo e capturado nos primeiros fragmentos depois do time_sync e o
-// estado e zerado em reset_to_scanning(). Os contadores abaixo so alimentam
-// a telemetria periodica `phase`.
+// slot-phase-servo: fase sub-slot do relogio em relacao ao mestre
+// (shared/time_sync.h). Zerado em reset_to_scanning(); os contadores so
+// alimentam a telemetria `phase`.
 static PhaseServo g_phase_servo;
 static const uint32_t PHASE_TLM_INTERVAL_MS = 5000;
 static unsigned long g_phase_tlm_last_ms = 0;
@@ -377,7 +372,7 @@ static void reset_to_scanning()
     hop_counter = 0;
     g_hops_since_rx = 0;
     g_time_synced = false; // time-slotted-hopping: re-sincroniza no próximo pareamento
-    phase_servo_reset(g_phase_servo); // slot-phase-servo: novo pareamento = novo alvo de fase
+    phase_servo_reset(g_phase_servo); // slot-phase-servo
     g_phase_tlm_n = 0;
     g_phase_tlm_adj = 0;
     // time-slotted-hopping: invalida o canal corrente. O bloco SCANNING troca o
@@ -412,30 +407,18 @@ static void reset_to_scanning()
     tlm_radio_regs("escravo", escravo_radio, "loss");
 }
 
-// half-open-handshake-recovery: watchdog do escravo. Chamado quando uma sessao
-// NOVA e adotada (SCANNING ou PROVISIONAL) e o contador de sessoes sem dado
-// atinge HALF_OPEN_SESSIONS. Imita o `reset` manual do escravo (unico que
-// recuperava o estado preso real): radio_reinit() completo + volta a varrer
-// de um indice de candidato e uma fase de dwell ALEATORIZADOS, pra quebrar
-// qualquer ressonancia de fase com a rotacao de acampamento do mestre.
-// O chamador deve dar `return` logo depois (a sessao abortada nao e
-// respondida nem anunciada como pair_ok).
+// half-open-handshake-recovery: watchdog do escravo, chamado quando o contador
+// de sessoes sem dado atinge HALF_OPEN_SESSIONS. Equivale ao `reset` manual,
+// com candidato e fase de dwell aleatorizados (quebra ressonancia com a
+// rotacao de acampamento do mestre). O chamador deve dar `return` em seguida.
 static void escravo_half_open_recover()
 {
     tlm_printf("escravo", "half_open", "sessions=%u", g_provisional_sessions_no_data);
     g_provisional_sessions_no_data = 0;
-    // Recuperacao IDENTICA ao `reset` manual do escravo (o unico que recuperava
-    // o estado preso real em bancada): mascara limpa + reset_to_scanning()
-    // COMPLETO. Um reset parcial (so g_link_state + contadores de ciclo)
-    // deixava current_channel, g_time_synced, os flags seed/mask-apply e o
-    // estado de estacionamento obsoletos -- em especial current_channel != 0xFF
-    // fazia o bootstrap pular o setChannel e o escravo escutar no canal errado
-    // (ver reset_to_scanning()): o watchdog disparava mas nao recuperava
-    // (cenario A, bateria 2026-10-21).
+    // Reset COMPLETO: um parcial deixava current_channel != 0xFF, o bootstrap
+    // pulava o setChannel e o escravo escutava no canal errado (bateria 2026-10-21).
     g_channel_mask = 0xFFFF;
     reset_to_scanning();
-    // Alem do reset, randomiza o ponto de partida da varredura pra quebrar
-    // qualquer ressonancia de fase com a rotacao de acampamento do mestre.
     g_pair_idx = (uint8_t)(esp_random() % PAIRING_CANDIDATE_COUNT);
     escravo_radio.setChannel(PAIRING_CANDIDATES[g_pair_idx]);
     g_pair_dwell_start = millis() - (unsigned long)(esp_random() % PAIR_DWELL_MS);
@@ -608,7 +591,7 @@ static void process_escravo_pending_requests()
         // manter consistente evita janela de discordância). Reset por jamming
         // (reset_to_scanning direto) preserva.
         g_channel_mask = 0xFFFF;
-        g_provisional_sessions_no_data = 0; // half-open-handshake-recovery: reset do operador comeca limpo
+        g_provisional_sessions_no_data = 0; // half-open-handshake-recovery
         reset_to_scanning();
     }
     if (g_escravo_pending_drop_next_ack)
@@ -880,9 +863,8 @@ static void escravo_loop()
                     }
                     else
                     {
-                        // half-open-handshake-recovery: toda adocao aqui e
-                        // sessao NOVA. Ao atingir o limiar, aborta esta
-                        // sessao (sem ack nem pair_ok) e recupera.
+                        // half-open-handshake-recovery: toda adocao aqui e sessao
+                        // NOVA; no limiar, aborta (sem ack nem pair_ok) e recupera.
                         g_provisional_sessions_no_data++;
                         if (half_open_should_recover(g_provisional_sessions_no_data, HALF_OPEN_SESSIONS))
                         {
@@ -975,8 +957,7 @@ static void escravo_loop()
                     else
                     {
                         bool is_new_session = (decision == PAIR_ADOPT_NEW);
-                        // half-open-handshake-recovery: so sessao NOVA conta;
-                        // re-ack da mesma sessao (PAIR_REACK) nao incrementa.
+                        // half-open-handshake-recovery: re-ack (PAIR_REACK) nao conta
                         if (is_new_session)
                         {
                             g_provisional_sessions_no_data++;
@@ -1123,8 +1104,7 @@ static void escravo_loop()
                         hop_counter = pkt.hop_counter;
                         g_time_synced = true;
                         g_last_valid_rx_ms = millis(); // arma o timer de perda só a partir do sync
-                        // slot-phase-servo: ancora recem-alinhada -- o alvo de fase
-                        // e capturado a partir dos proximos fragmentos.
+                        // slot-phase-servo: novo alvo de fase a partir dos proximos fragmentos
                         phase_servo_reset(g_phase_servo);
                         g_phase_tlm_last_ms = millis();
                         g_phase_tlm_n = 0;
@@ -1137,15 +1117,12 @@ static void escravo_loop()
                         escravo_reanchor(pkt.hop_counter);
                         if (slipped)
                         {
-                            // reancoragem de slot inteiro recoloca a fase em 0: o
-                            // alvo e o filtro antigos nao valem mais.
+                            // reancoragem de slot inteiro: alvo e filtro antigos invalidos
                             phase_servo_reset(g_phase_servo);
                         }
                         else if (pkt.slot_phase_ms != PHASE_UNKNOWN)
                         {
-                            // slot-phase-servo: e = fase do escravo - fase do mestre
-                            // (convencao de sinal em shared/time_sync.h); o ajuste
-                            // devolvido (-1/0/+1 ms) e somado a ancora.
+                            // slot-phase-servo: sinal de e em shared/time_sync.h
                             long fase_escravo = (long)(g_last_valid_rx_ms - (hop_start_at + (unsigned long)pkt.hop_counter * SLOT_MS));
                             long e = fase_escravo - (long)pkt.slot_phase_ms;
                             bool was_enabled = g_phase_servo.enabled;
@@ -1203,8 +1180,7 @@ static void escravo_loop()
                     }
 
                     // Prints adiados pra depois do ack.
-                    // slot-phase-servo: telemetria da fase a cada ~5 s; o
-                    // desligamento por divergencia e logado uma unica vez.
+                    // slot-phase-servo: telemetria a cada ~5 s; divergencia logada 1x
                     if (g_phase_servo.just_disabled)
                     {
                         g_phase_servo.just_disabled = false;
