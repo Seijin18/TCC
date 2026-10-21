@@ -6,7 +6,18 @@ verdade de contexto/dependências) — é a camada de "o que fazer agora, em que
 ordem" derivada dele. Atualizar esta lista conforme tasks forem fechadas ou
 changes forem arquivados.
 
-## Estado em 2026-10-21: três bugs encontrados, três propostas abertas
+## Estado em 2026-10-21: três bugs corrigidos, validados e ARQUIVADOS
+
+Arquivados em 2026-10-21: `slot-phase-servo`, `half-open-handshake-recovery`,
+`channel-quality-sensing` (os três abaixo, implementados + validados em
+bancada; novas specs `slot-phase-tracking` e `channel-quality-sensing`, e
+requisito novo em `clean-channel-rendezvous`). Resumo do que cada um entregou
+e das ressalvas honestas está no `tasks.md` arquivado de cada um. Destaque:
+o #3 (ocupação) NÃO superou a blacklist reativa do mestre para jammer forte
+— seu valor real é consertar o alerta travado pelo Wi-Fi + observabilidade +
+fusão complementar.
+
+### Histórico (como foram encontrados)
 
 Testes de 2026-10-21 (placas reconectadas, firmware regravado):
 
