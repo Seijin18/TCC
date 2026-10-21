@@ -37,6 +37,39 @@ Uma explicação anterior ("conjuntos de candidatos disjuntos") foi
 descartada: o escravo recebia as sondas do mestre em ~0,1 s depois de cada
 novo acampamento, logo estavam no mesmo canal.
 
+## Verificação 2026-10-21 (CORRIGE a causa; a correção continua válida)
+
+Bateria diagnóstica (`diag_battery.py t1-run`, 20 ciclos: 10 re-pareamentos
+simples + 10 re-pareamentos após perda forçada com **mitigação desligada**):
+**0 ocorrências do estado preso** — todo re-pareamento subiu em 3,3–3,7 s.
+Ou seja, o bug **não** é do re-pareamento comum nem da perda sob jamming com
+mitigação desligada.
+
+A ocorrência real (pré-existente na bancada, presa ~2,8 h) foi capturada com
+a gênese (`session-20261021-062819`): **mitigação LIGADA** → o mestre agenda
+um rekey de blacklist (`mask=0xFFDB`) → **`rekey_failed` 3 vezes seguidas**
+(cada uma reagenda `apply`) → `loss_of_sync` nos dois lados → aí instala o
+pareamento meio-aberto.
+
+Isolamento (o ponto que **refuta** minha hipótese anterior de "receptor do
+mestre surdo"): **resetar SÓ o escravo (`placa_b reset`) recuperou o enlace
+em 3,2 s** (passo c); não precisou resetar o mestre. Logo o lado preso é o
+**escravo** — um estado de máquina ruim (fica em `pair_ok`/re-ack sem os
+dados confirmarem), não o receptor do mestre. Correções à proposta:
+
+1. **Gatilho** = caminho de controle (rekey/blacklist) falhando sob
+   mitigação, provavelmente porque o pacote de controle (enviado no lugar
+   do fragmento, precisa de ack dentro do slot) falha quando a
+   sobreposição de slot já está encolhida pela deriva (#2). Então **#2 é
+   provável contribuinte de #1** — corrigir a deriva deve reduzir a
+   frequência deste bug.
+2. **Lado que trava** = escravo. O watchdog do escravo (abaixo) é a correção
+   principal e está **validado** pelo resultado do reset isolado; o watchdog
+   do mestre vira rede de segurança secundária.
+3. A tarefa 1 (confirmar o lado surdo) está **resolvida** pelo isolamento;
+   substituída por "reproduzir com mitigação LIGADA + falha de rekey e
+   medir o tempo de auto-recuperação do watchdog do escravo".
+
 ## What Changes
 
 - **Confirmar o lado surdo antes da correção definitiva**: reproduzir o

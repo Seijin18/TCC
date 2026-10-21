@@ -22,6 +22,28 @@ canal individualmente e sinalizar por limiar, **independentemente da
 causa**, já que jamming e congestionamento comprometem a comunicação do
 mesmo jeito.
 
+## Verificação 2026-10-21 (CONFIRMA a direção; CORRIGE a causa do não-alerta)
+
+Bateria diagnóstica (`diag_battery.py t3-offline`/`t3-run`):
+
+- **Causa real do "não alerta" (corrige o parágrafo acima)**: o alerta
+  **não** fica sem fechar o streak. Ele **travou LIGADO antes da bateria**
+  (último `alert_on` às 09:12:28 com `mask=0x0004` = ch34/Wi-Fi, sem nenhum
+  `alert_off` depois) e ficou ligado a sessão inteira. Como o alerta é por
+  **borda** e é um **booleano global**, um ch34 de Wi-Fi já o mantém ligado
+  e nenhuma borda nova aparece quando o jammer chega — exatamente o que a
+  mudança para qualidade **por canal** resolve. `chmap count ≥ 1` em todos
+  os ciclos de todas as fases.
+- **Confirma a direção (ocupação prediz perda, agnóstico à causa)**: com
+  portadora travada no ch70 a atividade do analisador saltou de 0,45 para
+  **97,0** e o miss do mestre no ch70 para **78%**; correlação
+  ocupação-vs-miss nos 16 canais = **0,93** na fase com jammer, **0,70–0,75**
+  nas fases só com Wi-Fi (dominada por ch34/ch46). Ou seja, um limiar de
+  ocupação separa canal bom de ruim tanto para jammer quanto para Wi-Fi.
+- **A blacklist reativa do mestre já funciona**: na fase `hold ch70` o mestre
+  baniu o ch70 sozinho (`mask=0xFFDB`) pela própria evidência de ack. Confirma
+  o papel do analisador como fonte **proativa** fundida, não substituta.
+
 ## What Changes
 
 - **Analisador vira medidor de qualidade por canal**: para cada canal da

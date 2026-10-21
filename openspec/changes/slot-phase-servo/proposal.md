@@ -31,6 +31,22 @@ Consequência para a avaliação: toda medição com mais de ~2 min sem
 re-pareamento mistura o efeito testado com esse decaimento — inclusive o
 "hold → 51% de perda" de 2026-09-26.
 
+## Verificação 2026-10-21 (CONFIRMA esta proposta)
+
+Bateria diagnóstica (`tools/validation/diag_battery.py`,
+`logs/diag-t2-offline-*`/`diag-t2-run-*`): regressão de `t_ms` de
+dispositivo vs. epoch do host, por janela entre re-pareamentos. Taxa
+relativa mestre−escravo = **−62 a −78 ppm** (consistente entre a sessão
+antiga e um soak novo de 10 min; estimativa por `msg_done` concorda: −62,8
+vs −62,7). O tempo previsto para o offset acumulado chegar a 30 ms (~478 s a
+62 ppm) bate com o `loss_of_sync` observado (443–452 s), e o throughput já
+cai de ~105 para ~40 fps antes disso (sobreposição encolhendo). **0 eventos
+`reanchor`** em todo o intervalo — confirma que o caminho de correção atual
+nunca dispara sob deriva gradual. Ajuste à proposta: a deriva é ~60–78 ppm
+(não "dezenas") e varia entre janelas, então o servo precisa ser adaptativo
+— o servo de 1ª ordem com passo de 1 ms a cada ≥200 ms corrige até 5 ms/s,
+folgado para os ~0,062 ms/s da deriva.
+
 ## What Changes
 
 - `FragmentPacket` ganha `uint8_t slot_phase_ms`: a posição do mestre
