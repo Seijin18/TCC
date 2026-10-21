@@ -10,22 +10,22 @@ desnecessários pela correção do #2).
 
 ## 1. Lógica pura
 
-- [ ] 1.1 `shared/pairing.h`: função pura
+- [x] 1.1 `shared/pairing.h`: função pura
       `half_open_should_recover(sessions_without_data, threshold)` (+ qualquer
       estado de contagem que faça sentido isolar) e testes em
       `test/test_pairing`.
 
 ## 2. Escravo
 
-- [ ] 2.1 Contar sessões provisórias consecutivas com nonce novo que nunca
+- [x] 2.1 Contar sessões provisórias consecutivas com nonce novo que nunca
       confirmam `FragmentPacket`; zerar ao confirmar (CONFIRMED) e em
       `reset_to_scanning` por comando.
-- [ ] 2.2 Ao atingir `HALF_OPEN_SESSIONS` (constante em `shared/protocol.h`):
+- [x] 2.2 Ao atingir `HALF_OPEN_SESSIONS` (constante em `shared/protocol.h`):
       emitir `e=half_open`, `radio_reinit()` completo, voltar a varrer a
       partir de um índice de candidato / fase de dwell **aleatorizados**
       (quebra ressonância de fase com o acampamento do mestre, imitando o
       `reset` manual que recuperava o estado preso).
-- [ ] 2.3 Logger: registrar `half_open` em `state.json`/`events.log`.
+- [x] 2.3 Logger: registrar `half_open` em `state.json`/`events.log`.
 
 ## 3. Validação em bancada
 

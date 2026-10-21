@@ -76,4 +76,17 @@ inline bool pair_accept_ack_mestre(uint16_t expected_nonce, uint16_t expected_se
     return ack_ver == PAIRING_PROTO_VER && ack_nonce == expected_nonce && ack_seed == expected_seed;
 }
 
+/**
+ * half-open-handshake-recovery: decide se o escravo deve forcar a
+ * recuperacao de um handshake meio-aberto -- `sessions_without_data` sessoes
+ * provisorias seguidas (nonces novos) sem nenhum FragmentPacket confirmando o
+ * enlace. A recuperacao dispara ao atingir (>=) o limiar
+ * (HALF_OPEN_SESSIONS em shared/protocol.h). Quem guarda o contador e zera
+ * ao confirmar o enlace e escravo/src/node.h.
+ */
+inline bool half_open_should_recover(uint8_t sessions_without_data, uint8_t threshold)
+{
+    return sessions_without_data >= threshold;
+}
+
 #endif // PAIRING_H

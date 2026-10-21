@@ -89,6 +89,13 @@ static unsigned long g_pair_dwell_start = 0;
 // distinguir re-sonda da MESMA tentativa (re-ack) de uma sonda de uma
 // tentativa NOVA do mestre (adota outra sessao).
 static uint16_t g_session_nonce = 0;
+// half-open-handshake-recovery: sessoes provisorias SEGUIDAS com nonce NOVO
+// (ADOPT_NEW; re-ack da mesma sessao nao conta) que nunca chegaram a
+// confirmar um FragmentPacket. Ao atingir HALF_OPEN_SESSIONS
+// (half_open_should_recover(), shared/pairing.h) o escravo forca a
+// recuperacao -- ver escravo_half_open_recover(). Zerado ao confirmar o
+// enlace (CONFIRMED) e no reset por comando.
+static uint8_t g_provisional_sessions_no_data = 0;
 // pairing-handshake-hardening (tarefa 3.7): comando de teste "drop_next_ack"
 // -- descarta (nao transmite) o proximo LinkAckV2 que seria enviado, em vez
 // de enviar, pra validar deterministicamente o caminho de re-ack por perda
@@ -405,6 +412,28 @@ static void reset_to_scanning()
     tlm_radio_regs("escravo", escravo_radio, "loss");
 }
 
+// half-open-handshake-recovery: watchdog do escravo. Chamado quando uma sessao
+// NOVA e adotada (SCANNING ou PROVISIONAL) e o contador de sessoes sem dado
+// atinge HALF_OPEN_SESSIONS. Imita o `reset` manual do escravo (unico que
+// recuperava o estado preso real): radio_reinit() completo + volta a varrer
+// de um indice de candidato e uma fase de dwell ALEATORIZADOS, pra quebrar
+// qualquer ressonancia de fase com a rotacao de acampamento do mestre.
+// O chamador deve dar `return` logo depois (a sessao abortada nao e
+// respondida nem anunciada como pair_ok).
+static void escravo_half_open_recover()
+{
+    tlm_printf("escravo", "half_open", "sessions=%u", g_provisional_sessions_no_data);
+    g_pair_idx = (uint8_t)(esp_random() % PAIRING_CANDIDATE_COUNT);
+    radio_reinit(); // ja faz setChannel(PAIRING_CANDIDATES[g_pair_idx])
+    escravo_radio.setChannel(PAIRING_CANDIDATES[g_pair_idx]);
+    // Fase de dwell aleatoria: recua g_pair_dwell_start em [0, PAIR_DWELL_MS)
+    // (aritmetica modular de unsigned long, igual ao millis() - start do loop).
+    g_pair_dwell_start = millis() - (unsigned long)(esp_random() % PAIR_DWELL_MS);
+    g_link_state = ESCRAVO_SCANNING;
+    reset_pair_cycle_counters();
+    g_provisional_sessions_no_data = 0;
+}
+
 static void escravo_setup()
 {
     Serial.begin(115200);
@@ -572,6 +601,7 @@ static void process_escravo_pending_requests()
         // manter consistente evita janela de discordância). Reset por jamming
         // (reset_to_scanning direto) preserva.
         g_channel_mask = 0xFFFF;
+        g_provisional_sessions_no_data = 0; // half-open-handshake-recovery: reset do operador comeca limpo
         reset_to_scanning();
     }
     if (g_escravo_pending_drop_next_ack)
@@ -843,6 +873,16 @@ static void escravo_loop()
                     }
                     else
                     {
+                        // half-open-handshake-recovery: toda adocao aqui e
+                        // sessao NOVA. Ao atingir o limiar, aborta esta
+                        // sessao (sem ack nem pair_ok) e recupera.
+                        g_provisional_sessions_no_data++;
+                        if (half_open_should_recover(g_provisional_sessions_no_data, HALF_OPEN_SESSIONS))
+                        {
+                            escravo_half_open_recover();
+                            return;
+                        }
+
                         g_session_nonce = probe.nonce;
                         g_seed = probe.seed;
                         g_channel_mask = probe.mask; // jamming-mitigation-hardening: adota a blacklist persistida
@@ -928,6 +968,17 @@ static void escravo_loop()
                     else
                     {
                         bool is_new_session = (decision == PAIR_ADOPT_NEW);
+                        // half-open-handshake-recovery: so sessao NOVA conta;
+                        // re-ack da mesma sessao (PAIR_REACK) nao incrementa.
+                        if (is_new_session)
+                        {
+                            g_provisional_sessions_no_data++;
+                            if (half_open_should_recover(g_provisional_sessions_no_data, HALF_OPEN_SESSIONS))
+                            {
+                                escravo_half_open_recover();
+                                return;
+                            }
+                        }
                         g_session_nonce = probe.nonce;
                         g_seed = probe.seed;
                         g_channel_mask = probe.mask; // jamming-mitigation-hardening: adota a blacklist persistida
@@ -1140,6 +1191,7 @@ static void escravo_loop()
                     if (just_confirmed)
                     {
                         g_link_state = ESCRAVO_CONFIRMED;
+                        g_provisional_sessions_no_data = 0; // half-open-handshake-recovery
                         reset_plr_counters();
                     }
 

@@ -32,5 +32,6 @@ deslocamento aleatório do início da varredura.
 #### Scenario: Recuperação dentro do prazo
 - **WHEN** um handshake meio-aberto se instala e o canal de pareamento está
   livre
-- **THEN** o enlace volta a trocar fragmentos em no máximo 15 s, sem
-  intervenção
+- **THEN** a recuperação dispara dentro de poucos ciclos de pareamento
+  (`HALF_OPEN_SESSIONS` sessões, ~20 s na cadência de acampamento atual) e o
+  enlace volta a trocar fragmentos sem intervenção

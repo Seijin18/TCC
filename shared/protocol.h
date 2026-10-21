@@ -156,6 +156,11 @@ static const uint8_t PAIR_FAIL_THRESHOLD = 3;
 // Em "rounds" de seleção de candidato (não hops, que ainda não existem
 // antes de parear) -- ver g_pair_round em mestre/src/node.h.
 static const uint32_t PAIR_RECOVERY_ROUNDS = 12;
+// half-open-handshake-recovery: quantas sessoes provisorias SEGUIDAS (nonces
+// novos) sem nenhuma confirmacao por FragmentPacket o escravo tolera antes de
+// forcar a recuperacao (radio_reinit() + varredura aleatorizada) -- ver
+// half_open_should_recover() em shared/pairing.h.
+static const uint8_t HALF_OPEN_SESSIONS = 4;
 
 static const uint32_t HOP_START_DELAY_MS = 900;
 

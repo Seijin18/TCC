@@ -105,6 +105,36 @@ static void test_reject_ack_wrong_nonce_and_seed(void)
     TEST_ASSERT_FALSE(ok);
 }
 
+// --- half_open_should_recover ---------------------------------------------
+
+static void test_half_open_below_threshold_does_not_recover(void)
+{
+    TEST_ASSERT_FALSE(half_open_should_recover(0, HALF_OPEN_SESSIONS));
+    TEST_ASSERT_FALSE(half_open_should_recover(1, HALF_OPEN_SESSIONS));
+    TEST_ASSERT_FALSE(half_open_should_recover(HALF_OPEN_SESSIONS - 1, HALF_OPEN_SESSIONS));
+}
+
+static void test_half_open_at_threshold_recovers(void)
+{
+    TEST_ASSERT_TRUE(half_open_should_recover(HALF_OPEN_SESSIONS, HALF_OPEN_SESSIONS));
+}
+
+static void test_half_open_above_threshold_recovers(void)
+{
+    TEST_ASSERT_TRUE(half_open_should_recover(HALF_OPEN_SESSIONS + 1, HALF_OPEN_SESSIONS));
+    TEST_ASSERT_TRUE(half_open_should_recover(255, HALF_OPEN_SESSIONS));
+}
+
+static void test_half_open_boundary_with_arbitrary_threshold(void)
+{
+    // Fronteira independente da constante: limiar 1 dispara na primeira
+    // sessao; limiar 3 so na terceira.
+    TEST_ASSERT_FALSE(half_open_should_recover(0, 1));
+    TEST_ASSERT_TRUE(half_open_should_recover(1, 1));
+    TEST_ASSERT_FALSE(half_open_should_recover(2, 3));
+    TEST_ASSERT_TRUE(half_open_should_recover(3, 3));
+}
+
 int main(int argc, char **argv)
 {
     UNITY_BEGIN();
@@ -120,5 +150,9 @@ int main(int argc, char **argv)
     RUN_TEST(test_reject_ack_wrong_version);
     RUN_TEST(test_reject_ack_divergent_seed);
     RUN_TEST(test_reject_ack_wrong_nonce_and_seed);
+    RUN_TEST(test_half_open_below_threshold_does_not_recover);
+    RUN_TEST(test_half_open_at_threshold_recovers);
+    RUN_TEST(test_half_open_above_threshold_recovers);
+    RUN_TEST(test_half_open_boundary_with_arbitrary_threshold);
     return UNITY_END();
 }

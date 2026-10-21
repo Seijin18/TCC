@@ -138,6 +138,10 @@ class StateStore:
             elif event == "loss_of_sync":
                 node["link"] = False
                 node["confirmed"] = False
+            elif event == "half_open":
+                # half-open-handshake-recovery: watchdog do escravo forcou
+                # reinit + varredura aleatorizada (sessions=N sem confirmar).
+                node["last_half_open"] = fields
             elif event == "pair_timeout":
                 # Achado de bancada 2026-09-24: LINK_ACK do escravo sem
                 # confirmacao real de entrega -- ver SEED_WAIT_TIMEOUT_MS
