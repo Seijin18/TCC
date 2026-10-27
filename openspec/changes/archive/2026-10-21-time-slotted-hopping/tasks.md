@@ -62,7 +62,7 @@ antes de receber (corrigido: gated em `g_time_synced`).
 **Soak sem jammer** (`session-20260926-001430`, ~145 s):
 - **0 `loss_of_sync`, 0 reanchor (slips)** — o relógio NUNCA derivou um slot
   inteiro em 2,4 min (confirma a matemática de deriva: ~µs/s).
-- Miss estável 1-6% (mediana 2-3%) — vs 4-49% do por-evento.
+- Miss estável em cerca de 1% (mestre 1,0%; PLR do escravo 0,3-1,7% por janela) — vs 4-49% do por-evento. (Corrigido em 2026-10-27: o "1-6% (mediana 2-3%)" original não reproduz ao recontar o jsonl.)
 - Cadência de slot PERFEITA: 333 slots/10 s = 30 ms/slot exato.
 - ack latência p50=3 ms, p90=19 ms, max=20 ms.
 - ~19 msg/s (pipeline de fragmentos por slot limpo) = ~4× o baseline antigo.
